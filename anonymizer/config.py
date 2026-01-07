@@ -18,7 +18,7 @@ class AnonymizerConfig:
     """Configuration for the anonymization system."""
 
     # LLM Configuration
-    model_name: str = "accounts/fireworks/models/llama-v3p2-11b-vision-instruct"
+    model_name: str = "gpt-4o-mini"
     temperature: float = 0.0
 
     # Input/Output directories
@@ -29,20 +29,34 @@ class AnonymizerConfig:
     # Maximum dimension for vision model input (1024 for Mistral, 2000 for GPT-4 Vision)
     max_image_dimension: int = 1024
 
-    # Fireworks API Configuration
-    fireworks_api_key: Optional[str] = None
-    fireworks_base_url: str = "https://api.fireworks.ai/inference/v1"
+    # Azure OpenAI Configuration
+    azure_endpoint: Optional[str] = None
+    azure_api_key: Optional[str] = None
+    azure_api_version: str = "2024-08-01-preview"
+    azure_deployment_name: Optional[str] = None
 
     def __post_init__(self):
-        """Load Fireworks configuration from environment if not provided."""
-        if self.fireworks_api_key is None:
-            self.fireworks_api_key = os.getenv("FIREWORKS_API_KEY")
+        """Load Azure configuration from environment if not provided."""
+        if self.azure_endpoint is None:
+            self.azure_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
 
-        # Load model name from environment if set
-        env_model_name = os.getenv("FIREWORKS_MODEL_NAME")
-        if env_model_name:
-            self.model_name = env_model_name
+        if self.azure_api_key is None:
+            self.azure_api_key = os.getenv("AZURE_OPENAI_API_KEY")
+
+        if self.azure_deployment_name is None:
+            self.azure_deployment_name = os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME")
+
+        # Load API version from environment if set
+        env_api_version = os.getenv("AZURE_OPENAI_API_VERSION")
+        if env_api_version:
+            self.azure_api_version = env_api_version
 
         # Validate required fields
-        if not self.fireworks_api_key:
-            raise ValueError("FIREWORKS_API_KEY must be set in environment or config")
+        if not self.azure_endpoint:
+            raise ValueError("AZURE_OPENAI_ENDPOINT must be set in environment or config")
+
+        if not self.azure_api_key:
+            raise ValueError("AZURE_OPENAI_API_KEY must be set in environment or config")
+
+        if not self.azure_deployment_name:
+            raise ValueError("AZURE_OPENAI_DEPLOYMENT_NAME must be set in environment or config")

@@ -11,13 +11,12 @@ from datetime import datetime
 from typing import List, Dict, Any
 
 try:
-    import pytesseract
-    from pytesseract import Output
-    PYTESSERACT_AVAILABLE = True
+    import easyocr
+    EASYOCR_AVAILABLE = True
 except ImportError:
-    PYTESSERACT_AVAILABLE = False
+    EASYOCR_AVAILABLE = False
 
-from langchain_openai import ChatOpenAI
+from langchain_openai import AzureChatOpenAI
 from langchain_core.messages import HumanMessage
 from pydantic import BaseModel, Field
 
@@ -32,12 +31,17 @@ class OCRText(BaseModel):
     bbox: BoundingBox
 
 
+class PIITextItem(BaseModel):
+    """A single PII text item."""
+    text: str = Field(description="The exact matching text from OCR")
+    type: str = Field(description="PII category (name, date_of_birth, id_number, address, phone, email)")
+
+
 class PIIClassificationResult(BaseModel):
     """Result of PII classification for OCR text."""
 
-    pii_texts: List[Dict[str, str]] = Field(
-        default_factory=list,
-        description="List of texts that contain PII with their types. Each item should have 'text' (exact matching text from OCR) and 'type' (PII category)"
+    pii_texts: List[PIITextItem] = Field(
+        description="List of texts that contain PII with their types"
     )
 
 
@@ -59,10 +63,11 @@ class PNGOCRProcessor(FileProcessor):
         self.reader = easyocr.Reader(['en'], gpu=False)
 
         # Initialize LLM for PII classification
-        self.llm = ChatOpenAI(
-            model=config.model_name,
-            api_key=config.fireworks_api_key,
-            base_url=config.fireworks_base_url,
+        self.llm = AzureChatOpenAI(
+            azure_deployment=config.azure_deployment_name,
+            azure_endpoint=config.azure_endpoint,
+            api_key=config.azure_api_key,
+            api_version=config.azure_api_version,
             temperature=config.temperature,
         ).with_structured_output(PIIClassificationResult)
 
@@ -204,8 +209,8 @@ Only include texts that actually contain PII. If a text is just a medical term o
             # Match classified PII back to OCR results
             pii_elements = []
             for pii_text in classification.pii_texts:
-                text_to_find = pii_text["text"]
-                pii_type = pii_text["type"]
+                text_to_find = pii_text.text
+                pii_type = pii_text.type
 
                 # Find matching OCR text
                 for ocr in ocr_texts:
@@ -252,12 +257,21 @@ Only include texts that actually contain PII. If a text is just a medical term o
         """
         draw = ImageDraw.Draw(image)
 
+        # Add padding to ensure complete coverage (in pixels)
+        padding = 5
+
         for element in pii_elements:
             bbox = element.bbox
             if bbox.width > 0 and bbox.height > 0:
+                # Expand bbox with padding
+                x1 = max(0, bbox.x - padding)
+                y1 = max(0, bbox.y - padding)
+                x2 = bbox.x + bbox.width + padding
+                y2 = bbox.y + bbox.height + padding
+
                 # Draw black rectangle
                 draw.rectangle(
-                    [bbox.x, bbox.y, bbox.x + bbox.width, bbox.y + bbox.height],
+                    [x1, y1, x2, y2],
                     fill="black",
                     outline="black",
                 )

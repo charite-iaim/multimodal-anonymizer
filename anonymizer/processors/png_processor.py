@@ -9,7 +9,7 @@ from pathlib import Path
 from PIL import Image, ImageDraw
 from datetime import datetime
 
-from langchain_openai import ChatOpenAI
+from langchain_openai import AzureChatOpenAI
 from langchain_core.messages import HumanMessage
 
 from ..base_processor import FileProcessor
@@ -21,12 +21,13 @@ class PNGProcessor(FileProcessor):
     """Processor for PNG images using vision LLM."""
 
     def __init__(self, config: AnonymizerConfig):
-        """Initialize PNG processor with Fireworks vision-capable LLM."""
+        """Initialize PNG processor with Azure vision-capable LLM."""
         super().__init__(config)
-        self.llm = ChatOpenAI(
-            model=config.model_name,
-            api_key=config.fireworks_api_key,
-            base_url=config.fireworks_base_url,
+        self.llm = AzureChatOpenAI(
+            azure_deployment=config.azure_deployment_name,
+            azure_endpoint=config.azure_endpoint,
+            api_key=config.azure_api_key,
+            api_version=config.azure_api_version,
             temperature=config.temperature,
         ).with_structured_output(PIIDetectionResult)
 

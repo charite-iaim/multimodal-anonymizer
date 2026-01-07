@@ -7,7 +7,7 @@ import argparse
 from pathlib import Path
 from typing import List
 
-from anonymizer import AnonymizerConfig, PNGProcessor, PNGOCRProcessor
+from anonymizer import AnonymizerConfig, PNGProcessor, PNGOCRProcessor, CSVProcessor
 
 
 def get_processor(file_path: Path, config: AnonymizerConfig, use_ocr: bool = False):
@@ -17,7 +17,7 @@ def get_processor(file_path: Path, config: AnonymizerConfig, use_ocr: bool = Fal
     Args:
         file_path: Path to the file
         config: Anonymizer configuration
-        use_ocr: If True, use OCR-based processor; otherwise use vision-based processor
+        use_ocr: If True, use OCR-based processor for images; otherwise use vision-based processor
 
     Returns:
         FileProcessor instance or None
@@ -25,10 +25,12 @@ def get_processor(file_path: Path, config: AnonymizerConfig, use_ocr: bool = Fal
     if use_ocr:
         processors = [
             PNGOCRProcessor(config),
+            CSVProcessor(config),
         ]
     else:
         processors = [
             PNGProcessor(config),
+            CSVProcessor(config),
         ]
 
     for processor in processors:
