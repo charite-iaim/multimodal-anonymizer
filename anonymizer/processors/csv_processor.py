@@ -17,17 +17,11 @@ from ..base_processor import FileProcessor
 from ..config import AnonymizerConfig
 
 
-class PHISpan(BaseModel):
-    """A span of PHI text to be redacted."""
-    text: str = Field(description="The exact PHI text to redact")
-    type: str = Field(description="Type of PII (name, date, address, id, phone, email)")
-
-
 class FieldAnonymization(BaseModel):
     """Anonymization result for a single cell."""
     row_index: int = Field(description="Row index (0-based, excluding header)")
     column_name: str = Field(description="Column name")
-    phi_spans: List[PHISpan] = Field(description="List of PHI text spans found in this cell")
+    anonymized_value: str = Field(description="The complete cell content with all PHI replaced by asterisks")
 
 
 class CSVAnonymizationResult(BaseModel):
@@ -163,15 +157,15 @@ class CSVProcessor(FileProcessor):
         # Create a formatted representation of the CSV
         csv_preview = self._format_csv_for_llm(rows[:max_rows_to_send], headers)
 
-        prompt = f"""Analyze this CSV data from a medical discharge note and identify all Personal Identifiable Information (PII) that needs to be redacted.
+        prompt = f"""Analyze this CSV data from a medical discharge note and anonymize all Personal Identifiable Information (PII) by replacing each PHI character with an asterisk (*).
 
 CSV Data (showing {max_rows_to_send} of {len(rows)} rows):
 {csv_preview}
 
-PII categories to identify:
+PII categories to redact:
 - name: Patient names, physician names, doctor names, family member names
 - date: Dates (dates of birth, admission dates, discharge dates, specific dates in format YYYY-MM-DD or similar)
-- ages: Patient ages
+- ages: Patient ages (e.g., "64")
 - address: Physical addresses, street addresses, facility names, location names
 - id: Patient IDs, medical record numbers, unit numbers, any numeric identifiers
 - phone: Phone numbers
@@ -180,26 +174,30 @@ PII categories to identify:
 
 Instructions:
 1. Examine each cell in the CSV data
-2. Identify ALL specific PHI text spans in each cell
-3. For each PHI text span, provide the EXACT text as it appears
+2. For each cell containing PHI, replace EVERY CHARACTER of the PHI text (including spaces) with an asterisk (*)
+3. Return the complete cell content with PHI replaced by asterisks
+4. Keep all other content unchanged
+
+Redaction examples:
+- "Emily Carter" → "************" (12 asterisks)
+- "2140-09-28" → "**********" (10 asterisks)
+- "64" → "**" (2 asterisks)
+- "617-555-3942" → "************" (12 asterisks)
 
 For each cell containing PHI, provide:
 - row_index: The row number (0-based, excluding header row)
 - column_name: The column name
-- phi_spans: List of PHI text spans found, where each span contains:
-  - text: The EXACT PHI text to redact (e.g., "Emily Carter", "2140-09-28", "5837209")
-  - type: The PII category (name, date, address, id, phone, email, ages)
+- anonymized_value: The COMPLETE cell content with ALL PHI replaced by asterisks
 
 CRITICAL:
-- Provide the EXACT text for each PHI span as it appears in the cell
-- Include ALL PHI occurrences in each cell
-- Be precise with the text matching
-- Only include cells that actually contain PHI (do not include cells with general medical information, medications, procedures, etc.)
+- Replace EVERY character (including spaces, hyphens, etc.) in PHI with an asterisk
+- Return the COMPLETE cell content, not truncated
+- Only include cells that contain PHI (skip cells with only medical info, medications, procedures, etc.)
+- Preserve all non-PHI text exactly as it appears
 
-Examples:
-- If you see "Name: Emily Carter", the phi_span text should be "Emily Carter" (not "Name: Emily Carter")
-- If you see "DOB: 2140-09-28", the phi_span text should be "2140-09-28"
-- If you see "ID: 5837209", the phi_span text should be "5837209"
+Example:
+Original: "Name:  Emily Carter                     Unit No:   5837209"
+Anonymized: "Name:  ************                     Unit No:   *******"
 """
 
         message = HumanMessage(content=prompt)
@@ -209,10 +207,7 @@ Examples:
 
             # Print details
             for anon in result.anonymizations:
-                phi_types = list(set([span.type for span in anon.phi_spans]))
-                print(f"  Row {anon.row_index}, Column '{anon.column_name}': {phi_types}")
-                for span in anon.phi_spans:
-                    print(f"    {span.type}: '{span.text}'")
+                print(f"  Row {anon.row_index}, Column '{anon.column_name}'")
 
             return result
 
@@ -234,14 +229,15 @@ Examples:
             Formatted string representation
         """
         lines = []
-        lines.append("Headers: " + " | ".join(headers))
-        lines.append("-" * 80)
+        lines.append("Column Headers:")
+        lines.append(", ".join(headers))
+        lines.append("")
 
         for idx, row in enumerate(rows):
-            lines.append(f"Row {idx}:")
+            lines.append(f"=== ROW {idx} ===")
             for header in headers:
                 value = row.get(header, "")
-                lines.append(f"  {header}: {value}")
+                lines.append(f"{header}: {value}")
             lines.append("")
 
         return "\n".join(lines)
@@ -252,7 +248,7 @@ Examples:
         result: CSVAnonymizationResult
     ) -> List[Dict[str, str]]:
         """
-        Apply anonymizations to CSV rows by replacing PHI with asterisks.
+        Apply anonymizations to CSV rows using LLM-generated anonymized text.
 
         Args:
             rows: Original CSV rows
@@ -268,31 +264,8 @@ Examples:
         for anon in result.anonymizations:
             if 0 <= anon.row_index < len(anonymized_rows):
                 if anon.column_name in anonymized_rows[anon.row_index]:
-                    original_text = anonymized_rows[anon.row_index][anon.column_name]
-                    anonymized_text = original_text
-
-                    # Sort PHI spans by their position in the text (reverse order to maintain indices)
-                    # We need to sort by position to replace from end to beginning
-                    spans_with_pos = []
-                    for span in anon.phi_spans:
-                        pos = anonymized_text.find(span.text)
-                        if pos != -1:
-                            spans_with_pos.append((pos, span))
-
-                    # Sort in reverse order by position
-                    spans_with_pos.sort(key=lambda x: x[0], reverse=True)
-
-                    # Replace each PHI span with asterisks
-                    for pos, span in spans_with_pos:
-                        # Replace the PHI text with asterisks (one asterisk per character)
-                        replacement = '*' * len(span.text)
-                        anonymized_text = (
-                            anonymized_text[:pos] +
-                            replacement +
-                            anonymized_text[pos + len(span.text):]
-                        )
-
-                    anonymized_rows[anon.row_index][anon.column_name] = anonymized_text
+                    # Use the anonymized value provided by the LLM
+                    anonymized_rows[anon.row_index][anon.column_name] = anon.anonymized_value
                     print(f"  Applied: Row {anon.row_index}, Column '{anon.column_name}'")
 
         return anonymized_rows
@@ -313,30 +286,19 @@ Examples:
             output_path: Path to anonymized output file
             json_output_path: Path to save JSON output
         """
-        # Count total PHI spans
-        total_phi_spans = sum(len(anon.phi_spans) for anon in result.anonymizations)
-
         output_data = {
             "metadata": {
                 "input_file": str(input_path.name),
                 "output_file": str(output_path.name),
                 "timestamp": datetime.now().isoformat(),
                 "processing_method": "llm_csv_anonymization_asterisk",
-                "total_cells_with_phi": len(result.anonymizations),
-                "total_phi_spans": total_phi_spans
+                "total_cells_anonymized": len(result.anonymizations)
             },
             "anonymizations": [
                 {
                     "row_index": anon.row_index,
                     "column_name": anon.column_name,
-                    "phi_spans": [
-                        {
-                            "text": span.text,
-                            "type": span.type,
-                            "redacted_as": '*' * len(span.text)
-                        }
-                        for span in anon.phi_spans
-                    ]
+                    "anonymized_value_preview": anon.anonymized_value[:200] + "..." if len(anon.anonymized_value) > 200 else anon.anonymized_value
                 }
                 for anon in result.anonymizations
             ]
