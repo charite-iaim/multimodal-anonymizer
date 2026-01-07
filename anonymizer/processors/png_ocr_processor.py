@@ -1,0 +1,308 @@
+"""
+PNG image processor using OCR + LLM for anonymization.
+This approach uses OCR to extract text with precise bounding boxes,
+then uses LLM to classify which text contains PII.
+"""
+
+import json
+from pathlib import Path
+from PIL import Image, ImageDraw
+from datetime import datetime
+from typing import List, Dict, Any
+
+try:
+    import pytesseract
+    from pytesseract import Output
+    PYTESSERACT_AVAILABLE = True
+except ImportError:
+    PYTESSERACT_AVAILABLE = False
+
+from langchain_openai import ChatOpenAI
+from langchain_core.messages import HumanMessage
+from pydantic import BaseModel, Field
+
+from ..base_processor import FileProcessor
+from ..config import AnonymizerConfig
+from ..models import PIIDetectionResult, PIIElement, BoundingBox
+
+
+class OCRText(BaseModel):
+    """Text extracted from OCR with bounding box."""
+    text: str
+    bbox: BoundingBox
+
+
+class PIIClassificationResult(BaseModel):
+    """Result of PII classification for OCR text."""
+
+    pii_texts: List[Dict[str, str]] = Field(
+        default_factory=list,
+        description="List of texts that contain PII with their types. Each item should have 'text' (exact matching text from OCR) and 'type' (PII category)"
+    )
+
+
+class PNGOCRProcessor(FileProcessor):
+    """Processor for PNG images using OCR + LLM classification."""
+
+    def __init__(self, config: AnonymizerConfig):
+        """Initialize PNG OCR processor."""
+        super().__init__(config)
+
+        if not EASYOCR_AVAILABLE:
+            raise ImportError(
+                "EasyOCR is required for PNGOCRProcessor. "
+                "Install it with: pip install easyocr"
+            )
+
+        # Initialize EasyOCR reader (English)
+        print("Initializing EasyOCR reader...")
+        self.reader = easyocr.Reader(['en'], gpu=False)
+
+        # Initialize LLM for PII classification
+        self.llm = ChatOpenAI(
+            model=config.model_name,
+            api_key=config.fireworks_api_key,
+            base_url=config.fireworks_base_url,
+            temperature=config.temperature,
+        ).with_structured_output(PIIClassificationResult)
+
+    def can_process(self, file_path: Path) -> bool:
+        """Check if file is a PNG image."""
+        return file_path.suffix.lower() == ".png"
+
+    def extract_content(self, file_path: Path) -> str:
+        """Not used in OCR processor."""
+        return ""
+
+    def anonymize(self, input_path: Path, output_path: Path) -> None:
+        """
+        Anonymize PNG image using OCR + LLM classification.
+
+        Steps:
+        1. Run OCR to extract all text with precise bounding boxes
+        2. Use LLM to classify which texts contain PII
+        3. Redact identified PII texts using OCR bounding boxes
+        4. Save anonymized image
+
+        Args:
+            input_path: Path to input PNG
+            output_path: Path to save anonymized PNG
+        """
+        print(f"Processing: {input_path.name}")
+
+        # Load image
+        image = Image.open(input_path)
+        width, height = image.size
+        print(f"Image size: {width}x{height}")
+
+        # Step 1: Extract text using OCR
+        print("Running OCR to extract text...")
+        ocr_results = self._extract_text_with_ocr(input_path)
+        print(f"Found {len(ocr_results)} text regions")
+
+        if not ocr_results:
+            print("No text found in image, saving original")
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            image.save(output_path)
+            return
+
+        # Step 2: Classify which texts contain PII using LLM
+        print("Classifying PII using LLM...")
+        pii_elements = self._classify_pii(ocr_results)
+        print(f"Identified {len(pii_elements)} PII elements")
+
+        # Step 3: Apply redactions
+        if pii_elements:
+            image = self._apply_redactions(image, pii_elements)
+
+        # Step 4: Save results
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        image.save(output_path)
+        print(f"Saved anonymized image to: {output_path}")
+
+        # Save JSON with detection results
+        json_output_path = output_path.with_suffix(".json")
+        pii_result = PIIDetectionResult(pii_elements=pii_elements)
+        self._save_json_output(pii_result, input_path, output_path, json_output_path)
+        print(f"Saved detection results to: {json_output_path}")
+
+    def _extract_text_with_ocr(self, image_path: Path) -> List[OCRText]:
+        """
+        Extract text from image using EasyOCR.
+
+        Args:
+            image_path: Path to image file
+
+        Returns:
+            List of OCRText objects with text and bounding boxes
+        """
+        # Run OCR
+        results = self.reader.readtext(str(image_path))
+
+        ocr_texts = []
+        for detection in results:
+            bbox_points, text, confidence = detection
+
+            # Convert bbox points to x, y, width, height
+            # bbox_points is [[x1,y1], [x2,y2], [x3,y3], [x4,y4]]
+            x_coords = [point[0] for point in bbox_points]
+            y_coords = [point[1] for point in bbox_points]
+
+            x = int(min(x_coords))
+            y = int(min(y_coords))
+            width = int(max(x_coords) - x)
+            height = int(max(y_coords) - y)
+
+            bbox = BoundingBox(x=x, y=y, width=width, height=height)
+            ocr_texts.append(OCRText(text=text, bbox=bbox))
+
+            print(f"  OCR: '{text}' at ({x}, {y}, {width}, {height}) [confidence: {confidence:.2f}]")
+
+        return ocr_texts
+
+    def _classify_pii(self, ocr_texts: List[OCRText]) -> List[PIIElement]:
+        """
+        Use LLM to classify which OCR texts contain PII.
+
+        Args:
+            ocr_texts: List of texts extracted by OCR
+
+        Returns:
+            List of PIIElement objects for texts classified as PII
+        """
+        if not ocr_texts:
+            return []
+
+        # Prepare text list for LLM
+        text_list = "\n".join([f"{i+1}. {ocr.text}" for i, ocr in enumerate(ocr_texts)])
+
+        prompt = f"""Analyze the following texts extracted from a medical image and identify which ones contain Personal Identifiable Information (PII).
+
+Texts found in the image:
+{text_list}
+
+PII categories to identify:
+- name: Patient names, physician/doctor names
+- date_of_birth: Dates of birth
+- id_number: Patient IDs, medical record numbers
+- address: Physical addresses
+- phone: Phone numbers
+- email: Email addresses
+
+For each text that contains PII, provide:
+1. text: The EXACT text as it appears above (must match exactly)
+2. type: The PII category
+
+Only include texts that actually contain PII. If a text is just a medical term or general information, do not include it.
+"""
+
+        message = HumanMessage(content=prompt)
+
+        try:
+            classification: PIIClassificationResult = self.llm.invoke([message])
+
+            # Match classified PII back to OCR results
+            pii_elements = []
+            for pii_text in classification.pii_texts:
+                text_to_find = pii_text["text"]
+                pii_type = pii_text["type"]
+
+                # Find matching OCR text
+                for ocr in ocr_texts:
+                    if ocr.text.strip() == text_to_find.strip():
+                        pii_element = PIIElement(
+                            type=pii_type,
+                            text=ocr.text,
+                            bbox=ocr.bbox
+                        )
+                        pii_elements.append(pii_element)
+                        print(f"  Classified as PII: {pii_type} - '{ocr.text}'")
+                        break
+                else:
+                    # Try fuzzy matching if exact match fails
+                    for ocr in ocr_texts:
+                        if text_to_find.lower() in ocr.text.lower() or ocr.text.lower() in text_to_find.lower():
+                            pii_element = PIIElement(
+                                type=pii_type,
+                                text=ocr.text,
+                                bbox=ocr.bbox
+                            )
+                            pii_elements.append(pii_element)
+                            print(f"  Classified as PII (fuzzy): {pii_type} - '{ocr.text}'")
+                            break
+
+            return pii_elements
+
+        except Exception as e:
+            print(f"Error during PII classification: {e}")
+            import traceback
+            traceback.print_exc()
+            return []
+
+    def _apply_redactions(self, image: Image.Image, pii_elements: List[PIIElement]) -> Image.Image:
+        """
+        Apply black rectangles to redact PII regions.
+
+        Args:
+            image: PIL Image object
+            pii_elements: List of PIIElement objects with bounding boxes
+
+        Returns:
+            Image with redactions applied
+        """
+        draw = ImageDraw.Draw(image)
+
+        for element in pii_elements:
+            bbox = element.bbox
+            if bbox.width > 0 and bbox.height > 0:
+                # Draw black rectangle
+                draw.rectangle(
+                    [bbox.x, bbox.y, bbox.x + bbox.width, bbox.y + bbox.height],
+                    fill="black",
+                    outline="black",
+                )
+                print(f"  Redacted {element.type}: {element.text}")
+
+        return image
+
+    def _save_json_output(
+        self,
+        pii_result: PIIDetectionResult,
+        input_path: Path,
+        output_path: Path,
+        json_output_path: Path
+    ) -> None:
+        """
+        Save PII detection results as JSON.
+
+        Args:
+            pii_result: PIIDetectionResult object
+            input_path: Path to original input file
+            output_path: Path to anonymized output file
+            json_output_path: Path to save JSON output
+        """
+        output_data = {
+            "metadata": {
+                "input_file": str(input_path.name),
+                "output_file": str(output_path.name),
+                "timestamp": datetime.now().isoformat(),
+                "processing_method": "ocr",
+                "total_pii_elements": len(pii_result.pii_elements)
+            },
+            "pii_elements": [
+                {
+                    "type": element.type,
+                    "text": element.text,
+                    "bbox": {
+                        "x": element.bbox.x,
+                        "y": element.bbox.y,
+                        "width": element.bbox.width,
+                        "height": element.bbox.height
+                    }
+                }
+                for element in pii_result.pii_elements
+            ]
+        }
+
+        with open(json_output_path, "w", encoding="utf-8") as f:
+            json.dump(output_data, f, indent=2, ensure_ascii=False)

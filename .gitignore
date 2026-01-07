@@ -1,1 +1,6 @@
 .venv
+.env
+anonymizer/__pycache__/
+anonymizer/processors/__pycache__/
+data/output
+data/output_ocr

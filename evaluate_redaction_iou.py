@@ -570,7 +570,7 @@ def evaluate_redaction(original_path: str, redacted_path: str, csv_path: str,
 if __name__ == "__main__":
     # Example usage for Aaron Simmons image
     original_path = "data/primary/cxr_Aaron_Simmons.png"
-    redacted_path = "data/anonymized/cxr_Aaron_Simmons_best.png"
+    redacted_path = "data/output/anonymized_cxr_Aaron_Simmons_original.png"
     csv_path = "data/primary/labels/phi_annotations_cxr_header_jpg.csv"
     image_name = "cxr_Aaron_Simmons.png"
 
