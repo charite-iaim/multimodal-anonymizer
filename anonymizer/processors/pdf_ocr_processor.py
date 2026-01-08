@@ -169,11 +169,12 @@ class PDFOCRProcessor(FileProcessor):
         else:
             print("No pages to save!")
 
-        # Save JSON with detection results
-        json_output_path = output_path.with_suffix(".json")
-        pii_result = PIIDetectionResult(pii_elements=all_pii_elements)
-        self._save_json_output(pii_result, input_path, output_path, json_output_path)
-        print(f"Saved detection results to: {json_output_path}")
+        # Save JSON with detection results (only if debug mode is enabled)
+        if self.config.save_debug_files:
+            json_output_path = output_path.with_suffix(".json")
+            pii_result = PIIDetectionResult(pii_elements=all_pii_elements)
+            self._save_json_output(pii_result, input_path, output_path, json_output_path)
+            print(f"Saved detection results to: {json_output_path}")
 
     def _extract_text_with_ocr(self, image: Image.Image, page_number: int) -> List[OCRText]:
         """
@@ -237,7 +238,7 @@ Texts found in the document:
 PII categories to identify:
 - name: Patient names, physician/doctor names
 - date_of_birth: Dates of birth
-- id_number: Patient IDs, medical record numbers, other identification numbers
+- id_number: Patient IDs, medical record numbers, all other potentially identification numbers
 - address: Physical addresses
 - location: Locations, e.g. cities, hospital names
 - phone: Phone numbers

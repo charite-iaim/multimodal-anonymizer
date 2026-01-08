@@ -95,10 +95,11 @@ class TextProcessor(FileProcessor):
             f.write(anonymization_result.anonymized_content)
         print(f"Saved anonymized text to: {output_path}")
 
-        # Step 4: Save JSON with anonymization details
-        json_output_path = output_path.with_suffix('.json')
-        self._save_json_output(anonymization_result, input_path, output_path, json_output_path)
-        print(f"Saved anonymization details to: {json_output_path}")
+        # Step 4: Save JSON with anonymization details (only if debug mode is enabled)
+        if self.config.save_debug_files:
+            json_output_path = output_path.with_suffix('.json')
+            self._save_json_output(anonymization_result, input_path, output_path, json_output_path)
+            print(f"Saved anonymization details to: {json_output_path}")
 
     def _anonymize_with_llm(self, content: str) -> TextAnonymizationResult:
         """

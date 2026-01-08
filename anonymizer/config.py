@@ -25,6 +25,9 @@ class AnonymizerConfig:
     input_dir: str = "data/input"
     output_dir: str = "data/output"
 
+    # Debug configuration
+    save_debug_files: bool = False  # If True, save JSON metadata and intermediate files
+
     # Image processing configuration
     # Maximum dimension for vision model input (1024 for Mistral, 2000 for GPT-4 Vision)
     max_image_dimension: int = 1024

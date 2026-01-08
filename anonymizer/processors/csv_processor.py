@@ -97,10 +97,11 @@ class CSVProcessor(FileProcessor):
         self._write_csv(output_path, headers, anonymized_rows)
         print(f"Saved anonymized CSV to: {output_path}")
 
-        # Step 5: Save JSON with anonymization details
-        json_output_path = output_path.with_suffix('.json')
-        self._save_json_output(anonymization_result, input_path, output_path, json_output_path)
-        print(f"Saved anonymization details to: {json_output_path}")
+        # Step 5: Save JSON with anonymization details (only if debug mode is enabled)
+        if self.config.save_debug_files:
+            json_output_path = output_path.with_suffix('.json')
+            self._save_json_output(anonymization_result, input_path, output_path, json_output_path)
+            print(f"Saved anonymization details to: {json_output_path}")
 
     def _read_csv(self, file_path: Path) -> tuple[List[Dict[str, str]], List[str]]:
         """

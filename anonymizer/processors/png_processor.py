@@ -32,8 +32,8 @@ class PNGProcessor(FileProcessor):
         ).with_structured_output(PIIDetectionResult)
 
     def can_process(self, file_path: Path) -> bool:
-        """Check if file is a PNG image."""
-        return file_path.suffix.lower() == ".png"
+        """Check if file is a supported image format (PNG, JPG, JPEG)."""
+        return file_path.suffix.lower() in [".png", ".jpg", ".jpeg"]
 
     def extract_content(self, file_path: Path) -> str:
         """
@@ -159,10 +159,11 @@ For each PII element, provide:
             original_image.save(original_output_path)
             print(f"Saved anonymized original image to: {original_output_path}")
 
-            # Save JSON with bounding boxes (from resized image)
-            json_output_path = output_path.with_suffix(".json")
-            self._save_json_output(pii_result, input_path, output_path, json_output_path)
-            print(f"Saved detection results to: {json_output_path}")
+            # Save JSON with bounding boxes (from resized image) - only if debug mode is enabled
+            if self.config.save_debug_files:
+                json_output_path = output_path.with_suffix(".json")
+                self._save_json_output(pii_result, input_path, output_path, json_output_path)
+                print(f"Saved detection results to: {json_output_path}")
 
         except Exception as e:
             import traceback

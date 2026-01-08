@@ -72,8 +72,8 @@ class PNGOCRProcessor(FileProcessor):
         ).with_structured_output(PIIClassificationResult)
 
     def can_process(self, file_path: Path) -> bool:
-        """Check if file is a PNG image."""
-        return file_path.suffix.lower() == ".png"
+        """Check if file is a supported image format (PNG, JPG, JPEG)."""
+        return file_path.suffix.lower() in [".png", ".jpg", ".jpeg"]
 
     def extract_content(self, file_path: Path) -> str:
         """Not used in OCR processor."""
@@ -125,11 +125,12 @@ class PNGOCRProcessor(FileProcessor):
         image.save(output_path)
         print(f"Saved anonymized image to: {output_path}")
 
-        # Save JSON with detection results
-        json_output_path = output_path.with_suffix(".json")
-        pii_result = PIIDetectionResult(pii_elements=pii_elements)
-        self._save_json_output(pii_result, input_path, output_path, json_output_path)
-        print(f"Saved detection results to: {json_output_path}")
+        # Save JSON with detection results (only if debug mode is enabled)
+        if self.config.save_debug_files:
+            json_output_path = output_path.with_suffix(".json")
+            pii_result = PIIDetectionResult(pii_elements=pii_elements)
+            self._save_json_output(pii_result, input_path, output_path, json_output_path)
+            print(f"Saved detection results to: {json_output_path}")
 
     def _extract_text_with_ocr(self, image_path: Path) -> List[OCRText]:
         """
@@ -189,7 +190,7 @@ Texts found in the image:
 PII categories to identify:
 - name: Patient names, physician/doctor names
 - date_of_birth: Dates of birth
-- id_number: Patient IDs, medical record numbers, other identification numbers
+- id_number: Patient IDs, medical record numbers, all other potentially identification numbers
 - address: Physical addresses
 - location: Locations, e.g. cities, hospital names
 - phone: Phone numbers
@@ -245,6 +246,38 @@ Only include texts that actually contain PII. If a text is just a medical term o
             import traceback
             traceback.print_exc()
             return []
+
+    def detect_pii_bboxes(self, image: Image.Image) -> List[PIIElement]:
+        """
+        Detect PII in an image and return bounding boxes without applying redactions.
+
+        Args:
+            image: PIL Image object
+
+        Returns:
+            List of PIIElement objects with bounding boxes
+        """
+        # Save image temporarily for OCR
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
+            tmp_path = Path(tmp.name)
+            image.save(tmp_path)
+
+        try:
+            # Extract text using OCR
+            ocr_results = self._extract_text_with_ocr(tmp_path)
+
+            if not ocr_results:
+                return []
+
+            # Classify which texts contain PII
+            pii_elements = self._classify_pii(ocr_results)
+            return pii_elements
+
+        finally:
+            # Clean up temp file
+            if tmp_path.exists():
+                tmp_path.unlink()
 
     def _apply_redactions(self, image: Image.Image, pii_elements: List[PIIElement]) -> Image.Image:
         """

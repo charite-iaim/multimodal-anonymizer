@@ -6,3 +6,7 @@ data/output
 data/output_ocr
 data/primary
 .DS_Store
+frontend/node_modules/
+data/test_input
+data/test_output
+node_modules/
