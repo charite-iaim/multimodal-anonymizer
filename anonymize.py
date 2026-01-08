@@ -13,6 +13,7 @@ from anonymizer import (
     PNGOCRProcessor,
     PDFOCRProcessor,
     CSVProcessor,
+    TextProcessor,
     DICOMProcessor,
     FileTypeDetector,
     DataType,
@@ -44,11 +45,28 @@ def get_processor(
 
         # Map detected type to processor
         if detection_result.data_type == DataType.TEXT:
-            # Text data -> use CSV processor
-            processor = CSVProcessor(config)
-            if processor.can_process(file_path):
-                print(f"Using CSV processor based on LLM detection")
-                return processor
+            # Text data -> use suggested processor
+            if detection_result.suggested_processor == "text":
+                processor = TextProcessor(config)
+                if processor.can_process(file_path):
+                    print(f"Using Text processor based on LLM detection")
+                    return processor
+            elif detection_result.suggested_processor == "csv":
+                processor = CSVProcessor(config)
+                if processor.can_process(file_path):
+                    print(f"Using CSV processor based on LLM detection")
+                    return processor
+
+            # Fallback: try both processors
+            text_processor = TextProcessor(config)
+            if text_processor.can_process(file_path):
+                print(f"Using Text processor (fallback)")
+                return text_processor
+
+            csv_processor = CSVProcessor(config)
+            if csv_processor.can_process(file_path):
+                print(f"Using CSV processor (fallback)")
+                return csv_processor
 
         elif detection_result.data_type == DataType.IMAGE:
             # Image data -> use OCR or vision processor based on suggestion
@@ -70,6 +88,7 @@ def get_processor(
             DICOMProcessor(config),
             PNGOCRProcessor(config),
             PDFOCRProcessor(config),
+            TextProcessor(config),
             CSVProcessor(config),
         ]
     else:
@@ -77,6 +96,7 @@ def get_processor(
             DICOMProcessor(config),
             PNGProcessor(config),
             PDFOCRProcessor(config),
+            TextProcessor(config),
             CSVProcessor(config),
         ]
 

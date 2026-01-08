@@ -8,6 +8,7 @@ from .processors.png_processor import PNGProcessor
 from .processors.png_ocr_processor import PNGOCRProcessor
 from .processors.pdf_ocr_processor import PDFOCRProcessor
 from .processors.csv_processor import CSVProcessor
+from .processors.text_processor import TextProcessor
 from .processors.dicom_processor import DICOMProcessor
 from .file_type_detector import FileTypeDetector, DataType, FileTypeResult
 
@@ -18,6 +19,7 @@ __all__ = [
     "PNGOCRProcessor",
     "PDFOCRProcessor",
     "CSVProcessor",
+    "TextProcessor",
     "DICOMProcessor",
     "FileTypeDetector",
     "DataType",

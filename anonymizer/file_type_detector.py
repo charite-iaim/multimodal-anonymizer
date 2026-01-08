@@ -114,22 +114,26 @@ File name: {file_path.name}
 File extension: {file_extension}
 
 Your task is to classify this file into one of these data types:
-1. TEXT - Structured text data (CSV, TSV, or other tabular formats)
+1. TEXT - Any text-based document including:
+   - Plain text documents (.txt files with narrative content like discharge summaries, clinical notes)
+   - Structured tabular data (CSV, TSV files with rows and columns)
 2. IMAGE - Image data (scanned documents, photos, medical images, screenshots)
 3. UNKNOWN - Cannot determine or unsupported format
 
 Processing paths available:
-- For TEXT data: Use CSV processor (handles CSV and tabular text files)
-- For IMAGE data: Use OCR processor (extracts text from images) OR Vision processor (direct image analysis)
+- For TEXT data: Use 'text' processor for plain text documents, 'csv' processor for tabular data
+- For IMAGE data: Use 'ocr' processor (extracts text from images)
 
 Based on the file content, determine:
 1. data_type: Which category (text, image, or unknown)
 2. reasoning: Why you chose this category (be specific about what you observe in the file)
-3. suggested_processor: Which processor to use ('csv' for text, 'ocr' for images, 'none' for unknown)
+3. suggested_processor: Which processor to use ('text' for plain text documents, 'csv' for tabular data, 'ocr' for images, 'none' for unknown)
 
 Guidelines:
+- If the file contains plain text narrative (discharge summaries, clinical notes, reports) → TEXT → 'text'
 - If the file contains tabular data with rows and columns → TEXT → 'csv'
 - If the file is a scanned document or medical image → IMAGE → 'ocr'
+- If the file extension is .txt with narrative content → TEXT → 'text'
 - If the file extension is .csv but contains non-tabular content → base decision on actual content
 - If the file extension is .png/.jpg but contains tables/text → IMAGE (use 'ocr' to extract text)
 """
