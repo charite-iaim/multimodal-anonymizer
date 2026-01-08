@@ -239,6 +239,7 @@ PII categories to identify:
 - date_of_birth: Dates of birth
 - id_number: Patient IDs, medical record numbers, other identification numbers
 - address: Physical addresses
+- location: Locations, e.g. cities, hospital names
 - phone: Phone numbers
 - email: Email addresses
 - dates: Other specific dates (admission, discharge, study dates, etc.)
