@@ -1,14 +1,21 @@
 """
-PNG image processor using OCR + LLM for anonymization.
-This approach uses OCR to extract text with precise bounding boxes,
-then uses LLM to classify which text contains PII.
+PDF processor using OCR + LLM for anonymization.
+This approach converts PDF pages to images, uses OCR to extract text with precise bounding boxes,
+then uses LLM to classify which text contains PII, and generates a redacted PDF.
 """
 
 import json
+import numpy as np
 from pathlib import Path
 from PIL import Image, ImageDraw
 from datetime import datetime
 from typing import List, Dict, Any
+
+try:
+    from pdf2image import convert_from_path
+    PDF2IMAGE_AVAILABLE = True
+except ImportError:
+    PDF2IMAGE_AVAILABLE = False
 
 try:
     import easyocr
@@ -29,6 +36,7 @@ class OCRText(BaseModel):
     """Text extracted from OCR with bounding box."""
     text: str
     bbox: BoundingBox
+    page_number: int
 
 
 class PIITextItem(BaseModel):
@@ -45,16 +53,23 @@ class PIIClassificationResult(BaseModel):
     )
 
 
-class PNGOCRProcessor(FileProcessor):
-    """Processor for PNG images using OCR + LLM classification."""
+class PDFOCRProcessor(FileProcessor):
+    """Processor for PDF files using OCR + LLM classification."""
 
     def __init__(self, config: AnonymizerConfig):
-        """Initialize PNG OCR processor."""
+        """Initialize PDF OCR processor."""
         super().__init__(config)
+
+        if not PDF2IMAGE_AVAILABLE:
+            raise ImportError(
+                "pdf2image is required for PDFOCRProcessor. "
+                "Install it with: pip install pdf2image\n"
+                "Also requires poppler: brew install poppler (macOS) or apt-get install poppler-utils (Linux)"
+            )
 
         if not EASYOCR_AVAILABLE:
             raise ImportError(
-                "EasyOCR is required for PNGOCRProcessor. "
+                "EasyOCR is required for PDFOCRProcessor. "
                 "Install it with: pip install easyocr"
             )
 
@@ -72,8 +87,8 @@ class PNGOCRProcessor(FileProcessor):
         ).with_structured_output(PIIClassificationResult)
 
     def can_process(self, file_path: Path) -> bool:
-        """Check if file is a PNG image."""
-        return file_path.suffix.lower() == ".png"
+        """Check if file is a PDF."""
+        return file_path.suffix.lower() == ".pdf"
 
     def extract_content(self, file_path: Path) -> str:
         """Not used in OCR processor."""
@@ -81,68 +96,101 @@ class PNGOCRProcessor(FileProcessor):
 
     def anonymize(self, input_path: Path, output_path: Path) -> None:
         """
-        Anonymize PNG image using OCR + LLM classification.
+        Anonymize PDF using OCR + LLM classification.
 
         Steps:
-        1. Run OCR to extract all text with precise bounding boxes
-        2. Use LLM to classify which texts contain PII
-        3. Redact identified PII texts using OCR bounding boxes
-        4. Save anonymized image
+        1. Convert PDF pages to images
+        2. For each page: Run OCR to extract all text with precise bounding boxes
+        3. Use LLM to classify which texts contain PII
+        4. Redact identified PII texts using OCR bounding boxes
+        5. Combine redacted pages back into a PDF
 
         Args:
-            input_path: Path to input PNG
-            output_path: Path to save anonymized PNG
+            input_path: Path to input PDF
+            output_path: Path to save anonymized PDF
         """
-        print(f"Processing: {input_path.name}")
+        print(f"Processing PDF: {input_path.name}")
 
-        # Load image
-        image = Image.open(input_path)
-        width, height = image.size
-        print(f"Image size: {width}x{height}")
+        # Step 1: Convert PDF to images
+        print("Converting PDF pages to images...")
+        try:
+            images = convert_from_path(input_path, dpi=300)
+            print(f"Converted {len(images)} pages")
+        except Exception as e:
+            print(f"Error converting PDF to images: {e}")
+            raise
 
-        # Step 1: Extract text using OCR
-        print("Running OCR to extract text...")
-        ocr_results = self._extract_text_with_ocr(input_path)
-        print(f"Found {len(ocr_results)} text regions")
+        all_pii_elements = []
+        redacted_images = []
 
-        if not ocr_results:
-            print("No text found in image, saving original")
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            image.save(output_path)
-            return
+        # Process each page
+        for page_num, image in enumerate(images, start=1):
+            print(f"\nProcessing page {page_num}/{len(images)}")
+            width, height = image.size
+            print(f"Page size: {width}x{height}")
 
-        # Step 2: Classify which texts contain PII using LLM
-        print("Classifying PII using LLM...")
-        pii_elements = self._classify_pii(ocr_results)
-        print(f"Identified {len(pii_elements)} PII elements")
+            # Step 2: Extract text using OCR
+            print("Running OCR to extract text...")
+            ocr_results = self._extract_text_with_ocr(image, page_num)
+            print(f"Found {len(ocr_results)} text regions")
 
-        # Step 3: Apply redactions
-        if pii_elements:
-            image = self._apply_redactions(image, pii_elements)
+            if not ocr_results:
+                print("No text found on this page")
+                redacted_images.append(image)
+                continue
 
-        # Step 4: Save results
+            # Step 3: Classify which texts contain PII using LLM
+            print("Classifying PII using LLM...")
+            pii_elements = self._classify_pii(ocr_results)
+            print(f"Identified {len(pii_elements)} PII elements")
+
+            all_pii_elements.extend(pii_elements)
+
+            # Step 4: Apply redactions
+            if pii_elements:
+                image = self._apply_redactions(image, pii_elements)
+
+            redacted_images.append(image)
+
+        # Step 5: Save results
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        image.save(output_path)
-        print(f"Saved anonymized image to: {output_path}")
+
+        # Save as multi-page PDF
+        if redacted_images:
+            print(f"\nSaving {len(redacted_images)} pages to PDF...")
+            redacted_images[0].save(
+                output_path,
+                save_all=True,
+                append_images=redacted_images[1:] if len(redacted_images) > 1 else [],
+                resolution=300.0,
+                quality=95
+            )
+            print(f"Saved anonymized PDF to: {output_path}")
+        else:
+            print("No pages to save!")
 
         # Save JSON with detection results
         json_output_path = output_path.with_suffix(".json")
-        pii_result = PIIDetectionResult(pii_elements=pii_elements)
+        pii_result = PIIDetectionResult(pii_elements=all_pii_elements)
         self._save_json_output(pii_result, input_path, output_path, json_output_path)
         print(f"Saved detection results to: {json_output_path}")
 
-    def _extract_text_with_ocr(self, image_path: Path) -> List[OCRText]:
+    def _extract_text_with_ocr(self, image: Image.Image, page_number: int) -> List[OCRText]:
         """
         Extract text from image using EasyOCR.
 
         Args:
-            image_path: Path to image file
+            image: PIL Image object
+            page_number: Page number in the PDF
 
         Returns:
             List of OCRText objects with text and bounding boxes
         """
-        # Run OCR
-        results = self.reader.readtext(str(image_path))
+        # Convert PIL Image to numpy array for EasyOCR
+        image_np = np.array(image)
+
+        # Run OCR on numpy array
+        results = self.reader.readtext(image_np)
 
         ocr_texts = []
         for detection in results:
@@ -159,7 +207,7 @@ class PNGOCRProcessor(FileProcessor):
             height = int(max(y_coords) - y)
 
             bbox = BoundingBox(x=x, y=y, width=width, height=height)
-            ocr_texts.append(OCRText(text=text, bbox=bbox))
+            ocr_texts.append(OCRText(text=text, bbox=bbox, page_number=page_number))
 
             print(f"  OCR: '{text}' at ({x}, {y}, {width}, {height}) [confidence: {confidence:.2f}]")
 
@@ -181,9 +229,9 @@ class PNGOCRProcessor(FileProcessor):
         # Prepare text list for LLM
         text_list = "\n".join([f"{i+1}. {ocr.text}" for i, ocr in enumerate(ocr_texts)])
 
-        prompt = f"""Analyze the following texts extracted from a medical image and identify which ones contain Personal Identifiable Information (PII).
+        prompt = f"""Analyze the following texts extracted from a medical document and identify which ones contain Personal Identifiable Information (PII).
 
-Texts found in the image:
+Texts found in the document:
 {text_list}
 
 PII categories to identify:
@@ -301,7 +349,7 @@ Only include texts that actually contain PII. If a text is just a medical term o
                 "input_file": str(input_path.name),
                 "output_file": str(output_path.name),
                 "timestamp": datetime.now().isoformat(),
-                "processing_method": "ocr",
+                "processing_method": "pdf_ocr",
                 "total_pii_elements": len(pii_result.pii_elements)
             },
             "pii_elements": [

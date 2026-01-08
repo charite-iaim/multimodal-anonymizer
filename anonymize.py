@@ -11,7 +11,9 @@ from anonymizer import (
     AnonymizerConfig,
     PNGProcessor,
     PNGOCRProcessor,
+    PDFOCRProcessor,
     CSVProcessor,
+    DICOMProcessor,
     FileTypeDetector,
     DataType,
 )
@@ -65,12 +67,16 @@ def get_processor(
     # Original extension-based processor selection
     if use_ocr:
         processors = [
+            DICOMProcessor(config),
             PNGOCRProcessor(config),
+            PDFOCRProcessor(config),
             CSVProcessor(config),
         ]
     else:
         processors = [
+            DICOMProcessor(config),
             PNGProcessor(config),
+            PDFOCRProcessor(config),
             CSVProcessor(config),
         ]
 
