@@ -1,0 +1,134 @@
+.app {
+  min-height: 100vh;
+  background: #0353a4;
+  padding: 2rem;
+}
+
+.container {
+  margin: 0 auto;
+}
+
+.header {
+  text-align: center;
+  color: white;
+  margin-bottom: 3rem;
+}
+
+.header h1 {
+  font-size: 2.5rem;
+  margin-bottom: 0.5rem;
+  font-weight: 700;
+}
+
+.subtitle {
+  font-size: 1.125rem;
+  opacity: 0.9;
+}
+
+.backend-url-section {
+  background: white;
+  padding: 1rem 1.5rem;
+  border-radius: 8px;
+  margin-bottom: 2rem;
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+}
+
+.backend-url-section label {
+  font-weight: 600;
+  color: #333;
+  white-space: nowrap;
+}
+
+.backend-url-section input {
+  flex: 1;
+  padding: 0.5rem;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  font-size: 0.9rem;
+  color: #333;
+  background-color: #cad6f1;
+}
+
+.backend-url-section input:focus {
+  outline: none;
+  border-color: #3498db;
+}
+
+.config-section,
+.upload-section {
+  background: white;
+  padding: 2rem;
+  border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.1);
+}
+
+.config-section h2 {
+  margin-top: 0;
+  color: #333;
+  text-align: center;
+}
+
+.info-text {
+  text-align: center;
+  color: #666;
+  margin-bottom: 2rem;
+}
+
+.reconfigure-button {
+  display: block;
+  margin: 2rem auto 0;
+  padding: 0.75rem 1.5rem;
+  background: #95a5a6;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.9rem;
+  transition: background 0.3s;
+}
+
+.reconfigure-button:hover {
+  background: #7f8c8d;
+}
+
+.footer {
+  text-align: center;
+  color: white;
+  margin-top: 3rem;
+  opacity: 0.8;
+  font-size: 0.9rem;
+}
+
+.loading {
+  text-align: center;
+  color: white;
+  font-size: 1.25rem;
+  padding: 3rem;
+}
+
+@media (max-width: 768px) {
+  .app {
+    padding: 1rem;
+  }
+
+  .header h1 {
+    font-size: 1.75rem;
+  }
+
+  .subtitle {
+    font-size: 1rem;
+  }
+
+  .backend-url-section {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .config-section,
+  .upload-section {
+    padding: 1rem;
+  }
+}
