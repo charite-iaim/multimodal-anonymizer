@@ -116,49 +116,53 @@ class TextProcessor(FileProcessor):
         content_to_process = content[:max_chars]
         was_truncated = len(content) > max_chars
 
-        prompt = f"""Analyze this medical text document and anonymize all Personal Identifiable Information (PII) by replacing each PHI character with an asterisk (*).
+        prompt = f"""Analyze this medical document to anonymize all Personal Identifiable Information (PII).
 
-Text Document{' (truncated to first 10000 characters)' if was_truncated else ''}:
-{content_to_process}
+    PII categories to redact:
+    - name: Patient names, physician names, doctor names, family member names, caregiver names
+    - date: Dates (dates of birth, admission dates, discharge dates, specific dates in any format)
+    - address: Physical addresses, street addresses, facility names, hospital names, location names
+    - id: Patient IDs, medical record numbers, unit numbers, subject IDs, any numeric identifiers
+    - phone: Phone numbers
+    - fax: Fax numbers
+    - email: Email addresses
 
-PII categories to redact:
-- name: Patient names, physician names, doctor names, family member names, caregiver names
-- date: Dates (dates of birth, admission dates, discharge dates, specific dates in any format)
-- address: Physical addresses, street addresses, facility names, hospital names, location names
-- id: Patient IDs, medical record numbers, unit numbers, any numeric identifiers
-- phone: Phone numbers
-- fax: Fax numbers
-- email: Email addresses
+    Instructions:
+    1. Read through the entire document carefully
+    2. Identify all instances of PHI in the categories above
+    3. Replace EVERY CHARACTER of each PHI instance (including spaces, hyphens, slashes, colons, etc.) with an asterisk (*)
+    4. Return the COMPLETE anonymized document with all PHI replaced
+    5. Keep all other content (medical terminology, procedures, medications, etc.) unchanged
+    6. Preserve the original document structure and formatting
+    7. Keep times, measurements, and medical data intact
+    8. Keep Metadata and file-specific information intact (e.g., ECG header info)
 
-Instructions:
-1. Read through the entire document carefully
-2. Identify all instances of PHI in the categories above
-3. Replace EVERY CHARACTER of each PHI instance (including spaces, hyphens, etc.) with an asterisk (*)
-4. Return the COMPLETE anonymized document with all PHI replaced
-5. Keep all other content (medical terminology, procedures, medications, etc.) unchanged
-6. Preserve the original document structure and formatting
+    Redaction examples:
+    - "John Doe" → "********" (8 asterisks)
+    - "May 10, 2024" → "************" (12 asterisks)
+    - "23/09/2140" → "**********" (10 asterisks)
+    - "123456789" → "*********" (9 asterisks)
+    - "Dr. Jane Smith" → "**************" (14 asterisks)
+    - "General Hospital" → "****************" (16 asterisks)
+    - "<PER>47646408</PER>" → "<PER>********</PER>" (tags preserved, content replaced)
+    - "<subject_id>: 10005749" → "<subject_id>: ********" (tag and colon preserved)
+    - "45790175.dat 16 200.0(0)/mV 16 0 19 3475 0 I" → "********.dat 16 200.0(0)/mV 16 0 19 3475 0 I" (metadata preserved, ID replaced)
 
-Redaction examples:
-- "John Doe" → "********" (8 asterisks)
-- "May 10, 2024" → "************" (12 asterisks)
-- "123456789" → "*********" (9 asterisks)
-- "Dr. Jane Smith" → "**************" (14 asterisks)
-- "General Hospital" → "****************" (16 asterisks)
+    CRITICAL:
+    - Replace EVERY character (including spaces, hyphens, slashes, colons, etc.) in PHI with an asterisk
+    - For XML-like tags containing PHI, preserve the tags but replace the content
+    - Return the COMPLETE document with ALL PHI replaced
+    - Preserve all line breaks, formatting, and structure
+    - Only replace PHI, not medical information or general terms
 
-CRITICAL:
-- Replace EVERY character (including spaces, hyphens, slashes, etc.) in PHI with an asterisk
-- Return the COMPLETE document with ALL PHI replaced
-- Preserve all line breaks, formatting, and structure
-- Only replace PHI, not medical information or general terms
-
-Provide:
-1. anonymized_content: The complete anonymized text with all PHI replaced
-2. anonymizations: List of specific PHI items that were redacted, with:
-   - original_text: The original PHI text
-   - anonymized_text: The asterisk replacement
-   - phi_category: Category (name, date, address, id, phone, fax, email)
-   - line_number: Approximate line number (best estimate)
-"""
+    Provide:
+    1. anonymized_content: The complete anonymized text with all PHI replaced
+    2. anonymizations: List of specific PHI items that were redacted, with:
+    - original_text: The original PHI text
+    - anonymized_text: The asterisk replacement
+    - phi_category: Category (name, date, address, id, phone, fax, email)
+    - line_number: Approximate line number (best estimate)
+    """
 
         message = HumanMessage(content=prompt)
 
