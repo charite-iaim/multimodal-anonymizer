@@ -144,18 +144,21 @@ def process_file(
 
     # Automatically create filename anonymizer if needed and enabled
     if anonymize_paths and filename_anonymizer is None:
-        filename_anonymizer = FilenameAnonymizer(config)
+        filename_anonymizer = FilenameAnonymizer(config, output_dir=output_dir)
 
     # Anonymize filename if enabled
     if anonymize_paths and filename_anonymizer:
         print(f"Anonymizing filename: {input_path.name}")
-        anonymization_result = filename_anonymizer.anonymize_filename(input_path.name, is_directory=False)
+        anonymization_result = filename_anonymizer.anonymize_filename(
+            input_path.name,
+            is_directory=False
+        )
         anonymized_filename = anonymization_result.anonymized_filename
         print(f"Anonymized filename: {anonymized_filename}")
-        if anonymization_result.segments:
-            print(f"  Found {len(anonymization_result.segments)} PHI segments in filename:")
-            for seg in anonymization_result.segments:
-                print(f"    - {seg.original_text} ({seg.phi_category}) -> {seg.anonymized_text}")
+        if anonymization_result.phi_detections:
+            print(f"  Found {len(anonymization_result.phi_detections)} PHI values in filename:")
+            for detection in anonymization_result.phi_detections:
+                print(f"    - {detection.original_value} ({detection.category})")
     else:
         anonymized_filename = f"anonymized_{input_path.name}"
         anonymization_result = None
@@ -166,14 +169,15 @@ def process_file(
         file_output_dir.mkdir(parents=True, exist_ok=True)
         output_path = file_output_dir / anonymized_filename
 
-        # Record mapping if anonymizer is provided
-        if anonymize_paths and filename_anonymizer:
-            anonymized_relative_path = relative_path.parent / anonymized_filename
-            filename_anonymizer.add_mapping(
-                original_path=relative_path,
-                anonymized_path=anonymized_relative_path,
-                is_directory=False,
-                segments=anonymization_result.segments if anonymization_result else []
+        # Record file mapping for CSV export
+        if anonymize_paths and filename_anonymizer and anonymization_result:
+            # Get folder path for grouping (e.g., "patient_ID_ID/csv")
+            folder_path = str(relative_path.parent) if relative_path.parent != Path('.') else ""
+            filename_anonymizer.add_file_mapping(
+                folder_path=folder_path,
+                original_filename=input_path.name,
+                anonymized_filename=anonymized_filename,
+                phi_detections=anonymization_result.phi_detections
             )
     else:
         # Create separate output folder for this file (original behavior)
@@ -182,27 +186,22 @@ def process_file(
         file_output_dir.mkdir(parents=True, exist_ok=True)
         output_path = file_output_dir / anonymized_filename
 
-        # Record mapping if anonymizer is provided
-        if anonymize_paths and filename_anonymizer:
-            filename_anonymizer.add_mapping(
-                original_path=Path(input_path.name),
-                anonymized_path=Path(file_stem) / anonymized_filename,
-                is_directory=False,
-                segments=anonymization_result.segments if anonymization_result else []
+        # Record file mapping for CSV export
+        if anonymize_paths and filename_anonymizer and anonymization_result:
+            filename_anonymizer.add_file_mapping(
+                folder_path=file_stem,  # Use file stem as folder path for standalone files
+                original_filename=input_path.name,
+                anonymized_filename=anonymized_filename,
+                phi_detections=anonymization_result.phi_detections
             )
 
     try:
         processor.anonymize(input_path, output_path)
         print(f"Output saved to: {output_path}")
 
-        # Save mapping file if this is a standalone file processing
+        # Save CSV mappings if this is a standalone file processing
         if anonymize_paths and filename_anonymizer and not preserve_structure:
-            mapping_file = file_output_dir / "path_mappings.json"
-            filename_anonymizer.save_mappings(
-                output_path=mapping_file,
-                input_root=str(input_path.parent),
-                output_root=str(output_dir)
-            )
+            filename_anonymizer.save_all_mappings(output_dir=output_dir)
 
         return True
     except Exception as e:
@@ -253,7 +252,7 @@ def process_directory(
         print(f"Found {len(files)} files to process\n")
 
         # Create filename anonymizer if needed
-        filename_anonymizer = FilenameAnonymizer(config) if anonymize_paths else None
+        filename_anonymizer = FilenameAnonymizer(config, output_dir=output_dir) if anonymize_paths else None
 
         successful = 0
         failed = 0
@@ -271,14 +270,9 @@ def process_directory(
         print(f"  Successful: {successful}")
         print(f"  Failed: {failed}")
 
-        # Save mappings if anonymization was enabled
+        # Save CSV mappings if anonymization was enabled
         if anonymize_paths and filename_anonymizer:
-            mapping_file = output_dir / "path_mappings.json"
-            filename_anonymizer.save_mappings(
-                output_path=mapping_file,
-                input_root=str(input_dir),
-                output_root=str(output_dir)
-            )
+            filename_anonymizer.save_all_mappings(output_dir=output_dir)
     else:
         # Recursive processing with structure preservation
         process_directory_recursive(
@@ -330,7 +324,7 @@ def process_directory_recursive(
         _stats = {"successful": 0, "failed": 0, "skipped": 0}
         _folder_mapping = {}
         if anonymize_paths:
-            _filename_anonymizer = FilenameAnonymizer(config)
+            _filename_anonymizer = FilenameAnonymizer(config, output_dir=output_dir)
         print(f"Starting recursive directory processing...")
         print(f"Input directory: {input_dir}")
         print(f"Output directory: {output_dir}")
@@ -394,10 +388,10 @@ def process_directory_recursive(
                 anonymization_result = _filename_anonymizer.anonymize_filename(item.name, is_directory=True)
                 anonymized_folder_name = anonymization_result.anonymized_filename
                 print(f"Anonymized folder name: {anonymized_folder_name}")
-                if anonymization_result.segments:
-                    print(f"  Found {len(anonymization_result.segments)} PHI segments in folder name:")
-                    for seg in anonymization_result.segments:
-                        print(f"    - {seg.original_text} ({seg.phi_category}) -> {seg.anonymized_text}")
+                if anonymization_result.phi_detections:
+                    print(f"  Found {len(anonymization_result.phi_detections)} PHI values in folder name:")
+                    for detection in anonymization_result.phi_detections:
+                        print(f"    - {detection.original_value} ({detection.category})")
 
                 # Store folder mapping for building paths
                 _folder_mapping[item.name] = anonymized_folder_name
@@ -408,12 +402,11 @@ def process_directory_recursive(
                     anonymized_parts.append(_folder_mapping.get(part, part))
                 anonymized_relative_dir = Path(*anonymized_parts)
 
-                # Record folder mapping
-                _filename_anonymizer.add_mapping(
-                    original_path=original_relative_dir,
-                    anonymized_path=anonymized_relative_dir,
-                    is_directory=True,
-                    segments=anonymization_result.segments
+                # Record folder mapping for CSV export
+                _filename_anonymizer.add_folder_mapping(
+                    original_foldername=item.name,
+                    anonymized_foldername=anonymized_folder_name,
+                    phi_detections=anonymization_result.phi_detections
                 )
             else:
                 anonymized_relative_dir = original_relative_dir
@@ -441,14 +434,9 @@ def process_directory_recursive(
         print(f"  Failed: {_stats['failed']}")
         print(f"  Total processed: {_stats['successful'] + _stats['failed']}")
 
-        # Save path mappings if anonymization was enabled
+        # Save CSV mappings if anonymization was enabled
         if anonymize_paths and _filename_anonymizer:
-            mapping_file = output_dir / "path_mappings.json"
-            _filename_anonymizer.save_mappings(
-                output_path=mapping_file,
-                input_root=str(_root_dir),
-                output_root=str(output_dir)
-            )
+            _filename_anonymizer.save_all_mappings(output_dir=output_dir)
 
     return _stats
 

@@ -2,7 +2,7 @@
 Filename and folder name anonymizer with PII detection and reversible mapping.
 """
 
-import json
+import csv
 from pathlib import Path
 from datetime import datetime
 from typing import List, Dict, Optional
@@ -15,55 +15,57 @@ from pydantic import BaseModel, Field
 from .config import AnonymizerConfig
 
 
-class FilenameSegment(BaseModel):
-    """A segment of a filename that contains PII."""
-    original_text: str = Field(description="Original text segment containing PII")
-    anonymized_text: str = Field(description="Anonymized replacement text (e.g., PER_001)")
-    phi_category: str = Field(description="Category of PHI (PERSON, DATE, ID, LOCATION, etc.)")
-    start_position: int = Field(description="Start position in original filename")
-    end_position: int = Field(description="End position in original filename")
+class PHIDetection(BaseModel):
+    """A detected PHI value in a filename."""
+    original_value: str = Field(description="Original PHI value (e.g., '10045929', 'John_Doe')")
+    category: str = Field(description="Category of PHI (PERSON, DATE, ID, LOCATION, etc.)")
 
 
 class FilenameAnonymizationResult(BaseModel):
     """Result of filename PII detection and anonymization."""
     original_filename: str = Field(description="Original filename")
-    anonymized_filename: str = Field(description="Anonymized filename with PII replaced")
-    segments: List[FilenameSegment] = Field(
+    anonymized_filename: str = Field(description="Anonymized filename with generic placeholders (e.g., hosp_admissions_ID.csv)")
+    phi_detections: List[PHIDetection] = Field(
         default_factory=list,
-        description="List of PII segments that were anonymized"
+        description="List of PHI values detected and their categories"
     )
 
 
-class PathMapping(BaseModel):
-    """Mapping between original and anonymized paths with annotations."""
-    original_path: str = Field(description="Original relative path")
-    anonymized_path: str = Field(description="Anonymized relative path")
-    is_directory: bool = Field(description="Whether this is a directory mapping")
-    filename_segments: List[FilenameSegment] = Field(
-        default_factory=list,
-        description="PII segments found in filename/folder name"
-    )
-    timestamp: str = Field(description="When this mapping was created")
+class FileMapping:
+    """Simple file mapping for CSV export."""
+    def __init__(self, original_name: str, anonymized_name: str, phi_values: str, phi_categories: str):
+        self.original_name = original_name
+        self.anonymized_name = anonymized_name
+        self.phi_values = phi_values
+        self.phi_categories = phi_categories
 
 
-class PathMappingCollection(BaseModel):
-    """Collection of all path mappings for a processing run."""
-    metadata: Dict[str, str] = Field(description="Metadata about the anonymization run")
-    mappings: List[PathMapping] = Field(
-        default_factory=list,
-        description="List of all path mappings"
-    )
+class FolderMapping:
+    """Simple folder mapping for CSV export."""
+    def __init__(self, original_name: str, anonymized_name: str, phi_values: str, phi_categories: str):
+        self.original_name = original_name
+        self.anonymized_name = anonymized_name
+        self.phi_values = phi_values
+        self.phi_categories = phi_categories
 
 
 class FilenameAnonymizer:
     """
     Anonymizes filenames and folder names by detecting PII and replacing with sequential IDs.
     Maintains a reversible mapping for evaluation purposes.
+
+    Context-aware: Ensures that files within the same patient folder use consistent IDs.
     """
 
-    def __init__(self, config: AnonymizerConfig):
-        """Initialize filename anonymizer."""
+    def __init__(self, config: AnonymizerConfig, output_dir: Path = None):
+        """Initialize filename anonymizer.
+
+        Args:
+            config: Anonymizer configuration
+            output_dir: Output directory for tracking files (optional, for immediate tracking)
+        """
         self.config = config
+        self.output_dir = output_dir
 
         # Initialize LLM for PII detection in filenames
         self.llm = AzureChatOpenAI(
@@ -74,178 +76,358 @@ class FilenameAnonymizer:
             temperature=0.0,  # Use deterministic output for consistency
         ).with_structured_output(FilenameAnonymizationResult)
 
-        # Category counters for sequential ID generation
-        self.category_counters: Dict[str, int] = defaultdict(int)
+        # Store file mappings by folder for CSV export
+        # Key: folder path (e.g., "patient_ID_ID/csv"), Value: list of FileMappings
+        self.file_mappings_by_folder: Dict[str, List[FileMapping]] = defaultdict(list)
 
-        # Store all mappings for JSON output
-        self.mappings: List[PathMapping] = []
+        # Store folder mappings for CSV export
+        self.folder_mappings: List[FolderMapping] = []
+
+        # Counter for folder name sequences
+        # Key: anonymized folder name (e.g., "patient_ID_ID"), Value: counter
+        self.folder_counters: Dict[str, int] = defaultdict(int)
+
+        # Track which CSV files have been initialized with headers
+        self._initialized_csv_files: set = set()
+
+        # Initialize folder mapping CSV if output_dir is provided
+        if self.output_dir:
+            self._initialize_folder_csv()
+
+    def _initialize_folder_csv(self) -> None:
+        """Initialize the folder mapping CSV file with headers."""
+        if not self.output_dir:
+            return
+
+        csv_path = self.output_dir / "folder_anonymization.csv"
+        csv_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Only write header if file doesn't exist
+        if not csv_path.exists():
+            with open(csv_path, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                writer.writerow(['original_foldername', 'anonymized_foldername', 'phi_values', 'phi_categories'])
+
+    def _initialize_file_csv(self, folder_path: str) -> None:
+        """Initialize a file mapping CSV file with headers for a specific folder.
+
+        Args:
+            folder_path: Path to the folder (e.g., "patient_ID_ID_001/csv")
+        """
+        if not self.output_dir:
+            return
+
+        csv_path = self.output_dir / folder_path / "filename_anonymization.csv"
+
+        # Check if already initialized
+        if str(csv_path) in self._initialized_csv_files:
+            return
+
+        csv_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Only write header if file doesn't exist
+        if not csv_path.exists():
+            with open(csv_path, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                writer.writerow(['original_filename', 'anonymized_filename', 'phi_values', 'phi_categories'])
+
+        self._initialized_csv_files.add(str(csv_path))
+
+    def get_sequential_folder_name(self, base_anonymized_name: str) -> str:
+        """
+        Get a sequential folder name with a counter suffix.
+
+        Args:
+            base_anonymized_name: Base anonymized name (e.g., "patient_ID_ID")
+
+        Returns:
+            Sequential folder name (e.g., "patient_ID_ID_001", "patient_ID_ID_002")
+        """
+        self.folder_counters[base_anonymized_name] += 1
+        counter = self.folder_counters[base_anonymized_name]
+        return f"{base_anonymized_name}_{counter:03d}"
 
     def anonymize_filename(self, filename: str, is_directory: bool = False) -> FilenameAnonymizationResult:
         """
-        Detect PII in filename and replace with sequential IDs per category.
+        Detect PII in filename and replace with generic category placeholders.
+        For directories, adds a sequential counter suffix (e.g., patient_ID_ID_001).
 
         Args:
             filename: Original filename (without path)
             is_directory: Whether this is a directory name
 
         Returns:
-            FilenameAnonymizationResult with original filename, anonymized filename, and segments
+            FilenameAnonymizationResult with original filename, anonymized filename, and PHI detections
         """
         # Prepare the prompt for PII detection in filename
-        prompt = f"""You are a PHI (Protected Health Information) detection expert. Analyze the following {'folder' if is_directory else 'file'} name and identify ALL PHI elements.
+        prompt = f"""You are a PHI (Protected Health Information) detection expert specializing in medical record filenames. Analyze the following {'folder' if is_directory else 'file'} name and create a simple anonymized version.
 
 {'Folder' if is_directory else 'File'} name: {filename}
 
-Common PHI categories in filenames:
-- PERSON: Patient names, doctor names (e.g., "John_Doe", "DrSmith")
-- ID: Patient IDs, medical record numbers, account numbers (e.g., "PID-12345", "MRN123456")
-- DATE: Dates of birth, admission dates, dates in YYYYMMDD format (e.g., "19850615", "20230725")
-- LOCATION: Hospital names, room numbers, addresses (e.g., "RoomA", "NYC")
-- PHONE: Phone numbers or parts of phone numbers
-- EMAIL: Email addresses or parts of email
-- OTHER: Any other identifiable information
+Task: Replace ALL PHI (Protected Health Information) with generic category placeholders.
 
-For each PHI element found:
-1. Extract the exact text from the filename
-2. Identify its category
-3. Mark its start and end position in the string
-4. In the anonymized_filename, replace ONLY the PHI elements while preserving:
-   - File extension
-   - Underscores, hyphens, and other separators
-   - Non-PHI descriptive words (e.g., "ecg", "report", "summary")
+Common PHI categories:
+- ID: Replace all patient IDs, medical record numbers, admission IDs with "ID"
+  * Numeric sequences of 6+ digits are typically IDs (e.g., "20010003", "10005749")
+- PERSON: Replace all names with "PERSON"
+- DATE: Replace all dates with "DATE"
+- LOCATION: Replace locations with "LOCATION"
 
-Example:
+Rules:
+- Replace PHI values with ONLY the category name (e.g., "ID", "PERSON", "DATE")
+- Keep file extensions (.csv, .pdf, etc.)
+- Keep underscores, hyphens, and separators
+- Keep medical terms like "hosp", "ecg", "admissions", etc.
+- List all detected PHI values in phi_detections
+
+Examples:
+
 Input: "ecg_Noah_Rhodes_PID-183667_20130725.pdf"
 Output:
-- segments:
-  * "Noah_Rhodes" (PERSON, positions 4-15)
-  * "PID-183667" (ID, positions 17-27)
-  * "20130725" (DATE, positions 29-37)
-- anonymized_filename: "ecg_PERSON_ID_DATE.pdf" (we'll replace PERSON/ID/DATE with sequential IDs in post-processing)
+- anonymized_filename: "ecg_PERSON_ID_DATE.pdf"
+- phi_detections: [
+    {{"original_value": "Noah_Rhodes", "category": "PERSON"}},
+    {{"original_value": "PID-183667", "category": "ID"}},
+    {{"original_value": "20130725", "category": "DATE"}}
+  ]
 
-If no PHI is detected, return the original filename unchanged with an empty segments list.
+Input: "hosp_admissions_20130725.csv"
+Output:
+- anonymized_filename: "hosp_admissions_ID.csv"
+- phi_detections: [{{"original_value": "20130725", "category": "ID"}}]
 
-IMPORTANT:
-- Be thorough - medical filenames often contain multiple PHI elements
-- Preserve the file structure and extension
-- Mark exact positions for reversible mapping
+Input: "patient_10005749_20010003"
+Output:
+- anonymized_filename: "patient_ID_ID"
+- phi_detections: [
+    {{"original_value": "10005749", "category": "ID"}},
+    {{"original_value": "20010003", "category": "ID"}}
+  ]
+
+If no PHI: return original filename with empty phi_detections list.
 """
 
         try:
-            # Call LLM to detect PII in filename
+            # Call LLM to detect PII in filename and get anonymized version
             message = HumanMessage(content=prompt)
             result = self.llm.invoke([message])
 
-            # Post-process: replace category placeholders with sequential IDs
-            anonymized_filename = result.anonymized_filename
-            updated_segments = []
-
-            # Sort segments by position to process in order
-            for segment in sorted(result.segments, key=lambda s: s.start_position):
-                # Generate sequential ID for this category
-                category = segment.phi_category.upper()
-                self.category_counters[category] += 1
-                sequential_id = f"{category}-{self.category_counters[category]:03d}"
-
-                # Update the segment with the sequential ID
-                updated_segment = FilenameSegment(
-                    original_text=segment.original_text,
-                    anonymized_text=sequential_id,
-                    phi_category=category,
-                    start_position=segment.start_position,
-                    end_position=segment.end_position
-                )
-                updated_segments.append(updated_segment)
-
-            # Rebuild anonymized filename with sequential IDs
-            # Replace from end to start to preserve positions
-            anonymized_filename = result.original_filename
-            for segment in reversed(updated_segments):
-                anonymized_filename = (
-                    anonymized_filename[:segment.start_position] +
-                    segment.anonymized_text +
-                    anonymized_filename[segment.end_position:]
-                )
+            # For directories containing "ID", add sequential counter suffix
+            if is_directory and "ID" in result.anonymized_filename:
+                base_anonymized_name = result.anonymized_filename
+                sequential_name = self.get_sequential_folder_name(base_anonymized_name)
+                anonymized_filename = sequential_name
+            else:
+                anonymized_filename = result.anonymized_filename
 
             return FilenameAnonymizationResult(
                 original_filename=result.original_filename,
                 anonymized_filename=anonymized_filename,
-                segments=updated_segments
+                phi_detections=result.phi_detections
             )
 
         except Exception as e:
             print(f"Warning: Failed to anonymize filename '{filename}': {e}")
             print("Using fallback: prepending 'anonymized_' to filename")
             # Fallback: just add prefix
+            fallback_name = f"anonymized_{filename}"
+
+            # For directories containing "ID", still add sequential counter even in fallback
+            if is_directory and "ID" in fallback_name:
+                fallback_name = self.get_sequential_folder_name(fallback_name)
+
             return FilenameAnonymizationResult(
                 original_filename=filename,
-                anonymized_filename=f"anonymized_{filename}",
-                segments=[]
+                anonymized_filename=fallback_name,
+                phi_detections=[]
             )
 
-    def add_mapping(
+    def add_file_mapping(
         self,
-        original_path: Path,
-        anonymized_path: Path,
-        is_directory: bool = False,
-        segments: Optional[List[FilenameSegment]] = None
+        folder_path: str,
+        original_filename: str,
+        anonymized_filename: str,
+        phi_detections: Optional[List[PHIDetection]] = None
     ) -> None:
         """
-        Add a path mapping to the collection.
+        Add a file mapping and immediately write to CSV if output_dir is set.
+        Only writes to CSV if the filename actually changed.
 
         Args:
-            original_path: Original path (relative to input root)
-            anonymized_path: Anonymized path (relative to output root)
-            is_directory: Whether this is a directory
-            segments: PII segments found in the filename/folder name
+            folder_path: Path to the folder containing the file (e.g., "patient_ID_ID/csv")
+            original_filename: Original filename
+            anonymized_filename: Anonymized filename
+            phi_detections: PHI values detected in the filename
         """
-        mapping = PathMapping(
-            original_path=str(original_path),
-            anonymized_path=str(anonymized_path),
-            is_directory=is_directory,
-            filename_segments=segments or [],
-            timestamp=datetime.now().isoformat()
-        )
-        self.mappings.append(mapping)
+        # Only add mapping if filename actually changed
+        if original_filename == anonymized_filename:
+            return
 
-    def save_mappings(self, output_path: Path, input_root: str, output_root: str) -> None:
+        detections = phi_detections or []
+        phi_values = "; ".join([d.original_value for d in detections])
+        phi_categories = "; ".join([d.category for d in detections])
+
+        mapping = FileMapping(
+            original_name=original_filename,
+            anonymized_name=anonymized_filename,
+            phi_values=phi_values,
+            phi_categories=phi_categories
+        )
+        self.file_mappings_by_folder[folder_path].append(mapping)
+
+        # Immediately write to CSV if output_dir is set
+        if self.output_dir:
+            self._append_file_mapping_to_csv(folder_path, mapping)
+
+    def _append_file_mapping_to_csv(self, folder_path: str, mapping: FileMapping) -> None:
         """
-        Save all path mappings to a JSON file.
+        Append a file mapping to the CSV file immediately.
 
         Args:
-            output_path: Path where to save the mapping JSON file
-            input_root: Root directory of input files
-            output_root: Root directory of output files
+            folder_path: Path to the folder containing the file
+            mapping: File mapping to append
         """
-        collection = PathMappingCollection(
-            metadata={
-                "timestamp": datetime.now().isoformat(),
-                "input_root": input_root,
-                "output_root": output_root,
-                "total_mappings": str(len(self.mappings)),
-                "files_anonymized": str(sum(1 for m in self.mappings if not m.is_directory)),
-                "folders_anonymized": str(sum(1 for m in self.mappings if m.is_directory)),
-                "total_phi_segments": str(sum(len(m.filename_segments) for m in self.mappings))
-            },
-            mappings=self.mappings
-        )
+        if not self.output_dir:
+            return
 
-        # Save to JSON with pretty formatting
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(output_path, 'w', encoding='utf-8') as f:
-            json.dump(
-                collection.model_dump(mode='json'),
-                f,
-                indent=2,
-                ensure_ascii=False
-            )
-        print(f"\nSaved path mappings to: {output_path}")
-        print(f"Total mappings: {len(self.mappings)}")
-        print(f"Files: {collection.metadata['files_anonymized']}, "
-              f"Folders: {collection.metadata['folders_anonymized']}, "
-              f"PHI segments: {collection.metadata['total_phi_segments']}")
+        # Initialize CSV file if needed
+        self._initialize_file_csv(folder_path)
+
+        csv_path = self.output_dir / folder_path / "filename_anonymization.csv"
+        csv_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Append the mapping
+        with open(csv_path, 'a', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                mapping.original_name,
+                mapping.anonymized_name,
+                mapping.phi_values,
+                mapping.phi_categories
+            ])
+
+    def _append_folder_mapping_to_csv(self, mapping: FolderMapping) -> None:
+        """
+        Append a folder mapping to the CSV file immediately.
+
+        Args:
+            mapping: Folder mapping to append
+        """
+        if not self.output_dir:
+            return
+
+        csv_path = self.output_dir / "folder_anonymization.csv"
+
+        # Append the mapping
+        with open(csv_path, 'a', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                mapping.original_name,
+                mapping.anonymized_name,
+                mapping.phi_values,
+                mapping.phi_categories
+            ])
+
+    def add_folder_mapping(
+        self,
+        original_foldername: str,
+        anonymized_foldername: str,
+        phi_detections: Optional[List[PHIDetection]] = None
+    ) -> None:
+        """
+        Add a folder mapping and immediately write to CSV if output_dir is set.
+        Only writes to CSV if the folder name actually changed.
+
+        Args:
+            original_foldername: Original folder name
+            anonymized_foldername: Anonymized folder name
+            phi_detections: PHI values detected in the folder name
+        """
+        # Only add mapping if folder name actually changed
+        if original_foldername == anonymized_foldername:
+            return
+
+        detections = phi_detections or []
+        phi_values = "; ".join([d.original_value for d in detections])
+        phi_categories = "; ".join([d.category for d in detections])
+
+        mapping = FolderMapping(
+            original_name=original_foldername,
+            anonymized_name=anonymized_foldername,
+            phi_values=phi_values,
+            phi_categories=phi_categories
+        )
+        self.folder_mappings.append(mapping)
+
+        # Immediately write to CSV if output_dir is set
+        if self.output_dir:
+            self._append_folder_mapping_to_csv(mapping)
+
+    def save_file_mappings_csv(self, output_dir: Path) -> None:
+        """
+        Save file mappings to CSV files (one per folder).
+
+        Args:
+            output_dir: Root output directory where CSV files will be saved
+        """
+        for folder_path, mappings in self.file_mappings_by_folder.items():
+            # Create CSV in the folder where the files are
+            csv_path = output_dir / folder_path / "filename_anonymization.csv"
+            csv_path.parent.mkdir(parents=True, exist_ok=True)
+
+            with open(csv_path, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                writer.writerow(['original_filename', 'anonymized_filename', 'phi_values', 'phi_categories'])
+
+                for mapping in mappings:
+                    writer.writerow([
+                        mapping.original_name,
+                        mapping.anonymized_name,
+                        mapping.phi_values,
+                        mapping.phi_categories
+                    ])
+
+            print(f"Saved filename mappings to: {csv_path} ({len(mappings)} files)")
+
+    def save_folder_mappings_csv(self, output_dir: Path) -> None:
+        """
+        Save folder mappings to a CSV file in the root output directory.
+
+        Args:
+            output_dir: Root output directory where CSV file will be saved
+        """
+        if not self.folder_mappings:
+            return
+
+        csv_path = output_dir / "folder_anonymization.csv"
+        csv_path.parent.mkdir(parents=True, exist_ok=True)
+
+        with open(csv_path, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            writer.writerow(['original_foldername', 'anonymized_foldername', 'phi_values', 'phi_categories'])
+
+            for mapping in self.folder_mappings:
+                writer.writerow([
+                    mapping.original_name,
+                    mapping.anonymized_name,
+                    mapping.phi_values,
+                    mapping.phi_categories
+                ])
+
+        print(f"Saved folder mappings to: {csv_path} ({len(self.folder_mappings)} folders)")
+
+    def save_all_mappings(self, output_dir: Path) -> None:
+        """
+        Save all mappings (files and folders) to CSV files.
+
+        Args:
+            output_dir: Root output directory
+        """
+        self.save_file_mappings_csv(output_dir)
+        self.save_folder_mappings_csv(output_dir)
 
     def reset_counters(self) -> None:
-        """Reset category counters (useful for testing or separate runs)."""
-        self.category_counters.clear()
-        self.mappings.clear()
+        """Reset all mappings and counters (useful for testing or separate runs)."""
+        self.file_mappings_by_folder.clear()
+        self.folder_mappings.clear()
+        self.folder_counters.clear()

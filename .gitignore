@@ -10,3 +10,5 @@ frontend/node_modules/
 data/test_input
 data/test_output
 node_modules/
+data/
+__pycache__
