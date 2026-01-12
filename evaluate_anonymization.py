@@ -149,6 +149,21 @@ class FilenameEvaluationResult:
 
 
 @dataclass
+class HEAEvaluationResult:
+    """Results from evaluating a single HEA (text) file"""
+    filename: str
+    total_phi: int = 0
+    true_positives: int = 0
+    false_negatives: int = 0
+    phi_not_redacted: List[str] = field(default_factory=list)
+    
+    @property
+    def recall(self) -> float:
+        denom = self.true_positives + self.false_negatives
+        return self.true_positives / denom if denom > 0 else 1.0
+
+
+@dataclass
 class PatientEvaluationResult:
     """Aggregated results for a single patient"""
     original_folder: str
@@ -156,6 +171,7 @@ class PatientEvaluationResult:
     csv_results: List[CSVEvaluationResult] = field(default_factory=list)
     image_results: List[ImageEvaluationResult] = field(default_factory=list)
     pdf_results: List[ImageEvaluationResult] = field(default_factory=list)
+    hea_results: List[HEAEvaluationResult] = field(default_factory=list)
     filename_results: List[FilenameEvaluationResult] = field(default_factory=list)
 
 
@@ -166,19 +182,31 @@ class OverallEvaluationResult:
     labels_dir: str = ""
     results_dir: str = ""
     patient_results: List[PatientEvaluationResult] = field(default_factory=list)
-    
+
     # Aggregate CSV metrics
     csv_total_phi: int = 0
     csv_true_positives: int = 0
     csv_false_negatives: int = 0
     csv_recall: float = 0.0
-    
-    # Aggregate Image metrics
+
+    # Aggregate Image metrics (DICOM, PNG)
     image_total_regions: int = 0
     image_mean_coverage: float = 0.0
     image_fully_covered: int = 0
     image_not_covered: int = 0
-    
+
+    # Aggregate PDF metrics (separate from images)
+    pdf_total_regions: int = 0
+    pdf_mean_coverage: float = 0.0
+    pdf_fully_covered: int = 0
+    pdf_not_covered: int = 0
+
+    # Aggregate HEA (text) metrics
+    hea_total_phi: int = 0
+    hea_true_positives: int = 0
+    hea_false_negatives: int = 0
+    hea_recall: float = 0.0
+
     # Aggregate Filename metrics
     filename_total: int = 0
     filename_anonymized: int = 0
@@ -193,6 +221,48 @@ def extract_phi_from_text(text: str) -> Set[str]:
     """Extract all PHI values from text marked with <PER> tags"""
     pattern = r'<PER>(.*?)</PER>'
     return set(re.findall(pattern, text))
+
+
+def extract_phi_with_positions(text: str) -> List[Tuple[str, int, int]]:
+    """
+    Extract all PHI values from text with their positions (after tag removal).
+
+    Returns list of (phi_value, start_pos, end_pos) tuples where positions
+    refer to the text AFTER tags have been removed.
+
+    Example:
+        Input:  "Patient is <PER>67</PER> years old, BP: 120/67"
+        Output: [("67", 11, 13)]
+
+        After tag removal: "Patient is 67 years old, BP: 120/67"
+        Position 11-13 corresponds to the PHI "67", not the BP "67"
+    """
+    phi_positions = []
+    pattern = r'<PER>(.*?)</PER>'
+
+    # Track how many characters we've seen in the original text
+    current_pos = 0
+    # Track position in text after tag removal
+    adjusted_pos = 0
+
+    for match in re.finditer(pattern, text):
+        phi_value = match.group(1)
+        match_start = match.start()
+        match_end = match.end()
+
+        # Add the length of text before this match (no tags)
+        adjusted_pos += (match_start - current_pos)
+
+        # Record the PHI position in tag-free text
+        start_in_clean = adjusted_pos
+        end_in_clean = adjusted_pos + len(phi_value)
+        phi_positions.append((phi_value, start_in_clean, end_in_clean))
+
+        # Update positions
+        adjusted_pos += len(phi_value)
+        current_pos = match_end
+
+    return phi_positions
 
 
 def remove_tags(text: str) -> str:
@@ -288,24 +358,64 @@ def load_phi_annotations(csv_path: str) -> List[PHIAnnotation]:
 
 def evaluate_csv_field(source_value: str, redacted_value: str, min_phi_length: int = 3) -> Tuple[int, int, List[str]]:
     """
-    Evaluate redaction for a single CSV field.
-    
+    Evaluate redaction for a single CSV field using position-based comparison.
+
+    This function:
+    1. Extracts PHI values and their positions from the labeled source text
+    2. Removes tags from source to get clean text
+    3. Compares each PHI region in the clean text with the corresponding region in redacted text
+    4. Only marks as FN if the PHI value still appears at its ORIGINAL position
+
+    Example:
+        source_value:   "Patient is <PER>67</PER> years old, BP: 120/67"
+        redacted_value: "Patient is [AGE] years old, BP: 120/67"
+
+        - Extracts PHI "67" at position 11-13 (after tag removal)
+        - Compares "67" with "[AGE]" at position 11-16 in redacted text
+        - Different → TP (correctly redacted)
+        - The "67" in "120/67" is ignored (different position)
+
     Returns: (true_positives, false_negatives, phi_not_redacted)
     """
     tp = 0
     fn = 0
     not_redacted = []
-    
-    phi_set = extract_phi_from_text(source_value)
-    
-    for phi in phi_set:
-        # Check if PHI appears literally in redacted value
-        if phi in redacted_value:
-            fn += 1
-            not_redacted.append(phi)
-        else:
+
+    # Extract PHI with their positions
+    phi_positions = extract_phi_with_positions(source_value)
+
+    if not phi_positions:
+        # No PHI to evaluate
+        return tp, fn, not_redacted
+
+    # For each PHI occurrence at a specific position
+    for phi_value, start_pos, end_pos in phi_positions:
+        # Extract the text at this position in the redacted value
+        # We need to check if the region has been changed
+
+        # Handle cases where redacted text might be longer/shorter
+        # We check a window around the position
+        if start_pos >= len(redacted_value):
+            # Position doesn't exist in redacted text (text was shortened)
+            # This is acceptable - consider it redacted
             tp += 1
-    
+            continue
+
+        # Check if the exact PHI value still appears at or near this position
+        # We allow some flexibility for replacement tokens that might be different lengths
+        window_start = max(0, start_pos - len(phi_value))
+        window_end = min(len(redacted_value), end_pos + len(phi_value))
+        window_text = redacted_value[window_start:window_end]
+
+        # Check if PHI appears in this window
+        if phi_value in window_text:
+            # PHI still present at original position
+            fn += 1
+            not_redacted.append(f"{phi_value}@pos{start_pos}")
+        else:
+            # PHI successfully removed/replaced at this position
+            tp += 1
+
     return tp, fn, not_redacted
 
 
@@ -352,6 +462,58 @@ def evaluate_csv_file(label_path: str, result_path: str) -> CSVEvaluationResult:
             result.true_positives += tp
             result.false_negatives += fn
             result.phi_not_redacted.extend(not_redacted)
+    
+    return result
+
+
+# ============================================================================
+# HEA (Text) Evaluation
+# ============================================================================
+
+def evaluate_hea_file(label_path: str, result_path: str) -> HEAEvaluationResult:
+    """
+    Evaluate a single HEA text file by comparing labeled PHI with anonymized output.
+    
+    HEA files are ECG header files containing PHI marked with <PER> tags.
+    The evaluation compares line by line to check if PHI was properly redacted.
+    """
+    filename = os.path.basename(label_path)
+    result = HEAEvaluationResult(filename=filename)
+    
+    if not os.path.exists(label_path):
+        print(f"  Warning: Label file not found: {label_path}")
+        return result
+    
+    if not os.path.exists(result_path):
+        print(f"  Warning: Result file not found: {result_path}")
+        return result
+    
+    # Read both files
+    with open(label_path, 'r', encoding='utf-8') as f:
+        label_content = f.read()
+    
+    with open(result_path, 'r', encoding='utf-8') as f:
+        result_content = f.read()
+    
+    # Split into lines for line-by-line comparison
+    label_lines = label_content.split('\n')
+    result_lines = result_content.split('\n')
+    
+    # Compare line by line
+    for i, label_line in enumerate(label_lines):
+        if '<PER>' not in label_line:
+            continue
+        
+        # Get corresponding result line (if exists)
+        result_line = result_lines[i] if i < len(result_lines) else ''
+        
+        # Use the same position-based evaluation as CSV fields
+        tp, fn, not_redacted = evaluate_csv_field(label_line, result_line)
+        
+        result.total_phi += tp + fn
+        result.true_positives += tp
+        result.false_negatives += fn
+        result.phi_not_redacted.extend(not_redacted)
     
     return result
 
@@ -494,7 +656,7 @@ def detect_redaction_boxes(original_img: np.ndarray, redacted_img: np.ndarray,
 
 
 def match_boxes(gt_boxes: List[Dict], redaction_boxes: List[Dict]) -> List[Tuple[Dict, Optional[Dict], float, float]]:
-    """Match ground truth boxes with detected redaction boxes"""
+    """Match ground truth boxes with detected redaction boxes (legacy box-based method)"""
     matches = []
     
     for gt_box in gt_boxes:
@@ -516,10 +678,63 @@ def match_boxes(gt_boxes: List[Dict], redaction_boxes: List[Dict]) -> List[Tuple
     return matches
 
 
+def calculate_pixel_coverage(redacted_img: np.ndarray, gt_box: Dict, 
+                              black_threshold: int = 10) -> float:
+    """
+    Calculate what fraction of a ground truth PHI region is black (redacted)
+    in the redacted image using direct pixel analysis.
+    
+    This is more accurate than box-matching because:
+    1. It doesn't depend on detecting redaction boxes via contours
+    2. It directly measures if PHI regions are actually blacked out
+    3. Works even when redactions span multiple fragmented areas
+    
+    Args:
+        redacted_img: The redacted image as numpy array (BGR or grayscale)
+        gt_box: Ground truth bounding box with 'x', 'y', 'width', 'height'
+        black_threshold: Pixel values below this are considered black/redacted
+    
+    Returns:
+        Float between 0.0 and 1.0 representing fraction of region that is black
+    """
+    x, y, w, h = gt_box['x'], gt_box['y'], gt_box['width'], gt_box['height']
+    
+    # Ensure coordinates are within image bounds
+    img_h, img_w = redacted_img.shape[:2]
+    x = max(0, min(x, img_w - 1))
+    y = max(0, min(y, img_h - 1))
+    w = min(w, img_w - x)
+    h = min(h, img_h - y)
+    
+    if w <= 0 or h <= 0:
+        return 0.0
+    
+    # Extract the region from the redacted image
+    region = redacted_img[y:y+h, x:x+w]
+    
+    # Convert to grayscale if needed
+    if len(region.shape) == 3:
+        gray = cv2.cvtColor(region, cv2.COLOR_BGR2GRAY)
+    else:
+        gray = region
+    
+    # Count black pixels
+    total_pixels = w * h
+    black_pixels = np.sum(gray < black_threshold)
+    
+    return black_pixels / total_pixels if total_pixels > 0 else 0.0
+
+
 def evaluate_image_file(original_path: str, redacted_path: str, 
                         annotations: List[PHIAnnotation],
                         original_filename: str) -> ImageEvaluationResult:
-    """Evaluate a single image file (DICOM or PNG)"""
+    """
+    Evaluate a single image file (DICOM or PNG) using pixel-based coverage analysis.
+    
+    This method directly checks if PHI regions are blacked out in the redacted image,
+    rather than trying to detect and match redaction boxes. This is more accurate
+    because it doesn't depend on contour detection which can fragment redacted areas.
+    """
     result = ImageEvaluationResult(filename=original_filename)
     
     # Filter annotations for this file
@@ -533,66 +748,63 @@ def evaluate_image_file(original_path: str, redacted_path: str,
         print(f"  Warning: OpenCV not available for image evaluation")
         return result
     
-    # Load images
-    if original_path.lower().endswith('.dcm'):
-        original_img = load_dicom_image(original_path)
+    # Load redacted image only (we just need to check if regions are black)
+    if redacted_path.lower().endswith('.dcm'):
         redacted_img = load_dicom_image(redacted_path)
     else:
-        original_img = cv2.imread(original_path)
         redacted_img = cv2.imread(redacted_path, cv2.IMREAD_UNCHANGED)
     
-    if original_img is None or redacted_img is None:
-        print(f"  Warning: Could not load images for {original_filename}")
+    if redacted_img is None:
+        print(f"  Warning: Could not load redacted image for {original_filename}")
         return result
     
-    # Detect redactions
-    redaction_boxes = detect_redaction_boxes(original_img, redacted_img)
-    result.detected_redactions = len(redaction_boxes)
+    # Handle images with alpha channel
+    if len(redacted_img.shape) == 3 and redacted_img.shape[2] == 4:
+        redacted_img = cv2.cvtColor(redacted_img, cv2.COLOR_BGRA2BGR)
     
-    # Convert annotations to box format
-    gt_boxes = []
+    # Convert annotations to box format and calculate pixel-based coverage
+    coverages = []
     for ann in file_annotations:
-        gt_boxes.append({
+        gt_box = {
             'x': ann.x, 'y': ann.y, 
             'width': ann.width, 'height': ann.height,
             'field': ann.field, 'text': ann.text
+        }
+        
+        # Calculate pixel-based coverage (what fraction of region is black)
+        coverage = calculate_pixel_coverage(redacted_img, gt_box)
+        coverages.append(coverage)
+        
+        # Store details
+        result.details.append({
+            'field': ann.field,
+            'text': ann.text,
+            'iou': coverage,  # For compatibility, use coverage as IoU proxy
+            'coverage': coverage,
+            'status': 'covered' if coverage >= 0.95 else ('partial' if coverage >= 0.5 else 'missing')
         })
     
-    # Match boxes
-    matches = match_boxes(gt_boxes, redaction_boxes)
-    
-    # Calculate metrics
-    ious = [iou for _, _, iou, _ in matches]
-    coverages = [cov for _, _, _, cov in matches]
-    
-    result.mean_iou = sum(ious) / len(ious) if ious else 0.0
+    # Calculate aggregate metrics
+    result.mean_iou = sum(coverages) / len(coverages) if coverages else 0.0
     result.mean_coverage = sum(coverages) / len(coverages) if coverages else 0.0
     result.fully_covered = sum(1 for cov in coverages if cov >= 0.95)
     result.partially_covered = sum(1 for cov in coverages if 0.5 <= cov < 0.95)
     result.not_covered = sum(1 for cov in coverages if cov < 0.5)
-    
-    # Store details
-    for gt_box, red_box, iou, coverage in matches:
-        result.details.append({
-            'field': gt_box.get('field', ''),
-            'text': gt_box.get('text', ''),
-            'iou': iou,
-            'coverage': coverage,
-            'status': 'covered' if coverage >= 0.95 else ('partial' if coverage >= 0.5 else 'missing')
-        })
+    result.detected_redactions = result.fully_covered + result.partially_covered  # Approximate
     
     return result
 
 
 # ============================================================================
-# PDF Evaluation
+# PDF Evaluation (Box-based with image differencing)
 # ============================================================================
 
 def evaluate_pdf_file(original_path: str, redacted_path: str,
                       annotations: List[PHIAnnotation],
                       original_filename: str) -> ImageEvaluationResult:
     """
-    Evaluate a PDF file by converting pages to images and checking redactions.
+    Evaluate a PDF file by converting pages to images and detecting redactions
+    using image differencing and bounding box matching.
     """
     result = ImageEvaluationResult(filename=original_filename)
     
@@ -644,23 +856,29 @@ def evaluate_pdf_file(original_path: str, redacted_path: str,
         elif redacted_pix.n == 3:
             redacted_img = cv2.cvtColor(redacted_img, cv2.COLOR_RGB2BGR)
         
-        # Detect redactions
+        # Get page height for coordinate transformation
+        # PDF coordinate system has y=0 at bottom, but image has y=0 at top
+        page_height = original_page.rect.height
+        
+        # Detect redaction boxes by comparing original and redacted images
         redaction_boxes = detect_redaction_boxes(original_img, redacted_img)
         result.detected_redactions = len(redaction_boxes)
         
-        # Scale annotation coordinates based on zoom factor
+        # Convert annotations to ground truth boxes (with coordinate transformation)
         gt_boxes = []
         for ann in file_annotations:
+            # Convert y from PDF coords (origin at bottom) to image coords (origin at top)
+            image_y = page_height - ann.y - ann.height
             gt_boxes.append({
                 'x': int(ann.x * zoom), 
-                'y': int(ann.y * zoom),
+                'y': int(image_y * zoom),
                 'width': int(ann.width * zoom), 
                 'height': int(ann.height * zoom),
                 'field': ann.field, 
                 'text': ann.text
             })
         
-        # Match boxes
+        # Match ground truth boxes with detected redaction boxes
         matches = match_boxes(gt_boxes, redaction_boxes)
         
         # Calculate metrics
@@ -831,6 +1049,43 @@ def evaluate_patient(labels_dir: str, results_dir: str,
             print(f"  {status} {original_filename}: {eval_result.fully_covered}/{eval_result.total_phi_regions} "
                   f"fully covered (mean coverage: {eval_result.mean_coverage:.2%})")
         
+        # ---- HEA File Evaluation (ECG modality only) ----
+        if modality == 'ecg':
+            # Find and evaluate .hea files
+            hea_files_evaluated = False
+            for label_file in os.listdir(label_ann_dir):
+                if not label_file.endswith('.hea'):
+                    continue
+                
+                if not hea_files_evaluated:
+                    print(f"\n📝 Evaluating HEA files...")
+                    hea_files_evaluated = True
+                
+                label_path = os.path.join(label_ann_dir, label_file)
+                
+                # Find corresponding anonymized .hea file
+                anonymized_filename = file_map.get(label_file, '')
+                result_path = os.path.join(result_modality_dir, anonymized_filename) if anonymized_filename else ''
+                
+                # If no mapping found, try to find any .hea file in results
+                if not os.path.exists(result_path):
+                    for f in os.listdir(result_modality_dir):
+                        if f.endswith('.hea'):
+                            result_path = os.path.join(result_modality_dir, f)
+                            anonymized_filename = f
+                            break
+                
+                if not os.path.exists(result_path):
+                    print(f"  Warning: Result file not found for {label_file}")
+                    continue
+                
+                hea_result = evaluate_hea_file(label_path, result_path)
+                result.hea_results.append(hea_result)
+                
+                status = "✓" if hea_result.false_negatives == 0 else "✗"
+                print(f"  {status} {label_file}: {hea_result.true_positives}/{hea_result.total_phi} PHI redacted "
+                      f"(recall: {hea_result.recall:.2%})")
+        
         # Evaluate filename anonymization
         for mapping in result_mappings:
             fn_result = FilenameEvaluationResult(
@@ -899,13 +1154,25 @@ def run_evaluation_pipeline(labels_dir: str, results_dir: str, output_dir: str) 
             overall.csv_total_phi += csv_result.total_phi
             overall.csv_true_positives += csv_result.true_positives
             overall.csv_false_negatives += csv_result.false_negatives
-        
-        # Image metrics
-        for img_result in patient.image_results + patient.pdf_results:
+
+        # Image metrics (DICOM, PNG only)
+        for img_result in patient.image_results:
             overall.image_total_regions += img_result.total_phi_regions
             overall.image_fully_covered += img_result.fully_covered
             overall.image_not_covered += img_result.not_covered
-        
+
+        # PDF metrics (separate)
+        for pdf_result in patient.pdf_results:
+            overall.pdf_total_regions += pdf_result.total_phi_regions
+            overall.pdf_fully_covered += pdf_result.fully_covered
+            overall.pdf_not_covered += pdf_result.not_covered
+
+        # HEA (text) metrics
+        for hea_result in patient.hea_results:
+            overall.hea_total_phi += hea_result.total_phi
+            overall.hea_true_positives += hea_result.true_positives
+            overall.hea_false_negatives += hea_result.false_negatives
+
         # Filename metrics
         for fn_result in patient.filename_results:
             overall.filename_total += 1
@@ -913,13 +1180,19 @@ def run_evaluation_pipeline(labels_dir: str, results_dir: str, output_dir: str) 
                 overall.filename_anonymized += 1
             else:
                 overall.filename_phi_leaked += 1
-    
+
     # Calculate rates
     if overall.csv_total_phi > 0:
         overall.csv_recall = overall.csv_true_positives / overall.csv_total_phi
-    
+
     if overall.image_total_regions > 0:
         overall.image_mean_coverage = overall.image_fully_covered / overall.image_total_regions
+
+    if overall.pdf_total_regions > 0:
+        overall.pdf_mean_coverage = overall.pdf_fully_covered / overall.pdf_total_regions
+
+    if overall.hea_total_phi > 0:
+        overall.hea_recall = overall.hea_true_positives / overall.hea_total_phi
     
     return overall
 
@@ -929,42 +1202,64 @@ def print_summary(overall: OverallEvaluationResult):
     print("\n" + "="*80)
     print("EVALUATION SUMMARY")
     print("="*80)
-    
+
     print(f"\n📊 CSV EVALUATION:")
     print(f"   Total PHI instances:      {overall.csv_total_phi}")
     print(f"   Correctly redacted (TP):  {overall.csv_true_positives}")
     print(f"   Not redacted (FN):        {overall.csv_false_negatives}")
     print(f"   Recall:                   {overall.csv_recall:.2%}")
-    
+
     if overall.csv_false_negatives > 0:
         print(f"   ⚠️  WARNING: {overall.csv_false_negatives} PHI instances were NOT properly redacted!")
     else:
         print(f"   ✓ All CSV PHI successfully redacted!")
-    
+
     print(f"\n🖼️  IMAGE EVALUATION (DICOM, PNG):")
     print(f"   Total PHI regions:        {overall.image_total_regions}")
     print(f"   Fully covered (≥95%):     {overall.image_fully_covered}")
     print(f"   Not adequately covered:   {overall.image_not_covered}")
     print(f"   Coverage rate:            {overall.image_mean_coverage:.2%}")
-    
+
     if overall.image_not_covered > 0:
         print(f"   ⚠️  WARNING: {overall.image_not_covered} PHI regions are not adequately covered!")
     else:
         print(f"   ✓ All image PHI regions properly redacted!")
-    
-    print(f"\n📝 FILENAME EVALUATION:")
+
+    print(f"\n📄 PDF EVALUATION (ECG):")
+    print(f"   Total PHI regions:        {overall.pdf_total_regions}")
+    print(f"   Fully covered (≥95%):     {overall.pdf_fully_covered}")
+    print(f"   Not adequately covered:   {overall.pdf_not_covered}")
+    print(f"   Coverage rate:            {overall.pdf_mean_coverage:.2%}")
+
+    if overall.pdf_not_covered > 0:
+        print(f"   ⚠️  WARNING: {overall.pdf_not_covered} PHI regions in PDFs are not adequately covered!")
+    else:
+        print(f"   ✓ All PDF PHI regions properly redacted!")
+
+    print(f"\n📝 HEA EVALUATION (ECG Headers):")
+    print(f"   Total PHI instances:      {overall.hea_total_phi}")
+    print(f"   Correctly redacted (TP):  {overall.hea_true_positives}")
+    print(f"   Not redacted (FN):        {overall.hea_false_negatives}")
+    print(f"   Recall:                   {overall.hea_recall:.2%}")
+
+    if overall.hea_false_negatives > 0:
+        print(f"   ⚠️  WARNING: {overall.hea_false_negatives} PHI instances in HEA files were NOT properly redacted!")
+    else:
+        print(f"   ✓ All HEA file PHI successfully redacted!")
+
+    print(f"\n📛 FILENAME EVALUATION:")
     print(f"   Total files:              {overall.filename_total}")
     print(f"   Properly anonymized:      {overall.filename_anonymized}")
     print(f"   PHI leaked in filename:   {overall.filename_phi_leaked}")
-    
+
     if overall.filename_phi_leaked > 0:
         print(f"   ⚠️  WARNING: {overall.filename_phi_leaked} filenames contain PHI!")
     else:
         print(f"   ✓ All filenames properly anonymized!")
-    
+
     # Overall assessment
     print(f"\n{'='*80}")
-    total_issues = overall.csv_false_negatives + overall.image_not_covered + overall.filename_phi_leaked
+    total_issues = overall.csv_false_negatives + overall.image_not_covered + overall.pdf_not_covered + overall.hea_false_negatives + overall.filename_phi_leaked
     if total_issues == 0:
         print("🎉 OVERALL: All anonymization checks passed!")
     else:
@@ -997,6 +1292,18 @@ def save_results(overall: OverallEvaluationResult, output_dir: str):
             'not_covered': overall.image_not_covered,
             'coverage_rate': overall.image_mean_coverage
         },
+        'pdf_metrics': {
+            'total_regions': overall.pdf_total_regions,
+            'fully_covered': overall.pdf_fully_covered,
+            'not_covered': overall.pdf_not_covered,
+            'coverage_rate': overall.pdf_mean_coverage
+        },
+        'hea_metrics': {
+            'total_phi': overall.hea_total_phi,
+            'true_positives': overall.hea_true_positives,
+            'false_negatives': overall.hea_false_negatives,
+            'recall': overall.hea_recall
+        },
         'filename_metrics': {
             'total': overall.filename_total,
             'anonymized': overall.filename_anonymized,
@@ -1012,23 +1319,31 @@ def save_results(overall: OverallEvaluationResult, output_dir: str):
     
     # Save detailed CSV report
     csv_report_file = os.path.join(output_dir, f"evaluation_details_{timestamp}.csv")
-    
+
     with open(csv_report_file, 'w', newline='', encoding='utf-8') as f:
         writer = csv.writer(f)
         writer.writerow(['patient', 'type', 'filename', 'metric', 'value'])
-        
+
         for patient in overall.patient_results:
             for csv_result in patient.csv_results:
                 writer.writerow([patient.original_folder, 'csv', csv_result.filename, 'recall', f"{csv_result.recall:.4f}"])
                 writer.writerow([patient.original_folder, 'csv', csv_result.filename, 'false_negatives', csv_result.false_negatives])
-            
-            for img_result in patient.image_results + patient.pdf_results:
+
+            for img_result in patient.image_results:
                 writer.writerow([patient.original_folder, 'image', img_result.filename, 'mean_coverage', f"{img_result.mean_coverage:.4f}"])
                 writer.writerow([patient.original_folder, 'image', img_result.filename, 'not_covered', img_result.not_covered])
-            
+
+            for pdf_result in patient.pdf_results:
+                writer.writerow([patient.original_folder, 'pdf', pdf_result.filename, 'mean_coverage', f"{pdf_result.mean_coverage:.4f}"])
+                writer.writerow([patient.original_folder, 'pdf', pdf_result.filename, 'not_covered', pdf_result.not_covered])
+
+            for hea_result in patient.hea_results:
+                writer.writerow([patient.original_folder, 'hea', hea_result.filename, 'recall', f"{hea_result.recall:.4f}"])
+                writer.writerow([patient.original_folder, 'hea', hea_result.filename, 'false_negatives', hea_result.false_negatives])
+
             for fn_result in patient.filename_results:
                 writer.writerow([patient.original_folder, 'filename', fn_result.original, 'is_anonymized', fn_result.is_anonymized])
-    
+
     print(f"📁 Detailed report saved to: {csv_report_file}")
 
 
@@ -1069,7 +1384,7 @@ def main():
     save_results(overall, args.output)
     
     # Exit with error code if there are issues
-    total_issues = overall.csv_false_negatives + overall.image_not_covered + overall.filename_phi_leaked
+    total_issues = overall.csv_false_negatives + overall.image_not_covered + overall.pdf_not_covered + overall.filename_phi_leaked
     if total_issues > 0:
         exit(1)
 
