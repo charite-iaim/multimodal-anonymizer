@@ -25,6 +25,7 @@ from anonymizer.processors.text_processor import TextProcessor
 from anonymizer.processors.dicom_processor import DICOMProcessor
 from anonymizer.processors.pdf_ocr_processor import PDFOCRProcessor
 from anonymizer.config import AnonymizerConfig
+from anonymizer.filename_anonymizer import FilenameAnonymizer
 
 app = FastAPI(title="PHI Anonymization API", version="1.0.0")
 
@@ -175,14 +176,32 @@ async def process_file(
     output_dir = job_dir / "output"
     output_dir.mkdir(exist_ok=True)
 
-    # Create output file path with "anonymized_" prefix
-    output_filename = f"anonymized_{file.filename}"
-    output_path = output_dir / output_filename
-
     try:
         # Save uploaded file
         with open(input_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
+
+        # Anonymize filename using LLM
+        filename_anonymizer = FilenameAnonymizer(config)
+        filename_result = filename_anonymizer.anonymize_filename(file.filename, is_directory=False)
+        output_filename = filename_result.anonymized_filename
+        output_path = output_dir / output_filename
+
+        # Store filename mapping for later retrieval
+        filename_mapping = {
+            "original_filename": file.filename,
+            "anonymized_filename": output_filename,
+            "phi_segments": [
+                {
+                    "original_text": seg.original_text,
+                    "anonymized_text": seg.anonymized_text,
+                    "phi_category": seg.phi_category,
+                    "start_position": seg.start_position,
+                    "end_position": seg.end_position
+                }
+                for seg in filename_result.segments
+            ]
+        }
 
         # Determine processor
         processor = None
@@ -261,7 +280,8 @@ async def process_file(
             "status": "success",
             "job_id": job_id,
             "message": "File processed successfully",
-            "download_url": f"/api/download/{job_id}/{output_file.name}"
+            "download_url": f"/api/download/{job_id}/{output_file.name}",
+            "filename_mapping": filename_mapping
         }
 
         if video_url:

@@ -18,6 +18,7 @@ from anonymizer import (
     FileTypeDetector,
     DataType,
 )
+from anonymizer.filename_anonymizer import FilenameAnonymizer
 
 
 def get_processor(
@@ -114,7 +115,9 @@ def process_file(
     use_ocr: bool = False,
     use_llm_detection: bool = False,
     preserve_structure: bool = False,
-    relative_path: Path = None
+    relative_path: Path = None,
+    filename_anonymizer: FilenameAnonymizer = None,
+    anonymize_paths: bool = True
 ) -> bool:
     """
     Process a single file.
@@ -127,6 +130,8 @@ def process_file(
         use_llm_detection: If True, use multimodal LLM to detect file type
         preserve_structure: If True, preserve directory structure in output
         relative_path: Relative path from input root (used when preserve_structure=True)
+        filename_anonymizer: Optional FilenameAnonymizer instance for anonymizing filenames
+        anonymize_paths: If True, automatically anonymize filename (default: True)
 
     Returns:
         True if successful
@@ -137,21 +142,68 @@ def process_file(
         print(f"No processor available for: {input_path.name}")
         return False
 
+    # Automatically create filename anonymizer if needed and enabled
+    if anonymize_paths and filename_anonymizer is None:
+        filename_anonymizer = FilenameAnonymizer(config)
+
+    # Anonymize filename if enabled
+    if anonymize_paths and filename_anonymizer:
+        print(f"Anonymizing filename: {input_path.name}")
+        anonymization_result = filename_anonymizer.anonymize_filename(input_path.name, is_directory=False)
+        anonymized_filename = anonymization_result.anonymized_filename
+        print(f"Anonymized filename: {anonymized_filename}")
+        if anonymization_result.segments:
+            print(f"  Found {len(anonymization_result.segments)} PHI segments in filename:")
+            for seg in anonymization_result.segments:
+                print(f"    - {seg.original_text} ({seg.phi_category}) -> {seg.anonymized_text}")
+    else:
+        anonymized_filename = f"anonymized_{input_path.name}"
+        anonymization_result = None
+
     if preserve_structure and relative_path:
         # Preserve exact directory structure
         file_output_dir = output_dir / relative_path.parent
         file_output_dir.mkdir(parents=True, exist_ok=True)
-        output_path = file_output_dir / input_path.name
+        output_path = file_output_dir / anonymized_filename
+
+        # Record mapping if anonymizer is provided
+        if anonymize_paths and filename_anonymizer:
+            anonymized_relative_path = relative_path.parent / anonymized_filename
+            filename_anonymizer.add_mapping(
+                original_path=relative_path,
+                anonymized_path=anonymized_relative_path,
+                is_directory=False,
+                segments=anonymization_result.segments if anonymization_result else []
+            )
     else:
         # Create separate output folder for this file (original behavior)
         file_stem = input_path.stem  # filename without extension
         file_output_dir = output_dir / file_stem
         file_output_dir.mkdir(parents=True, exist_ok=True)
-        output_path = file_output_dir / f"anonymized_{input_path.name}"
+        output_path = file_output_dir / anonymized_filename
+
+        # Record mapping if anonymizer is provided
+        if anonymize_paths and filename_anonymizer:
+            filename_anonymizer.add_mapping(
+                original_path=Path(input_path.name),
+                anonymized_path=Path(file_stem) / anonymized_filename,
+                is_directory=False,
+                segments=anonymization_result.segments if anonymization_result else []
+            )
 
     try:
         processor.anonymize(input_path, output_path)
         print(f"Output saved to: {output_path}")
+
+        # Save mapping file if this is a standalone file processing
+        if anonymize_paths and filename_anonymizer and not preserve_structure:
+            mapping_file = file_output_dir / "path_mappings.json"
+            filename_anonymizer.save_mappings(
+                output_path=mapping_file,
+                input_root=str(input_path.parent),
+                output_root=str(output_dir)
+            )
+
         return True
     except Exception as e:
         import traceback
@@ -168,7 +220,8 @@ def process_directory(
     use_llm_detection: bool = False,
     recursive: bool = False,
     preserve_structure: bool = False,
-    skip_hidden: bool = True
+    skip_hidden: bool = True,
+    anonymize_paths: bool = True
 ):
     """
     Process all supported files in a directory.
@@ -182,6 +235,7 @@ def process_directory(
         recursive: If True, process subdirectories recursively
         preserve_structure: If True, preserve directory structure in output
         skip_hidden: If True, skip hidden files and directories (starting with '.')
+        anonymize_paths: If True, anonymize file and folder names
     """
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -198,12 +252,16 @@ def process_directory(
 
         print(f"Found {len(files)} files to process\n")
 
+        # Create filename anonymizer if needed
+        filename_anonymizer = FilenameAnonymizer(config) if anonymize_paths else None
+
         successful = 0
         failed = 0
 
         for file_path in files:
             print(f"\n{'='*60}")
-            if process_file(file_path, output_dir, config, use_ocr, use_llm_detection):
+            if process_file(file_path, output_dir, config, use_ocr, use_llm_detection,
+                          filename_anonymizer=filename_anonymizer, anonymize_paths=anonymize_paths):
                 successful += 1
             else:
                 failed += 1
@@ -212,6 +270,15 @@ def process_directory(
         print(f"Processing complete:")
         print(f"  Successful: {successful}")
         print(f"  Failed: {failed}")
+
+        # Save mappings if anonymization was enabled
+        if anonymize_paths and filename_anonymizer:
+            mapping_file = output_dir / "path_mappings.json"
+            filename_anonymizer.save_mappings(
+                output_path=mapping_file,
+                input_root=str(input_dir),
+                output_root=str(output_dir)
+            )
     else:
         # Recursive processing with structure preservation
         process_directory_recursive(
@@ -221,7 +288,8 @@ def process_directory(
             use_ocr=use_ocr,
             use_llm_detection=use_llm_detection,
             preserve_structure=preserve_structure,
-            skip_hidden=skip_hidden
+            skip_hidden=skip_hidden,
+            anonymize_paths=anonymize_paths
         )
 
 
@@ -233,8 +301,11 @@ def process_directory_recursive(
     use_llm_detection: bool = False,
     preserve_structure: bool = True,
     skip_hidden: bool = True,
+    anonymize_paths: bool = True,
     _root_dir: Path = None,
-    _stats: dict = None
+    _stats: dict = None,
+    _filename_anonymizer: FilenameAnonymizer = None,
+    _folder_mapping: dict = None
 ):
     """
     Recursively process all files in a directory tree, preserving structure.
@@ -247,18 +318,25 @@ def process_directory_recursive(
         use_llm_detection: If True, use multimodal LLM to detect file type
         preserve_structure: If True, preserve directory structure in output
         skip_hidden: If True, skip hidden files and directories
+        anonymize_paths: If True, anonymize file and folder names
         _root_dir: Internal parameter for tracking root directory
         _stats: Internal parameter for tracking statistics
+        _filename_anonymizer: Internal parameter for filename anonymization
+        _folder_mapping: Internal parameter for tracking folder name mappings
     """
     # Initialize on first call
     if _root_dir is None:
         _root_dir = input_dir
         _stats = {"successful": 0, "failed": 0, "skipped": 0}
+        _folder_mapping = {}
+        if anonymize_paths:
+            _filename_anonymizer = FilenameAnonymizer(config)
         print(f"Starting recursive directory processing...")
         print(f"Input directory: {input_dir}")
         print(f"Output directory: {output_dir}")
         print(f"Structure preservation: {preserve_structure}")
-        print(f"Skip hidden files: {skip_hidden}\n")
+        print(f"Skip hidden files: {skip_hidden}")
+        print(f"Anonymize paths: {anonymize_paths}\n")
 
     try:
         items = sorted(input_dir.iterdir())
@@ -273,10 +351,20 @@ def process_directory_recursive(
 
         if item.is_file():
             # Calculate relative path from root
-            relative_path = item.relative_to(_root_dir)
+            original_relative_path = item.relative_to(_root_dir)
+
+            # Build anonymized relative path by replacing folder names
+            if anonymize_paths and _folder_mapping:
+                anonymized_parts = []
+                for part in original_relative_path.parts[:-1]:  # All parts except filename
+                    anonymized_parts.append(_folder_mapping.get(part, part))
+                # Filename will be anonymized by process_file
+                anonymized_relative_path = Path(*anonymized_parts) if anonymized_parts else Path()
+            else:
+                anonymized_relative_path = original_relative_path.parent
 
             print(f"\n{'='*60}")
-            print(f"Processing: {relative_path}")
+            print(f"Processing: {original_relative_path}")
 
             success = process_file(
                 input_path=item,
@@ -285,7 +373,9 @@ def process_directory_recursive(
                 use_ocr=use_ocr,
                 use_llm_detection=use_llm_detection,
                 preserve_structure=preserve_structure,
-                relative_path=relative_path
+                relative_path=original_relative_path if not anonymize_paths else anonymized_relative_path / item.name,
+                filename_anonymizer=_filename_anonymizer,
+                anonymize_paths=anonymize_paths
             )
 
             if success:
@@ -295,7 +385,39 @@ def process_directory_recursive(
 
         elif item.is_dir():
             # Recursively process subdirectory
-            print(f"\nEntering directory: {item.relative_to(_root_dir)}/")
+            original_relative_dir = item.relative_to(_root_dir)
+            print(f"\nEntering directory: {original_relative_dir}/")
+
+            # Anonymize folder name if enabled
+            if anonymize_paths:
+                print(f"Anonymizing folder name: {item.name}")
+                anonymization_result = _filename_anonymizer.anonymize_filename(item.name, is_directory=True)
+                anonymized_folder_name = anonymization_result.anonymized_filename
+                print(f"Anonymized folder name: {anonymized_folder_name}")
+                if anonymization_result.segments:
+                    print(f"  Found {len(anonymization_result.segments)} PHI segments in folder name:")
+                    for seg in anonymization_result.segments:
+                        print(f"    - {seg.original_text} ({seg.phi_category}) -> {seg.anonymized_text}")
+
+                # Store folder mapping for building paths
+                _folder_mapping[item.name] = anonymized_folder_name
+
+                # Build anonymized relative path for this directory
+                anonymized_parts = []
+                for part in original_relative_dir.parts:
+                    anonymized_parts.append(_folder_mapping.get(part, part))
+                anonymized_relative_dir = Path(*anonymized_parts)
+
+                # Record folder mapping
+                _filename_anonymizer.add_mapping(
+                    original_path=original_relative_dir,
+                    anonymized_path=anonymized_relative_dir,
+                    is_directory=True,
+                    segments=anonymization_result.segments
+                )
+            else:
+                anonymized_relative_dir = original_relative_dir
+
             process_directory_recursive(
                 input_dir=item,
                 output_dir=output_dir,
@@ -304,17 +426,29 @@ def process_directory_recursive(
                 use_llm_detection=use_llm_detection,
                 preserve_structure=preserve_structure,
                 skip_hidden=skip_hidden,
+                anonymize_paths=anonymize_paths,
                 _root_dir=_root_dir,
-                _stats=_stats
+                _stats=_stats,
+                _filename_anonymizer=_filename_anonymizer,
+                _folder_mapping=_folder_mapping
             )
 
-    # Print summary only on initial call
+    # Print summary and save mappings only on initial call
     if input_dir == _root_dir:
         print(f"\n{'='*60}")
         print(f"Processing complete:")
         print(f"  Successful: {_stats['successful']}")
         print(f"  Failed: {_stats['failed']}")
         print(f"  Total processed: {_stats['successful'] + _stats['failed']}")
+
+        # Save path mappings if anonymization was enabled
+        if anonymize_paths and _filename_anonymizer:
+            mapping_file = output_dir / "path_mappings.json"
+            _filename_anonymizer.save_mappings(
+                output_path=mapping_file,
+                input_root=str(_root_dir),
+                output_root=str(output_dir)
+            )
 
     return _stats
 
@@ -355,8 +489,15 @@ def main():
         "--debug", "-d", action="store_true",
         help="Save debug files (JSON metadata, intermediate PNG files from DICOM, etc.). By default, only anonymized files are saved."
     )
+    parser.add_argument(
+        "--no-anonymize-paths", action="store_true",
+        help="Disable automatic filename and folder name anonymization. By default, paths ARE anonymized."
+    )
 
     args = parser.parse_args()
+
+    # Invert the flag - default is to anonymize paths
+    anonymize_paths = not args.no_anonymize_paths
 
     # Create config
     config = AnonymizerConfig(
@@ -387,10 +528,17 @@ def main():
         print(f"Debug mode: enabled (JSON metadata and intermediate files will be saved)")
     else:
         print(f"Debug mode: disabled (only anonymized files will be saved)")
+
+    if anonymize_paths:
+        print(f"Path anonymization: enabled (filenames and folders will be anonymized)")
+    else:
+        print(f"Path anonymization: disabled (only file contents will be anonymized)")
     print()
 
     if input_path.is_file():
-        process_file(input_path, output_dir, config, use_ocr, use_llm_detection)
+        # For single file, process with automatic filename anonymization
+        process_file(input_path, output_dir, config, use_ocr, use_llm_detection,
+                    anonymize_paths=anonymize_paths)
     elif input_path.is_dir():
         process_directory(
             input_path,
@@ -400,7 +548,8 @@ def main():
             use_llm_detection,
             recursive=args.recursive,
             preserve_structure=args.preserve_structure,
-            skip_hidden=not args.include_hidden
+            skip_hidden=not args.include_hidden,
+            anonymize_paths=anonymize_paths
         )
     else:
         print(f"Error: Invalid input path: {input_path}")
