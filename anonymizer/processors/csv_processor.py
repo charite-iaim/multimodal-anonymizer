@@ -144,6 +144,7 @@ class CSVProcessor(FileProcessor):
     ) -> CSVAnonymizationResult:
         """
         Use LLM to identify and anonymize PII in CSV data.
+        Processes all rows in batches to handle large CSV files.
 
         Args:
             rows: CSV rows as list of dicts
@@ -152,22 +153,32 @@ class CSVProcessor(FileProcessor):
         Returns:
             CSVAnonymizationResult with anonymization details
         """
-        # Prepare CSV preview for LLM (limit to manageable size)
-        max_rows_to_send = min(len(rows), 50)  # Limit for context window
+        # Process in batches to handle large CSVs
+        batch_size = 50
+        all_anonymizations = []
 
-        # Create a formatted representation of the CSV
-        csv_preview = self._format_csv_for_llm(rows[:max_rows_to_send], headers)
+        total_batches = (len(rows) + batch_size - 1) // batch_size
 
-        prompt = f"""Analyze this CSV data from a medical discharge note and anonymize all Personal Identifiable Information (PII) by replacing each PHI character with an asterisk (*).
+        for batch_num in range(total_batches):
+            start_idx = batch_num * batch_size
+            end_idx = min(start_idx + batch_size, len(rows))
+            batch_rows = rows[start_idx:end_idx]
 
-CSV Data (showing {max_rows_to_send} of {len(rows)} rows):
+            print(f"  Processing batch {batch_num + 1}/{total_batches} (rows {start_idx}-{end_idx-1})")
+
+            # Create a formatted representation of the CSV batch
+            csv_preview = self._format_csv_for_llm(batch_rows, headers, start_idx)
+
+            prompt = f"""Analyze this CSV data from a medical discharge note and anonymize all Personal Identifiable Information (PII) by replacing each PHI character with an asterisk (*).
+
+CSV Data (rows {start_idx} to {end_idx-1} of {len(rows)} total rows):
 {csv_preview}
 
 PII categories to redact:
 - name: Patient names, physician names, doctor names, family member names
 - date: Dates (dates of birth, admission dates, discharge dates, specific dates in format YYYY-MM-DD or similar)
 - ages: Patient ages (e.g., "64")
-- address: Physical addresses, street addresses, facility names, location names
+- address: Physical addresses, street addresses, facility names, location names (e.g. hospital names)
 - id: Patient IDs, medical record numbers, unit numbers, any numeric identifiers
 - phone: Phone numbers
 - fax: Fax numbers
@@ -184,9 +195,11 @@ Redaction examples:
 - "2140-09-28" → "**********" (10 asterisks)
 - "64" → "**" (2 asterisks)
 - "617-555-3942" → "************" (12 asterisks)
+- "discharge_location: DIRECT EMER." → "discharge_location: DIRECT EMER." (no change, as "DIRECT EMER." is not PHI)
+- "admission_location: CLINIC REFERRAL" → "admission_location: CLINIC REFERRAL" (no change, as "CLINIC REFERRAL" is not PHI)
 
 For each cell containing PHI, provide:
-- row_index: The row number (0-based, excluding header row)
+- row_index: The row number (0-based, excluding header row - use the absolute row index from the entire CSV)
 - column_name: The column name
 - anonymized_value: The COMPLETE cell content with ALL PHI replaced by asterisks
 
@@ -195,36 +208,40 @@ CRITICAL:
 - Return the COMPLETE cell content, not truncated
 - Only include cells that contain PHI (skip cells with only medical info, medications, procedures, etc.)
 - Preserve all non-PHI text exactly as it appears
+- Use the absolute row_index from the entire CSV file (not relative to this batch)
 
 Example:
 Original: "Name:  Emily Carter                     Unit No:   5837209"
 Anonymized: "Name:  ************                     Unit No:   *******"
 """
 
-        message = HumanMessage(content=prompt)
+            message = HumanMessage(content=prompt)
 
-        try:
-            result: CSVAnonymizationResult = self.llm.invoke([message])
+            try:
+                result: CSVAnonymizationResult = self.llm.invoke([message])
 
-            # Print details
-            for anon in result.anonymizations:
-                print(f"  Row {anon.row_index}, Column '{anon.column_name}'")
+                # Add batch results to overall results
+                all_anonymizations.extend(result.anonymizations)
 
-            return result
+                # Print details for this batch
+                for anon in result.anonymizations:
+                    print(f"    Row {anon.row_index}, Column '{anon.column_name}'")
 
-        except Exception as e:
-            print(f"Error during anonymization: {e}")
-            import traceback
-            traceback.print_exc()
-            return CSVAnonymizationResult(anonymizations=[])
+            except Exception as e:
+                print(f"  Error during batch {batch_num + 1} anonymization: {e}")
+                import traceback
+                traceback.print_exc()
 
-    def _format_csv_for_llm(self, rows: List[Dict[str, str]], headers: List[str]) -> str:
+        return CSVAnonymizationResult(anonymizations=all_anonymizations)
+
+    def _format_csv_for_llm(self, rows: List[Dict[str, str]], headers: List[str], start_idx: int = 0) -> str:
         """
         Format CSV data for LLM prompt.
 
         Args:
             rows: CSV rows
             headers: Column headers
+            start_idx: Starting index for row numbering (for batch processing)
 
         Returns:
             Formatted string representation
@@ -235,7 +252,8 @@ Anonymized: "Name:  ************                     Unit No:   *******"
         lines.append("")
 
         for idx, row in enumerate(rows):
-            lines.append(f"=== ROW {idx} ===")
+            absolute_idx = start_idx + idx
+            lines.append(f"=== ROW {absolute_idx} ===")
             for header in headers:
                 value = row.get(header, "")
                 lines.append(f"{header}: {value}")

@@ -49,8 +49,8 @@ class TextProcessor(FileProcessor):
         ).with_structured_output(TextAnonymizationResult)
 
     def can_process(self, file_path: Path) -> bool:
-        """Check if file is a text file."""
-        return file_path.suffix.lower() == ".txt"
+        """Check if file is a text file (.txt or .hea ECG header)."""
+        return file_path.suffix.lower() in [".txt", ".hea"]
 
     def extract_content(self, file_path: Path) -> str:
         """Extract text content as string."""
@@ -162,6 +162,10 @@ class TextProcessor(FileProcessor):
     - anonymized_text: The asterisk replacement
     - phi_category: Category (name, date, address, id, phone, fax, email)
     - line_number: Approximate line number (best estimate)
+
+    === DOCUMENT TO ANONYMIZE ===
+    {content_to_process}
+    === END OF DOCUMENT ===
     """
 
         message = HumanMessage(content=prompt)
