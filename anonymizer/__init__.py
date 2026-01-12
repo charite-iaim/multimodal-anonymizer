@@ -11,6 +11,7 @@ from .processors.csv_processor import CSVProcessor
 from .processors.text_processor import TextProcessor
 from .processors.dicom_processor import DICOMProcessor
 from .file_type_detector import FileTypeDetector, DataType, FileTypeResult
+from .processing_tracker import ProcessingTracker
 
 __all__ = [
     "AnonymizerConfig",
@@ -24,4 +25,5 @@ __all__ = [
     "FileTypeDetector",
     "DataType",
     "FileTypeResult",
+    "ProcessingTracker",
 ]

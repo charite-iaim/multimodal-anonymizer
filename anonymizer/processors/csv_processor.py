@@ -8,6 +8,7 @@ import csv
 from pathlib import Path
 from datetime import datetime
 from typing import List, Dict, Any, Optional
+import time
 
 from langchain_openai import AzureChatOpenAI
 from langchain_core.messages import HumanMessage
@@ -39,12 +40,15 @@ class CSVProcessor(FileProcessor):
         super().__init__(config)
 
         # Initialize LLM for PII detection and anonymization
+        # Set a timeout of 5 minutes for API requests
         self.llm = AzureChatOpenAI(
             azure_deployment=config.azure_deployment_name,
             azure_endpoint=config.azure_endpoint,
             api_key=config.azure_api_key,
             api_version=config.azure_api_version,
             temperature=config.temperature,
+            timeout=300,  # 5 minutes timeout
+            request_timeout=300,  # Also set request_timeout
         ).with_structured_output(CSVAnonymizationResult)
 
     def can_process(self, file_path: Path) -> bool:
@@ -118,8 +122,9 @@ class CSVProcessor(FileProcessor):
 
         with open(file_path, 'r', encoding='utf-8') as f:
             reader = csv.DictReader(f)
-            headers = reader.fieldnames or []
-            rows = list(reader)
+            headers = [h for h in (reader.fieldnames or []) if h is not None]
+            # Filter out None keys that can appear from malformed CSVs with extra delimiters
+            rows = [{k: v for k, v in row.items() if k is not None} for row in reader]
 
         return rows, headers
 
@@ -189,6 +194,7 @@ Instructions:
 2. For each cell containing PHI, replace EVERY CHARACTER of the PHI text (including spaces) with an asterisk (*)
 3. Return the complete cell content with PHI replaced by asterisks
 4. Keep all other content unchanged
+5. Make sure to only redact actual PHI, do not redact medical terms, procedures, medications, diagnosis or other non-PII content
 
 Redaction examples:
 - "Emily Carter" → "************" (12 asterisks)
@@ -197,6 +203,7 @@ Redaction examples:
 - "617-555-3942" → "************" (12 asterisks)
 - "discharge_location: DIRECT EMER." → "discharge_location: DIRECT EMER." (no change, as "DIRECT EMER." is not PHI)
 - "admission_location: CLINIC REFERRAL" → "admission_location: CLINIC REFERRAL" (no change, as "CLINIC REFERRAL" is not PHI)
+- "poe_seq: 5" → "poe_seq: 5" (no change, as "5" is not PHI)
 
 For each cell containing PHI, provide:
 - row_index: The row number (0-based, excluding header row - use the absolute row index from the entire CSV)
@@ -217,20 +224,44 @@ Anonymized: "Name:  ************                     Unit No:   *******"
 
             message = HumanMessage(content=prompt)
 
-            try:
-                result: CSVAnonymizationResult = self.llm.invoke([message])
+            # Retry logic: try up to 3 times
+            max_retries = 3
+            retry_count = 0
+            success = False
 
-                # Add batch results to overall results
-                all_anonymizations.extend(result.anonymizations)
+            while retry_count < max_retries and not success:
+                try:
+                    if retry_count > 0:
+                        print(f"    Retry {retry_count}/{max_retries - 1}")
 
-                # Print details for this batch
-                for anon in result.anonymizations:
-                    print(f"    Row {anon.row_index}, Column '{anon.column_name}'")
+                    print(f"    Sending request to Azure OpenAI... (timeout: 5min)")
+                    start_time = time.time()
+                    result: CSVAnonymizationResult = self.llm.invoke([message])
+                    elapsed_time = time.time() - start_time
+                    print(f"    Response received in {elapsed_time:.1f}s")
 
-            except Exception as e:
-                print(f"  Error during batch {batch_num + 1} anonymization: {e}")
-                import traceback
-                traceback.print_exc()
+                    # Add batch results to overall results
+                    all_anonymizations.extend(result.anonymizations)
+
+                    # Print details for this batch
+                    for anon in result.anonymizations:
+                        print(f"    Row {anon.row_index}, Column '{anon.column_name}'")
+
+                    success = True
+
+                except Exception as e:
+                    retry_count += 1
+                    elapsed_time = time.time() - start_time
+                    print(f"  Error during batch {batch_num + 1} anonymization after {elapsed_time:.1f}s: {e}")
+
+                    if retry_count < max_retries:
+                        wait_time = retry_count * 5  # Exponential backoff: 5s, 10s, 15s
+                        print(f"  Waiting {wait_time}s before retry...")
+                        time.sleep(wait_time)
+                    else:
+                        print(f"  Failed after {max_retries} attempts. Moving to next batch.")
+                        import traceback
+                        traceback.print_exc()
 
         return CSVAnonymizationResult(anonymizations=all_anonymizations)
 

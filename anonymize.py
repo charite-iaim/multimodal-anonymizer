@@ -19,6 +19,7 @@ from anonymizer import (
     DataType,
 )
 from anonymizer.filename_anonymizer import FilenameAnonymizer
+from anonymizer.processing_tracker import ProcessingTracker
 
 
 def get_processor(
@@ -117,7 +118,8 @@ def process_file(
     preserve_structure: bool = False,
     relative_path: Path = None,
     filename_anonymizer: FilenameAnonymizer = None,
-    anonymize_paths: bool = True
+    anonymize_paths: bool = True,
+    tracker: ProcessingTracker = None
 ) -> bool:
     """
     Process a single file.
@@ -132,10 +134,16 @@ def process_file(
         relative_path: Relative path from input root (used when preserve_structure=True)
         filename_anonymizer: Optional FilenameAnonymizer instance for anonymizing filenames
         anonymize_paths: If True, automatically anonymize filename (default: True)
+        tracker: Optional ProcessingTracker instance for tracking processed files
 
     Returns:
         True if successful
     """
+    # Check if file has already been processed
+    if tracker and tracker.is_file_processed(input_path):
+        print(f"Skipping already processed file: {input_path.name}")
+        return True
+
     processor = get_processor(input_path, config, use_ocr, use_llm_detection)
 
     if processor is None:
@@ -199,6 +207,10 @@ def process_file(
         processor.anonymize(input_path, output_path)
         print(f"Output saved to: {output_path}")
 
+        # Mark file as processed in tracker
+        if tracker:
+            tracker.mark_file_processed(input_path, output_path, success=True)
+
         # Save CSV mappings if this is a standalone file processing
         if anonymize_paths and filename_anonymizer and not preserve_structure:
             filename_anonymizer.save_all_mappings(output_dir=output_dir)
@@ -208,6 +220,11 @@ def process_file(
         import traceback
         print(f"Error processing {input_path.name}: {e}")
         traceback.print_exc()
+
+        # Mark file as failed in tracker
+        if tracker:
+            tracker.mark_file_processed(input_path, output_path, success=False)
+
         return False
 
 
@@ -220,7 +237,8 @@ def process_directory(
     recursive: bool = False,
     preserve_structure: bool = False,
     skip_hidden: bool = True,
-    anonymize_paths: bool = True
+    anonymize_paths: bool = True,
+    tracker: ProcessingTracker = None
 ):
     """
     Process all supported files in a directory.
@@ -235,6 +253,7 @@ def process_directory(
         preserve_structure: If True, preserve directory structure in output
         skip_hidden: If True, skip hidden files and directories (starting with '.')
         anonymize_paths: If True, anonymize file and folder names
+        tracker: Optional ProcessingTracker instance for tracking processed files
     """
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -256,11 +275,20 @@ def process_directory(
 
         successful = 0
         failed = 0
+        skipped = 0
 
         for file_path in files:
             print(f"\n{'='*60}")
+
+            # Check if file was already processed
+            if tracker and tracker.is_file_processed(file_path):
+                print(f"Skipping already processed file: {file_path.name}")
+                skipped += 1
+                continue
+
             if process_file(file_path, output_dir, config, use_ocr, use_llm_detection,
-                          filename_anonymizer=filename_anonymizer, anonymize_paths=anonymize_paths):
+                          filename_anonymizer=filename_anonymizer, anonymize_paths=anonymize_paths,
+                          tracker=tracker):
                 successful += 1
             else:
                 failed += 1
@@ -269,10 +297,15 @@ def process_directory(
         print(f"Processing complete:")
         print(f"  Successful: {successful}")
         print(f"  Failed: {failed}")
+        print(f"  Skipped: {skipped}")
 
         # Save CSV mappings if anonymization was enabled
         if anonymize_paths and filename_anonymizer:
             filename_anonymizer.save_all_mappings(output_dir=output_dir)
+
+        # Save tracker data
+        if tracker:
+            tracker.save()
     else:
         # Recursive processing with structure preservation
         process_directory_recursive(
@@ -283,7 +316,8 @@ def process_directory(
             use_llm_detection=use_llm_detection,
             preserve_structure=preserve_structure,
             skip_hidden=skip_hidden,
-            anonymize_paths=anonymize_paths
+            anonymize_paths=anonymize_paths,
+            tracker=tracker
         )
 
 
@@ -296,6 +330,7 @@ def process_directory_recursive(
     preserve_structure: bool = True,
     skip_hidden: bool = True,
     anonymize_paths: bool = True,
+    tracker: ProcessingTracker = None,
     _root_dir: Path = None,
     _stats: dict = None,
     _filename_anonymizer: FilenameAnonymizer = None,
@@ -313,13 +348,15 @@ def process_directory_recursive(
         preserve_structure: If True, preserve directory structure in output
         skip_hidden: If True, skip hidden files and directories
         anonymize_paths: If True, anonymize file and folder names
+        tracker: Optional ProcessingTracker instance for tracking processed files
         _root_dir: Internal parameter for tracking root directory
         _stats: Internal parameter for tracking statistics
         _filename_anonymizer: Internal parameter for filename anonymization
         _folder_mapping: Internal parameter for tracking folder name mappings
     """
     # Initialize on first call
-    if _root_dir is None:
+    is_root_call = _root_dir is None
+    if is_root_call:
         _root_dir = input_dir
         _stats = {"successful": 0, "failed": 0, "skipped": 0}
         _folder_mapping = {}
@@ -330,7 +367,10 @@ def process_directory_recursive(
         print(f"Output directory: {output_dir}")
         print(f"Structure preservation: {preserve_structure}")
         print(f"Skip hidden files: {skip_hidden}")
-        print(f"Anonymize paths: {anonymize_paths}\n")
+        print(f"Anonymize paths: {anonymize_paths}")
+        if tracker:
+            print(f"Tracking: enabled")
+        print()
 
     try:
         items = sorted(input_dir.iterdir())
@@ -360,6 +400,12 @@ def process_directory_recursive(
             print(f"\n{'='*60}")
             print(f"Processing: {original_relative_path}")
 
+            # Check if file was already processed
+            if tracker and tracker.is_file_processed(item):
+                print(f"Skipping already processed file: {item.name}")
+                _stats["skipped"] += 1
+                continue
+
             success = process_file(
                 input_path=item,
                 output_dir=output_dir,
@@ -369,13 +415,18 @@ def process_directory_recursive(
                 preserve_structure=preserve_structure,
                 relative_path=original_relative_path if not anonymize_paths else anonymized_relative_path / item.name,
                 filename_anonymizer=_filename_anonymizer,
-                anonymize_paths=anonymize_paths
+                anonymize_paths=anonymize_paths,
+                tracker=tracker
             )
 
             if success:
                 _stats["successful"] += 1
             else:
                 _stats["failed"] += 1
+
+            # Save tracker after each file to ensure progress is not lost
+            if tracker:
+                tracker.save()
 
         elif item.is_dir():
             # Recursively process subdirectory
@@ -420,6 +471,7 @@ def process_directory_recursive(
                 preserve_structure=preserve_structure,
                 skip_hidden=skip_hidden,
                 anonymize_paths=anonymize_paths,
+                tracker=tracker,
                 _root_dir=_root_dir,
                 _stats=_stats,
                 _filename_anonymizer=_filename_anonymizer,
@@ -427,16 +479,22 @@ def process_directory_recursive(
             )
 
     # Print summary and save mappings only on initial call
-    if input_dir == _root_dir:
+    if is_root_call:
         print(f"\n{'='*60}")
         print(f"Processing complete:")
         print(f"  Successful: {_stats['successful']}")
         print(f"  Failed: {_stats['failed']}")
+        print(f"  Skipped: {_stats['skipped']}")
         print(f"  Total processed: {_stats['successful'] + _stats['failed']}")
 
         # Save CSV mappings if anonymization was enabled
         if anonymize_paths and _filename_anonymizer:
             _filename_anonymizer.save_all_mappings(output_dir=output_dir)
+
+        # Save tracker data (final save)
+        if tracker:
+            tracker.save()
+            tracker.print_stats()
 
     return _stats
 
@@ -481,6 +539,18 @@ def main():
         "--no-anonymize-paths", action="store_true",
         help="Disable automatic filename and folder name anonymization. By default, paths ARE anonymized."
     )
+    parser.add_argument(
+        "--tracking-file", "-t", type=str, default=None,
+        help="Path to tracking file (JSON) for skipping already processed files. If not specified, tracking is disabled."
+    )
+    parser.add_argument(
+        "--no-hash", action="store_true",
+        help="Disable file hash computation in tracking (faster but won't detect file modifications)"
+    )
+    parser.add_argument(
+        "--clear-tracking", action="store_true",
+        help="Clear all tracking data before processing"
+    )
 
     args = parser.parse_args()
 
@@ -497,6 +567,19 @@ def main():
     output_dir = Path(args.output)
     use_ocr = (args.mode == "ocr")
     use_llm_detection = args.auto_detect
+
+    # Initialize tracker if tracking file is specified
+    tracker = None
+    if args.tracking_file:
+        tracking_file_path = Path(args.tracking_file)
+        compute_hashes = not args.no_hash
+        tracker = ProcessingTracker(tracking_file_path, compute_hashes=compute_hashes)
+
+        if args.clear_tracking:
+            print("Clearing all tracking data...")
+            tracker.clear_all()
+            tracker.save()
+            print("Tracking data cleared.\n")
 
     if not input_path.exists():
         print(f"Error: Input path does not exist: {input_path}")
@@ -521,12 +604,23 @@ def main():
         print(f"Path anonymization: enabled (filenames and folders will be anonymized)")
     else:
         print(f"Path anonymization: disabled (only file contents will be anonymized)")
+
+    if tracker:
+        print(f"Tracking: enabled (tracking file: {args.tracking_file})")
+        print(f"  Hash computation: {'disabled' if args.no_hash else 'enabled'}")
+        # Show existing tracking stats if available
+        stats = tracker.get_stats()
+        if stats['total_files'] > 0 or stats['total_directories'] > 0:
+            print(f"  Already tracked: {stats['completed_files']} files, {stats['completed_directories']} directories")
+    else:
+        print(f"Tracking: disabled")
+
     print()
 
     if input_path.is_file():
         # For single file, process with automatic filename anonymization
         process_file(input_path, output_dir, config, use_ocr, use_llm_detection,
-                    anonymize_paths=anonymize_paths)
+                    anonymize_paths=anonymize_paths, tracker=tracker)
     elif input_path.is_dir():
         process_directory(
             input_path,
@@ -537,7 +631,8 @@ def main():
             recursive=args.recursive,
             preserve_structure=args.preserve_structure,
             skip_hidden=not args.include_hidden,
-            anonymize_paths=anonymize_paths
+            anonymize_paths=anonymize_paths,
+            tracker=tracker
         )
     else:
         print(f"Error: Invalid input path: {input_path}")

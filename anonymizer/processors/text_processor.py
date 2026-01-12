@@ -165,7 +165,6 @@ class TextProcessor(FileProcessor):
 
     === DOCUMENT TO ANONYMIZE ===
     {content_to_process}
-    === END OF DOCUMENT ===
     """
 
         message = HumanMessage(content=prompt)

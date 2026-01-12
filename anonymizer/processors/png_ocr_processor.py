@@ -16,6 +16,12 @@ try:
 except ImportError:
     EASYOCR_AVAILABLE = False
 
+try:
+    import torch
+    TORCH_AVAILABLE = True
+except ImportError:
+    TORCH_AVAILABLE = False
+
 from langchain_openai import AzureChatOpenAI
 from langchain_core.messages import HumanMessage
 from pydantic import BaseModel, Field
@@ -59,8 +65,19 @@ class PNGOCRProcessor(FileProcessor):
             )
 
         # Initialize EasyOCR reader (English)
+        # Check if GPU is available
+        use_gpu = False
+        if TORCH_AVAILABLE:
+            use_gpu = torch.cuda.is_available()
+            if use_gpu:
+                print("GPU detected - using GPU for OCR processing")
+            else:
+                print("No GPU detected - using CPU for OCR processing")
+        else:
+            print("PyTorch not available - using CPU for OCR processing")
+
         print("Initializing EasyOCR reader...")
-        self.reader = easyocr.Reader(['en'], gpu=False)
+        self.reader = easyocr.Reader(['en'], gpu=use_gpu)
 
         # Initialize LLM for PII classification
         self.llm = AzureChatOpenAI(
