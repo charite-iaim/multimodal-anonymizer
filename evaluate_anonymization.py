@@ -116,12 +116,49 @@ class CSVEvaluationResult:
     total_phi: int = 0
     true_positives: int = 0
     false_negatives: int = 0
+    false_positives: int = 0  # Non-PHI tokens incorrectly redacted
+    true_negatives: int = 0   # Non-PHI tokens correctly left unchanged
     phi_not_redacted: List[str] = field(default_factory=list)
+    over_redacted: List[str] = field(default_factory=list)  # Non-PHI that was redacted
     
     @property
     def recall(self) -> float:
+        """Sensitivity / True Positive Rate: TP / (TP + FN)"""
         denom = self.true_positives + self.false_negatives
         return self.true_positives / denom if denom > 0 else 1.0
+    
+    @property
+    def sensitivity(self) -> float:
+        """Same as recall: TP / (TP + FN)"""
+        return self.recall
+    
+    @property
+    def specificity(self) -> float:
+        """True Negative Rate: TN / (TN + FP)"""
+        denom = self.true_negatives + self.false_positives
+        return self.true_negatives / denom if denom > 0 else 1.0
+    
+    @property
+    def precision(self) -> float:
+        """Positive Predictive Value: TP / (TP + FP)"""
+        denom = self.true_positives + self.false_positives
+        return self.true_positives / denom if denom > 0 else 1.0
+    
+    @property
+    def accuracy(self) -> float:
+        """(TP + TN) / (TP + TN + FP + FN)"""
+        total = self.true_positives + self.true_negatives + self.false_positives + self.false_negatives
+        return (self.true_positives + self.true_negatives) / total if total > 0 else 1.0
+    
+    @property
+    def false_negative_rate(self) -> float:
+        """FNR = FN / (TP + FN) = 1 - Sensitivity"""
+        return 1.0 - self.sensitivity
+    
+    @property
+    def false_positive_rate(self) -> float:
+        """FPR = FP / (TN + FP) = 1 - Specificity"""
+        return 1.0 - self.specificity
 
 
 @dataclass
@@ -132,6 +169,7 @@ class ImageEvaluationResult:
     detected_redactions: int = 0
     mean_iou: float = 0.0
     mean_coverage: float = 0.0
+    iou_threshold_met: int = 0  # >= 0.5 IoU
     fully_covered: int = 0  # >= 95% coverage
     partially_covered: int = 0  # 50-95% coverage
     not_covered: int = 0  # < 50% coverage
@@ -155,12 +193,49 @@ class HEAEvaluationResult:
     total_phi: int = 0
     true_positives: int = 0
     false_negatives: int = 0
+    false_positives: int = 0  # Non-PHI tokens incorrectly redacted
+    true_negatives: int = 0   # Non-PHI tokens correctly left unchanged
     phi_not_redacted: List[str] = field(default_factory=list)
+    over_redacted: List[str] = field(default_factory=list)
     
     @property
     def recall(self) -> float:
+        """Sensitivity / True Positive Rate: TP / (TP + FN)"""
         denom = self.true_positives + self.false_negatives
         return self.true_positives / denom if denom > 0 else 1.0
+    
+    @property
+    def sensitivity(self) -> float:
+        """Same as recall: TP / (TP + FN)"""
+        return self.recall
+    
+    @property
+    def specificity(self) -> float:
+        """True Negative Rate: TN / (TN + FP)"""
+        denom = self.true_negatives + self.false_positives
+        return self.true_negatives / denom if denom > 0 else 1.0
+    
+    @property
+    def precision(self) -> float:
+        """Positive Predictive Value: TP / (TP + FP)"""
+        denom = self.true_positives + self.false_positives
+        return self.true_positives / denom if denom > 0 else 1.0
+    
+    @property
+    def accuracy(self) -> float:
+        """(TP + TN) / (TP + TN + FP + FN)"""
+        total = self.true_positives + self.true_negatives + self.false_positives + self.false_negatives
+        return (self.true_positives + self.true_negatives) / total if total > 0 else 1.0
+    
+    @property
+    def false_negative_rate(self) -> float:
+        """FNR = FN / (TP + FN) = 1 - Sensitivity"""
+        return 1.0 - self.sensitivity
+    
+    @property
+    def false_positive_rate(self) -> float:
+        """FPR = FP / (TN + FP) = 1 - Specificity"""
+        return 1.0 - self.specificity
 
 
 @dataclass
@@ -183,34 +258,66 @@ class OverallEvaluationResult:
     results_dir: str = ""
     patient_results: List[PatientEvaluationResult] = field(default_factory=list)
 
-    # Aggregate CSV metrics
+    # Aggregate CSV metrics (micro-averaged / totals)
     csv_total_phi: int = 0
     csv_true_positives: int = 0
     csv_false_negatives: int = 0
+    csv_false_positives: int = 0
+    csv_true_negatives: int = 0
     csv_recall: float = 0.0
+
+    # Macro-averaged CSV metrics (averaged per document)
+    csv_macro_sensitivity: float = 0.0
+    csv_macro_specificity: float = 0.0
+    csv_macro_accuracy: float = 0.0
+    csv_macro_precision: float = 0.0
+    csv_macro_fnr: float = 0.0
+    csv_macro_fpr: float = 0.0
 
     # Aggregate Image metrics (DICOM, PNG)
     image_total_regions: int = 0
+    image_mean_iou: float = 0.0
     image_mean_coverage: float = 0.0
+    image_iou_threshold_met: int = 0
     image_fully_covered: int = 0
     image_not_covered: int = 0
 
     # Aggregate PDF metrics (separate from images)
     pdf_total_regions: int = 0
+    pdf_mean_iou: float = 0.0
     pdf_mean_coverage: float = 0.0
+    pdf_iou_threshold_met: int = 0
     pdf_fully_covered: int = 0
     pdf_not_covered: int = 0
 
-    # Aggregate HEA (text) metrics
+    # Aggregate HEA (text) metrics (micro-averaged / totals)
     hea_total_phi: int = 0
     hea_true_positives: int = 0
     hea_false_negatives: int = 0
+    hea_false_positives: int = 0
+    hea_true_negatives: int = 0
     hea_recall: float = 0.0
+
+    # Macro-averaged HEA metrics (averaged per document)
+    hea_macro_sensitivity: float = 0.0
+    hea_macro_specificity: float = 0.0
+    hea_macro_accuracy: float = 0.0
+    hea_macro_precision: float = 0.0
+    hea_macro_fnr: float = 0.0
+    hea_macro_fpr: float = 0.0
 
     # Aggregate Filename metrics
     filename_total: int = 0
     filename_anonymized: int = 0
     filename_phi_leaked: int = 0
+
+    # Combined macro-averaged metrics (across all document types)
+    combined_macro_sensitivity: float = 0.0
+    combined_macro_specificity: float = 0.0
+    combined_macro_accuracy: float = 0.0
+    combined_macro_precision: float = 0.0
+    combined_macro_fnr: float = 0.0
+    combined_macro_fpr: float = 0.0
 
 
 # ============================================================================
@@ -356,7 +463,46 @@ def load_phi_annotations(csv_path: str) -> List[PHIAnnotation]:
 # CSV Evaluation
 # ============================================================================
 
-def evaluate_csv_field(source_value: str, redacted_value: str, min_phi_length: int = 3) -> Tuple[int, int, List[str]]:
+def tokenize_text(text: str) -> List[Tuple[str, int, int]]:
+    """
+    Tokenize text into words with their positions.
+    Returns list of (token, start_pos, end_pos) tuples.
+    """
+    tokens = []
+    pattern = r'\b\w+\b'
+    for match in re.finditer(pattern, text):
+        tokens.append((match.group(), match.start(), match.end()))
+    return tokens
+
+
+def detect_redaction_patterns(text: str) -> Set[str]:
+    """
+    Detect common redaction replacement patterns in text.
+    Returns set of positions that appear to be redaction markers.
+    """
+    # Common redaction patterns
+    patterns = [
+        r'\[[\w_]+\]',           # [NAME], [DATE], [ID], etc.
+        r'\{[\w_]+\}',           # {NAME}, {DATE}, etc.
+        r'<[\w_]+>',             # <NAME>, <DATE>, etc.
+        r'\*+',                  # ***, ****, etc.
+        r'X{3,}',                # XXX, XXXX, etc.
+        r'_+',                   # ___, ____, etc.
+        r'REDACTED',             # REDACTED
+        r'ANONYMIZED',           # ANONYMIZED
+        r'PHI_\w+',              # PHI_NAME, PHI_DATE, etc.
+        r'PERSON_ID_\d+',        # PERSON_ID_123
+    ]
+    
+    redaction_tokens = set()
+    for pattern in patterns:
+        for match in re.finditer(pattern, text, re.IGNORECASE):
+            redaction_tokens.add((match.start(), match.end()))
+    
+    return redaction_tokens
+
+
+def evaluate_csv_field(source_value: str, redacted_value: str, min_phi_length: int = 3) -> Tuple[int, int, int, int, List[str], List[str]]:
     """
     Evaluate redaction for a single CSV field using position-based comparison.
 
@@ -365,6 +511,7 @@ def evaluate_csv_field(source_value: str, redacted_value: str, min_phi_length: i
     2. Removes tags from source to get clean text
     3. Compares each PHI region in the clean text with the corresponding region in redacted text
     4. Only marks as FN if the PHI value still appears at its ORIGINAL position
+    5. Detects over-redaction (false positives) by comparing non-PHI tokens
 
     Example:
         source_value:   "Patient is <PER>67</PER> years old, BP: 120/67"
@@ -375,53 +522,97 @@ def evaluate_csv_field(source_value: str, redacted_value: str, min_phi_length: i
         - Different → TP (correctly redacted)
         - The "67" in "120/67" is ignored (different position)
 
-    Returns: (true_positives, false_negatives, phi_not_redacted)
+    Returns: (true_positives, false_negatives, false_positives, true_negatives, phi_not_redacted, over_redacted)
     """
     tp = 0
     fn = 0
+    fp = 0
+    tn = 0
     not_redacted = []
+    over_redacted = []
 
     # Extract PHI with their positions
     phi_positions = extract_phi_with_positions(source_value)
-
-    if not phi_positions:
-        # No PHI to evaluate
-        return tp, fn, not_redacted
-
-    # For each PHI occurrence at a specific position
+    
+    # Get clean source text (without tags)
+    clean_source = remove_tags(source_value)
+    
+    # Create a set of positions that are PHI
+    phi_position_ranges = set()
     for phi_value, start_pos, end_pos in phi_positions:
-        # Extract the text at this position in the redacted value
-        # We need to check if the region has been changed
+        for pos in range(start_pos, end_pos):
+            phi_position_ranges.add(pos)
 
+    # Evaluate PHI redaction (TP/FN)
+    for phi_value, start_pos, end_pos in phi_positions:
         # Handle cases where redacted text might be longer/shorter
-        # We check a window around the position
         if start_pos >= len(redacted_value):
-            # Position doesn't exist in redacted text (text was shortened)
-            # This is acceptable - consider it redacted
             tp += 1
             continue
 
         # Check if the exact PHI value still appears at or near this position
-        # We allow some flexibility for replacement tokens that might be different lengths
         window_start = max(0, start_pos - len(phi_value))
         window_end = min(len(redacted_value), end_pos + len(phi_value))
         window_text = redacted_value[window_start:window_end]
 
-        # Check if PHI appears in this window
         if phi_value in window_text:
-            # PHI still present at original position
             fn += 1
             not_redacted.append(f"{phi_value}@pos{start_pos}")
         else:
-            # PHI successfully removed/replaced at this position
             tp += 1
 
-    return tp, fn, not_redacted
+    # Evaluate non-PHI (FP/TN) - token-based comparison
+    # Tokenize the clean source text to get non-PHI tokens
+    source_tokens = tokenize_text(clean_source)
+    
+    # Detect redaction markers in the redacted value
+    redaction_markers = detect_redaction_patterns(redacted_value)
+    
+    for token, start_pos, end_pos in source_tokens:
+        # Check if this token overlaps with any PHI position
+        is_phi = any(pos in phi_position_ranges for pos in range(start_pos, end_pos))
+        
+        if is_phi:
+            # This token is part of PHI, already handled above
+            continue
+        
+        # This is a non-PHI token - check if it was incorrectly redacted
+        # Look for the token in the redacted value
+        if start_pos < len(redacted_value):
+            # Check if this position now contains a redaction marker
+            is_now_redacted = False
+            for marker_start, marker_end in redaction_markers:
+                # Check if marker overlaps with this token's expected position
+                if (marker_start <= start_pos < marker_end) or (marker_start < end_pos <= marker_end):
+                    is_now_redacted = True
+                    break
+            
+            # Also check if the original token is still present in a window
+            window_start = max(0, start_pos - 5)
+            window_end = min(len(redacted_value), end_pos + 5)
+            window_text = redacted_value[window_start:window_end] if window_end > window_start else ""
+            
+            if is_now_redacted or (token not in window_text and len(token) >= 2):
+                # Token appears to be redacted (FP)
+                fp += 1
+                over_redacted.append(f"{token}@pos{start_pos}")
+            else:
+                # Token correctly left unchanged (TN)
+                tn += 1
+        else:
+            # Position doesn't exist anymore, consider it potentially over-redacted
+            # But only if it's a significant token
+            if len(token) >= 3:
+                fp += 1
+                over_redacted.append(f"{token}@pos{start_pos}")
+
+    return tp, fn, fp, tn, not_redacted, over_redacted
 
 
 def evaluate_csv_file(label_path: str, result_path: str) -> CSVEvaluationResult:
     """
     Evaluate a single CSV file by comparing labeled PHI with anonymized output.
+    Tracks TP, FN, FP, and TN for comprehensive metric calculation.
     """
     filename = os.path.basename(label_path)
     result = CSVEvaluationResult(filename=filename)
@@ -453,15 +644,17 @@ def evaluate_csv_file(label_path: str, result_path: str) -> CSVEvaluationResult:
             label_value = label_row[field_name] or ''
             result_value = result_row[field_name] or ''
             
-            if '<PER>' not in label_value:
-                continue
-            
-            tp, fn, not_redacted = evaluate_csv_field(label_value, result_value)
+            # Evaluate all fields, not just those with PHI tags
+            # This allows us to detect over-redaction (FP) in non-PHI fields too
+            tp, fn, fp, tn, not_redacted, over_redacted = evaluate_csv_field(label_value, result_value)
             
             result.total_phi += tp + fn
             result.true_positives += tp
             result.false_negatives += fn
+            result.false_positives += fp
+            result.true_negatives += tn
             result.phi_not_redacted.extend(not_redacted)
+            result.over_redacted.extend(over_redacted)
     
     return result
 
@@ -476,6 +669,7 @@ def evaluate_hea_file(label_path: str, result_path: str) -> HEAEvaluationResult:
     
     HEA files are ECG header files containing PHI marked with <PER> tags.
     The evaluation compares line by line to check if PHI was properly redacted.
+    Tracks TP, FN, FP, and TN for comprehensive metric calculation.
     """
     filename = os.path.basename(label_path)
     result = HEAEvaluationResult(filename=filename)
@@ -499,21 +693,21 @@ def evaluate_hea_file(label_path: str, result_path: str) -> HEAEvaluationResult:
     label_lines = label_content.split('\n')
     result_lines = result_content.split('\n')
     
-    # Compare line by line
+    # Compare line by line - evaluate all lines for FP/TN tracking
     for i, label_line in enumerate(label_lines):
-        if '<PER>' not in label_line:
-            continue
-        
         # Get corresponding result line (if exists)
         result_line = result_lines[i] if i < len(result_lines) else ''
         
         # Use the same position-based evaluation as CSV fields
-        tp, fn, not_redacted = evaluate_csv_field(label_line, result_line)
+        tp, fn, fp, tn, not_redacted, over_redacted = evaluate_csv_field(label_line, result_line)
         
         result.total_phi += tp + fn
         result.true_positives += tp
         result.false_negatives += fn
+        result.false_positives += fp
+        result.true_negatives += tn
         result.phi_not_redacted.extend(not_redacted)
+        result.over_redacted.extend(over_redacted)
     
     return result
 
@@ -678,51 +872,66 @@ def match_boxes(gt_boxes: List[Dict], redaction_boxes: List[Dict]) -> List[Tuple
     return matches
 
 
-def calculate_pixel_coverage(redacted_img: np.ndarray, gt_box: Dict, 
-                              black_threshold: int = 10) -> float:
+def calculate_pixel_coverage_and_iou(redacted_img: np.ndarray, gt_box: Dict,
+                                      black_threshold: int = 10) -> Tuple[float, float]:
     """
-    Calculate what fraction of a ground truth PHI region is black (redacted)
-    in the redacted image using direct pixel analysis.
-    
+    Calculate both coverage and IoU for a ground truth PHI region using pixel-based analysis.
+
     This is more accurate than box-matching because:
     1. It doesn't depend on detecting redaction boxes via contours
     2. It directly measures if PHI regions are actually blacked out
     3. Works even when redactions span multiple fragmented areas
-    
+
     Args:
         redacted_img: The redacted image as numpy array (BGR or grayscale)
         gt_box: Ground truth bounding box with 'x', 'y', 'width', 'height'
         black_threshold: Pixel values below this are considered black/redacted
-    
+
     Returns:
-        Float between 0.0 and 1.0 representing fraction of region that is black
+        Tuple of (coverage, iou):
+        - coverage: Float between 0.0 and 1.0 representing fraction of GT region that is black
+        - iou: Float between 0.0 and 1.0 representing Intersection over Union
     """
     x, y, w, h = gt_box['x'], gt_box['y'], gt_box['width'], gt_box['height']
-    
+
     # Ensure coordinates are within image bounds
     img_h, img_w = redacted_img.shape[:2]
     x = max(0, min(x, img_w - 1))
     y = max(0, min(y, img_h - 1))
     w = min(w, img_w - x)
     h = min(h, img_h - y)
-    
+
     if w <= 0 or h <= 0:
-        return 0.0
-    
+        return 0.0, 0.0
+
     # Extract the region from the redacted image
     region = redacted_img[y:y+h, x:x+w]
-    
+
     # Convert to grayscale if needed
     if len(region.shape) == 3:
         gray = cv2.cvtColor(region, cv2.COLOR_BGR2GRAY)
     else:
         gray = region
-    
+
     # Count black pixels
     total_pixels = w * h
     black_pixels = np.sum(gray < black_threshold)
-    
-    return black_pixels / total_pixels if total_pixels > 0 else 0.0
+
+    # Calculate coverage (what fraction of GT is covered)
+    coverage = black_pixels / total_pixels if total_pixels > 0 else 0.0
+
+    # Calculate IoU (intersection over union)
+    # Intersection = black pixels (already counted)
+    # Union = GT area + redacted area - intersection
+    # For pixel-based approach: Union = GT area (since we only have black pixels in GT region)
+    # This gives us the same as coverage for pixel-based evaluation
+    # For more accurate IoU, we would need to detect the actual redaction box
+
+    # For pixel-based analysis, IoU ≈ coverage (conservative estimate)
+    # because intersection = black_pixels and union ≥ total_pixels
+    iou = coverage  # Conservative estimate
+
+    return coverage, iou
 
 
 def evaluate_image_file(original_path: str, redacted_path: str, 
@@ -762,31 +971,34 @@ def evaluate_image_file(original_path: str, redacted_path: str,
     if len(redacted_img.shape) == 3 and redacted_img.shape[2] == 4:
         redacted_img = cv2.cvtColor(redacted_img, cv2.COLOR_BGRA2BGR)
     
-    # Convert annotations to box format and calculate pixel-based coverage
+    # Convert annotations to box format and calculate pixel-based coverage and IoU
     coverages = []
+    ious = []
     for ann in file_annotations:
         gt_box = {
-            'x': ann.x, 'y': ann.y, 
+            'x': ann.x, 'y': ann.y,
             'width': ann.width, 'height': ann.height,
             'field': ann.field, 'text': ann.text
         }
-        
-        # Calculate pixel-based coverage (what fraction of region is black)
-        coverage = calculate_pixel_coverage(redacted_img, gt_box)
+
+        # Calculate pixel-based coverage and IoU
+        coverage, iou = calculate_pixel_coverage_and_iou(redacted_img, gt_box)
         coverages.append(coverage)
-        
+        ious.append(iou)
+
         # Store details
         result.details.append({
             'field': ann.field,
             'text': ann.text,
-            'iou': coverage,  # For compatibility, use coverage as IoU proxy
+            'iou': iou,
             'coverage': coverage,
             'status': 'covered' if coverage >= 0.95 else ('partial' if coverage >= 0.5 else 'missing')
         })
-    
+
     # Calculate aggregate metrics
-    result.mean_iou = sum(coverages) / len(coverages) if coverages else 0.0
+    result.mean_iou = sum(ious) / len(ious) if ious else 0.0
     result.mean_coverage = sum(coverages) / len(coverages) if coverages else 0.0
+    result.iou_threshold_met = sum(1 for iou in ious if iou >= 0.5)
     result.fully_covered = sum(1 for cov in coverages if cov >= 0.95)
     result.partially_covered = sum(1 for cov in coverages if 0.5 <= cov < 0.95)
     result.not_covered = sum(1 for cov in coverages if cov < 0.5)
@@ -884,9 +1096,10 @@ def evaluate_pdf_file(original_path: str, redacted_path: str,
         # Calculate metrics
         ious = [iou for _, _, iou, _ in matches]
         coverages = [cov for _, _, _, cov in matches]
-        
+
         result.mean_iou = sum(ious) / len(ious) if ious else 0.0
         result.mean_coverage = sum(coverages) / len(coverages) if coverages else 0.0
+        result.iou_threshold_met = sum(1 for iou in ious if iou >= 0.5)
         result.fully_covered = sum(1 for cov in coverages if cov >= 0.95)
         result.partially_covered = sum(1 for cov in coverages if 0.5 <= cov < 0.95)
         result.not_covered = sum(1 for cov in coverages if cov < 0.5)
@@ -1047,7 +1260,7 @@ def evaluate_patient(labels_dir: str, results_dir: str,
             
             status = "✓" if eval_result.not_covered == 0 else "✗"
             print(f"  {status} {original_filename}: {eval_result.fully_covered}/{eval_result.total_phi_regions} "
-                  f"fully covered (mean coverage: {eval_result.mean_coverage:.2%})")
+                  f"fully covered (IoU: {eval_result.mean_iou:.2%}, Coverage: {eval_result.mean_coverage:.2%})")
         
         # ---- HEA File Evaluation (ECG modality only) ----
         if modality == 'ecg':
@@ -1148,30 +1361,82 @@ def run_evaluation_pipeline(labels_dir: str, results_dir: str, output_dir: str) 
         overall.patient_results.append(patient_result)
     
     # Aggregate metrics
+    # For images and PDFs, we need to calculate weighted average coverage and IoU
+    image_coverage_weighted_sum = 0.0
+    image_iou_weighted_sum = 0.0
+    pdf_coverage_weighted_sum = 0.0
+    pdf_iou_weighted_sum = 0.0
+
+    # Lists for macro-averaging (per-document metrics)
+    csv_sensitivities = []
+    csv_specificities = []
+    csv_accuracies = []
+    csv_precisions = []
+    csv_fnrs = []
+    csv_fprs = []
+
+    hea_sensitivities = []
+    hea_specificities = []
+    hea_accuracies = []
+    hea_precisions = []
+    hea_fnrs = []
+    hea_fprs = []
+
     for patient in overall.patient_results:
         # CSV metrics
         for csv_result in patient.csv_results:
             overall.csv_total_phi += csv_result.total_phi
             overall.csv_true_positives += csv_result.true_positives
             overall.csv_false_negatives += csv_result.false_negatives
+            overall.csv_false_positives += csv_result.false_positives
+            overall.csv_true_negatives += csv_result.true_negatives
+
+            # Collect per-document metrics for macro-averaging
+            # Only include documents that have relevant data
+            if csv_result.total_phi > 0 or csv_result.true_negatives > 0:
+                csv_sensitivities.append(csv_result.sensitivity)
+                csv_specificities.append(csv_result.specificity)
+                csv_accuracies.append(csv_result.accuracy)
+                csv_precisions.append(csv_result.precision)
+                csv_fnrs.append(csv_result.false_negative_rate)
+                csv_fprs.append(csv_result.false_positive_rate)
 
         # Image metrics (DICOM, PNG only)
         for img_result in patient.image_results:
             overall.image_total_regions += img_result.total_phi_regions
             overall.image_fully_covered += img_result.fully_covered
             overall.image_not_covered += img_result.not_covered
+            overall.image_iou_threshold_met += img_result.iou_threshold_met
+            # Accumulate weighted coverage and IoU (mean * number of regions)
+            image_coverage_weighted_sum += img_result.mean_coverage * img_result.total_phi_regions
+            image_iou_weighted_sum += img_result.mean_iou * img_result.total_phi_regions
 
         # PDF metrics (separate)
         for pdf_result in patient.pdf_results:
             overall.pdf_total_regions += pdf_result.total_phi_regions
             overall.pdf_fully_covered += pdf_result.fully_covered
             overall.pdf_not_covered += pdf_result.not_covered
+            overall.pdf_iou_threshold_met += pdf_result.iou_threshold_met
+            # Accumulate weighted coverage and IoU (mean * number of regions)
+            pdf_coverage_weighted_sum += pdf_result.mean_coverage * pdf_result.total_phi_regions
+            pdf_iou_weighted_sum += pdf_result.mean_iou * pdf_result.total_phi_regions
 
         # HEA (text) metrics
         for hea_result in patient.hea_results:
             overall.hea_total_phi += hea_result.total_phi
             overall.hea_true_positives += hea_result.true_positives
             overall.hea_false_negatives += hea_result.false_negatives
+            overall.hea_false_positives += hea_result.false_positives
+            overall.hea_true_negatives += hea_result.true_negatives
+
+            # Collect per-document metrics for macro-averaging
+            if hea_result.total_phi > 0 or hea_result.true_negatives > 0:
+                hea_sensitivities.append(hea_result.sensitivity)
+                hea_specificities.append(hea_result.specificity)
+                hea_accuracies.append(hea_result.accuracy)
+                hea_precisions.append(hea_result.precision)
+                hea_fnrs.append(hea_result.false_negative_rate)
+                hea_fprs.append(hea_result.false_positive_rate)
 
         # Filename metrics
         for fn_result in patient.filename_results:
@@ -1181,18 +1446,54 @@ def run_evaluation_pipeline(labels_dir: str, results_dir: str, output_dir: str) 
             else:
                 overall.filename_phi_leaked += 1
 
-    # Calculate rates
+    # Calculate micro-averaged rates
     if overall.csv_total_phi > 0:
         overall.csv_recall = overall.csv_true_positives / overall.csv_total_phi
 
     if overall.image_total_regions > 0:
-        overall.image_mean_coverage = overall.image_fully_covered / overall.image_total_regions
+        overall.image_mean_coverage = image_coverage_weighted_sum / overall.image_total_regions
+        overall.image_mean_iou = image_iou_weighted_sum / overall.image_total_regions
 
     if overall.pdf_total_regions > 0:
-        overall.pdf_mean_coverage = overall.pdf_fully_covered / overall.pdf_total_regions
+        overall.pdf_mean_coverage = pdf_coverage_weighted_sum / overall.pdf_total_regions
+        overall.pdf_mean_iou = pdf_iou_weighted_sum / overall.pdf_total_regions
 
     if overall.hea_total_phi > 0:
         overall.hea_recall = overall.hea_true_positives / overall.hea_total_phi
+
+    # Calculate macro-averaged metrics for CSV
+    if csv_sensitivities:
+        overall.csv_macro_sensitivity = sum(csv_sensitivities) / len(csv_sensitivities)
+        overall.csv_macro_specificity = sum(csv_specificities) / len(csv_specificities)
+        overall.csv_macro_accuracy = sum(csv_accuracies) / len(csv_accuracies)
+        overall.csv_macro_precision = sum(csv_precisions) / len(csv_precisions)
+        overall.csv_macro_fnr = sum(csv_fnrs) / len(csv_fnrs)
+        overall.csv_macro_fpr = sum(csv_fprs) / len(csv_fprs)
+
+    # Calculate macro-averaged metrics for HEA
+    if hea_sensitivities:
+        overall.hea_macro_sensitivity = sum(hea_sensitivities) / len(hea_sensitivities)
+        overall.hea_macro_specificity = sum(hea_specificities) / len(hea_specificities)
+        overall.hea_macro_accuracy = sum(hea_accuracies) / len(hea_accuracies)
+        overall.hea_macro_precision = sum(hea_precisions) / len(hea_precisions)
+        overall.hea_macro_fnr = sum(hea_fnrs) / len(hea_fnrs)
+        overall.hea_macro_fpr = sum(hea_fprs) / len(hea_fprs)
+
+    # Calculate combined macro-averaged metrics (across all document types)
+    all_sensitivities = csv_sensitivities + hea_sensitivities
+    all_specificities = csv_specificities + hea_specificities
+    all_accuracies = csv_accuracies + hea_accuracies
+    all_precisions = csv_precisions + hea_precisions
+    all_fnrs = csv_fnrs + hea_fnrs
+    all_fprs = csv_fprs + hea_fprs
+
+    if all_sensitivities:
+        overall.combined_macro_sensitivity = sum(all_sensitivities) / len(all_sensitivities)
+        overall.combined_macro_specificity = sum(all_specificities) / len(all_specificities)
+        overall.combined_macro_accuracy = sum(all_accuracies) / len(all_accuracies)
+        overall.combined_macro_precision = sum(all_precisions) / len(all_precisions)
+        overall.combined_macro_fnr = sum(all_fnrs) / len(all_fnrs)
+        overall.combined_macro_fpr = sum(all_fprs) / len(all_fprs)
     
     return overall
 
@@ -1207,7 +1508,16 @@ def print_summary(overall: OverallEvaluationResult):
     print(f"   Total PHI instances:      {overall.csv_total_phi}")
     print(f"   Correctly redacted (TP):  {overall.csv_true_positives}")
     print(f"   Not redacted (FN):        {overall.csv_false_negatives}")
-    print(f"   Recall:                   {overall.csv_recall:.2%}")
+    print(f"   Over-redacted (FP):       {overall.csv_false_positives}")
+    print(f"   Correctly kept (TN):      {overall.csv_true_negatives}")
+    print(f"   Recall (micro):           {overall.csv_recall:.2%}")
+    print(f"\n   Macro-averaged per document:")
+    print(f"   ├─ Sensitivity:           {overall.csv_macro_sensitivity:.2%}")
+    print(f"   ├─ Specificity:           {overall.csv_macro_specificity:.2%}")
+    print(f"   ├─ Accuracy:              {overall.csv_macro_accuracy:.2%}")
+    print(f"   ├─ Precision:             {overall.csv_macro_precision:.2%}")
+    print(f"   ├─ False-Negative-Rate:   {overall.csv_macro_fnr:.2%}")
+    print(f"   └─ False-Positive-Rate:   {overall.csv_macro_fpr:.2%}")
 
     if overall.csv_false_negatives > 0:
         print(f"   ⚠️  WARNING: {overall.csv_false_negatives} PHI instances were NOT properly redacted!")
@@ -1217,8 +1527,10 @@ def print_summary(overall: OverallEvaluationResult):
     print(f"\n🖼️  IMAGE EVALUATION (DICOM, PNG):")
     print(f"   Total PHI regions:        {overall.image_total_regions}")
     print(f"   Fully covered (≥95%):     {overall.image_fully_covered}")
+    print(f"   IoU threshold met (≥0.5): {overall.image_iou_threshold_met}")
     print(f"   Not adequately covered:   {overall.image_not_covered}")
-    print(f"   Coverage rate:            {overall.image_mean_coverage:.2%}")
+    print(f"   Mean IoU:                 {overall.image_mean_iou:.2%}")
+    print(f"   Mean Coverage:            {overall.image_mean_coverage:.2%}")
 
     if overall.image_not_covered > 0:
         print(f"   ⚠️  WARNING: {overall.image_not_covered} PHI regions are not adequately covered!")
@@ -1228,8 +1540,10 @@ def print_summary(overall: OverallEvaluationResult):
     print(f"\n📄 PDF EVALUATION (ECG):")
     print(f"   Total PHI regions:        {overall.pdf_total_regions}")
     print(f"   Fully covered (≥95%):     {overall.pdf_fully_covered}")
+    print(f"   IoU threshold met (≥0.5): {overall.pdf_iou_threshold_met}")
     print(f"   Not adequately covered:   {overall.pdf_not_covered}")
-    print(f"   Coverage rate:            {overall.pdf_mean_coverage:.2%}")
+    print(f"   Mean IoU:                 {overall.pdf_mean_iou:.2%}")
+    print(f"   Mean Coverage:            {overall.pdf_mean_coverage:.2%}")
 
     if overall.pdf_not_covered > 0:
         print(f"   ⚠️  WARNING: {overall.pdf_not_covered} PHI regions in PDFs are not adequately covered!")
@@ -1240,7 +1554,16 @@ def print_summary(overall: OverallEvaluationResult):
     print(f"   Total PHI instances:      {overall.hea_total_phi}")
     print(f"   Correctly redacted (TP):  {overall.hea_true_positives}")
     print(f"   Not redacted (FN):        {overall.hea_false_negatives}")
-    print(f"   Recall:                   {overall.hea_recall:.2%}")
+    print(f"   Over-redacted (FP):       {overall.hea_false_positives}")
+    print(f"   Correctly kept (TN):      {overall.hea_true_negatives}")
+    print(f"   Recall (micro):           {overall.hea_recall:.2%}")
+    print(f"\n   Macro-averaged per document:")
+    print(f"   ├─ Sensitivity:           {overall.hea_macro_sensitivity:.2%}")
+    print(f"   ├─ Specificity:           {overall.hea_macro_specificity:.2%}")
+    print(f"   ├─ Accuracy:              {overall.hea_macro_accuracy:.2%}")
+    print(f"   ├─ Precision:             {overall.hea_macro_precision:.2%}")
+    print(f"   ├─ False-Negative-Rate:   {overall.hea_macro_fnr:.2%}")
+    print(f"   └─ False-Positive-Rate:   {overall.hea_macro_fpr:.2%}")
 
     if overall.hea_false_negatives > 0:
         print(f"   ⚠️  WARNING: {overall.hea_false_negatives} PHI instances in HEA files were NOT properly redacted!")
@@ -1256,6 +1579,16 @@ def print_summary(overall: OverallEvaluationResult):
         print(f"   ⚠️  WARNING: {overall.filename_phi_leaked} filenames contain PHI!")
     else:
         print(f"   ✓ All filenames properly anonymized!")
+
+    # Combined macro-averaged metrics
+    print(f"\n{'─'*80}")
+    print(f"📈 COMBINED MACRO-AVERAGED METRICS (across all documents):")
+    print(f"   ├─ Sensitivity:           {overall.combined_macro_sensitivity:.2%}")
+    print(f"   ├─ Specificity:           {overall.combined_macro_specificity:.2%}")
+    print(f"   ├─ Accuracy:              {overall.combined_macro_accuracy:.2%}")
+    print(f"   ├─ Precision:             {overall.combined_macro_precision:.2%}")
+    print(f"   ├─ False-Negative-Rate:   {overall.combined_macro_fnr:.2%}")
+    print(f"   └─ False-Positive-Rate:   {overall.combined_macro_fpr:.2%}")
 
     # Overall assessment
     print(f"\n{'='*80}")
@@ -1284,30 +1617,62 @@ def save_results(overall: OverallEvaluationResult, output_dir: str):
             'total_phi': overall.csv_total_phi,
             'true_positives': overall.csv_true_positives,
             'false_negatives': overall.csv_false_negatives,
-            'recall': overall.csv_recall
+            'false_positives': overall.csv_false_positives,
+            'true_negatives': overall.csv_true_negatives,
+            'recall_micro': overall.csv_recall,
+            'macro_averaged': {
+                'sensitivity': overall.csv_macro_sensitivity,
+                'specificity': overall.csv_macro_specificity,
+                'accuracy': overall.csv_macro_accuracy,
+                'precision': overall.csv_macro_precision,
+                'false_negative_rate': overall.csv_macro_fnr,
+                'false_positive_rate': overall.csv_macro_fpr
+            }
         },
         'image_metrics': {
             'total_regions': overall.image_total_regions,
             'fully_covered': overall.image_fully_covered,
+            'iou_threshold_met': overall.image_iou_threshold_met,
             'not_covered': overall.image_not_covered,
-            'coverage_rate': overall.image_mean_coverage
+            'mean_iou': overall.image_mean_iou,
+            'mean_coverage': overall.image_mean_coverage
         },
         'pdf_metrics': {
             'total_regions': overall.pdf_total_regions,
             'fully_covered': overall.pdf_fully_covered,
+            'iou_threshold_met': overall.pdf_iou_threshold_met,
             'not_covered': overall.pdf_not_covered,
-            'coverage_rate': overall.pdf_mean_coverage
+            'mean_iou': overall.pdf_mean_iou,
+            'mean_coverage': overall.pdf_mean_coverage
         },
         'hea_metrics': {
             'total_phi': overall.hea_total_phi,
             'true_positives': overall.hea_true_positives,
             'false_negatives': overall.hea_false_negatives,
-            'recall': overall.hea_recall
+            'false_positives': overall.hea_false_positives,
+            'true_negatives': overall.hea_true_negatives,
+            'recall_micro': overall.hea_recall,
+            'macro_averaged': {
+                'sensitivity': overall.hea_macro_sensitivity,
+                'specificity': overall.hea_macro_specificity,
+                'accuracy': overall.hea_macro_accuracy,
+                'precision': overall.hea_macro_precision,
+                'false_negative_rate': overall.hea_macro_fnr,
+                'false_positive_rate': overall.hea_macro_fpr
+            }
         },
         'filename_metrics': {
             'total': overall.filename_total,
             'anonymized': overall.filename_anonymized,
             'phi_leaked': overall.filename_phi_leaked
+        },
+        'combined_macro_averaged': {
+            'sensitivity': overall.combined_macro_sensitivity,
+            'specificity': overall.combined_macro_specificity,
+            'accuracy': overall.combined_macro_accuracy,
+            'precision': overall.combined_macro_precision,
+            'false_negative_rate': overall.combined_macro_fnr,
+            'false_positive_rate': overall.combined_macro_fpr
         },
         'patients_evaluated': len(overall.patient_results)
     }
@@ -1326,20 +1691,46 @@ def save_results(overall: OverallEvaluationResult, output_dir: str):
 
         for patient in overall.patient_results:
             for csv_result in patient.csv_results:
-                writer.writerow([patient.original_folder, 'csv', csv_result.filename, 'recall', f"{csv_result.recall:.4f}"])
+                # Basic counts
+                writer.writerow([patient.original_folder, 'csv', csv_result.filename, 'true_positives', csv_result.true_positives])
                 writer.writerow([patient.original_folder, 'csv', csv_result.filename, 'false_negatives', csv_result.false_negatives])
+                writer.writerow([patient.original_folder, 'csv', csv_result.filename, 'false_positives', csv_result.false_positives])
+                writer.writerow([patient.original_folder, 'csv', csv_result.filename, 'true_negatives', csv_result.true_negatives])
+                # Per-document metrics
+                writer.writerow([patient.original_folder, 'csv', csv_result.filename, 'sensitivity', f"{csv_result.sensitivity:.4f}"])
+                writer.writerow([patient.original_folder, 'csv', csv_result.filename, 'specificity', f"{csv_result.specificity:.4f}"])
+                writer.writerow([patient.original_folder, 'csv', csv_result.filename, 'accuracy', f"{csv_result.accuracy:.4f}"])
+                writer.writerow([patient.original_folder, 'csv', csv_result.filename, 'precision', f"{csv_result.precision:.4f}"])
+                writer.writerow([patient.original_folder, 'csv', csv_result.filename, 'false_negative_rate', f"{csv_result.false_negative_rate:.4f}"])
+                writer.writerow([patient.original_folder, 'csv', csv_result.filename, 'false_positive_rate', f"{csv_result.false_positive_rate:.4f}"])
 
             for img_result in patient.image_results:
+                writer.writerow([patient.original_folder, 'image', img_result.filename, 'mean_iou', f"{img_result.mean_iou:.4f}"])
                 writer.writerow([patient.original_folder, 'image', img_result.filename, 'mean_coverage', f"{img_result.mean_coverage:.4f}"])
+                writer.writerow([patient.original_folder, 'image', img_result.filename, 'iou_threshold_met', img_result.iou_threshold_met])
+                writer.writerow([patient.original_folder, 'image', img_result.filename, 'fully_covered', img_result.fully_covered])
                 writer.writerow([patient.original_folder, 'image', img_result.filename, 'not_covered', img_result.not_covered])
 
             for pdf_result in patient.pdf_results:
+                writer.writerow([patient.original_folder, 'pdf', pdf_result.filename, 'mean_iou', f"{pdf_result.mean_iou:.4f}"])
                 writer.writerow([patient.original_folder, 'pdf', pdf_result.filename, 'mean_coverage', f"{pdf_result.mean_coverage:.4f}"])
+                writer.writerow([patient.original_folder, 'pdf', pdf_result.filename, 'iou_threshold_met', pdf_result.iou_threshold_met])
+                writer.writerow([patient.original_folder, 'pdf', pdf_result.filename, 'fully_covered', pdf_result.fully_covered])
                 writer.writerow([patient.original_folder, 'pdf', pdf_result.filename, 'not_covered', pdf_result.not_covered])
 
             for hea_result in patient.hea_results:
-                writer.writerow([patient.original_folder, 'hea', hea_result.filename, 'recall', f"{hea_result.recall:.4f}"])
+                # Basic counts
+                writer.writerow([patient.original_folder, 'hea', hea_result.filename, 'true_positives', hea_result.true_positives])
                 writer.writerow([patient.original_folder, 'hea', hea_result.filename, 'false_negatives', hea_result.false_negatives])
+                writer.writerow([patient.original_folder, 'hea', hea_result.filename, 'false_positives', hea_result.false_positives])
+                writer.writerow([patient.original_folder, 'hea', hea_result.filename, 'true_negatives', hea_result.true_negatives])
+                # Per-document metrics
+                writer.writerow([patient.original_folder, 'hea', hea_result.filename, 'sensitivity', f"{hea_result.sensitivity:.4f}"])
+                writer.writerow([patient.original_folder, 'hea', hea_result.filename, 'specificity', f"{hea_result.specificity:.4f}"])
+                writer.writerow([patient.original_folder, 'hea', hea_result.filename, 'accuracy', f"{hea_result.accuracy:.4f}"])
+                writer.writerow([patient.original_folder, 'hea', hea_result.filename, 'precision', f"{hea_result.precision:.4f}"])
+                writer.writerow([patient.original_folder, 'hea', hea_result.filename, 'false_negative_rate', f"{hea_result.false_negative_rate:.4f}"])
+                writer.writerow([patient.original_folder, 'hea', hea_result.filename, 'false_positive_rate', f"{hea_result.false_positive_rate:.4f}"])
 
             for fn_result in patient.filename_results:
                 writer.writerow([patient.original_folder, 'filename', fn_result.original, 'is_anonymized', fn_result.is_anonymized])

@@ -191,15 +191,12 @@ async def process_file(
         filename_mapping = {
             "original_filename": file.filename,
             "anonymized_filename": output_filename,
-            "phi_segments": [
+            "phi_detections": [
                 {
-                    "original_text": seg.original_text,
-                    "anonymized_text": seg.anonymized_text,
-                    "phi_category": seg.phi_category,
-                    "start_position": seg.start_position,
-                    "end_position": seg.end_position
+                    "original_value": detection.original_value,
+                    "category": detection.category
                 }
-                for seg in filename_result.segments
+                for detection in filename_result.phi_detections
             ]
         }
 
