@@ -40,6 +40,7 @@ from pydantic import BaseModel, Field
 from ..base_processor import FileProcessor
 from ..config import AnonymizerConfig
 from ..models import PIIDetectionResult, PIIElement, BoundingBox
+from .image_verification_agent import ImageVerificationAgent, VerificationResult
 
 
 class PIITextItem(BaseModel):
@@ -71,18 +72,32 @@ class PNGVisionOCRProcessor(FileProcessor):
     1. Vision LLM identifies which text in the image contains PII
     2. OCR provides precise bounding boxes for all text
     3. Smart matching connects LLM-identified PII to OCR bounding boxes
+    4. Optional: Verification agent checks for remaining PII after redaction
     """
 
-    def __init__(self, config: AnonymizerConfig, similarity_threshold: float = 0.6):
+    def __init__(
+        self,
+        config: AnonymizerConfig,
+        similarity_threshold: float = 0.6,
+        enable_verification: bool = True,
+        check_over_redaction: bool = False,
+        max_verification_rounds: int = 2
+    ):
         """
         Initialize the Vision+OCR processor.
 
         Args:
             config: Anonymizer configuration
             similarity_threshold: Minimum similarity ratio for fuzzy text matching (0.0-1.0)
+            enable_verification: If True, run verification agent after initial redaction
+            check_over_redaction: If True, also check for over-redaction (needs original image)
+            max_verification_rounds: Maximum rounds of verify-and-redact
         """
         super().__init__(config)
         self.similarity_threshold = similarity_threshold
+        self.enable_verification = enable_verification
+        self.check_over_redaction = check_over_redaction
+        self.max_verification_rounds = max_verification_rounds
 
         if not EASYOCR_AVAILABLE:
             raise ImportError(
@@ -113,6 +128,15 @@ class PNGVisionOCRProcessor(FileProcessor):
             temperature=config.temperature,
         ).with_structured_output(VisionPIIResult)
 
+        # Initialize Verification Agent (lazy - only if enabled)
+        self._verification_agent = None
+        if self.enable_verification:
+            self._verification_agent = ImageVerificationAgent(
+                config=config,
+                check_over_redaction=check_over_redaction,
+                similarity_threshold=similarity_threshold
+            )
+
     def can_process(self, file_path: Path) -> bool:
         """Check if file is a supported image format (PNG, JPG, JPEG)."""
         return file_path.suffix.lower() in [".png", ".jpg", ".jpeg"]
@@ -130,7 +154,8 @@ class PNGVisionOCRProcessor(FileProcessor):
         2. Send image to Vision LLM to identify which text contains PII
         3. Match LLM-identified PII against OCR results using fuzzy matching
         4. Redact matched regions using OCR bounding boxes
-        5. Save anonymized image
+        5. (Optional) Verification agent checks for remaining PII
+        6. Save anonymized image
 
         Args:
             input_path: Path to input image
@@ -140,6 +165,7 @@ class PNGVisionOCRProcessor(FileProcessor):
 
         # Load image
         image = Image.open(input_path)
+        original_image = image.copy()  # Keep for verification
         width, height = image.size
         print(f"Image size: {width}x{height}")
 
@@ -168,7 +194,18 @@ class PNGVisionOCRProcessor(FileProcessor):
         if pii_elements:
             image = self._apply_redactions(image.copy(), pii_elements)
 
-        # Step 5: Save results
+        # Step 5: Verification (if enabled)
+        verification_result = None
+        additional_elements = []
+        if self.enable_verification and self._verification_agent is not None:
+            print("\n=== Verification Phase ===")
+            image, verification_result, additional_elements = self._run_verification(
+                image,
+                original_image if self.check_over_redaction else None
+            )
+            pii_elements.extend(additional_elements)
+
+        # Step 6: Save results
         output_path.parent.mkdir(parents=True, exist_ok=True)
         image.save(output_path)
         print(f"Saved anonymized image to: {output_path}")
@@ -183,7 +220,9 @@ class PNGVisionOCRProcessor(FileProcessor):
                 output_path,
                 json_output_path,
                 ocr_results,
-                pii_texts
+                pii_texts,
+                verification_result,
+                additional_elements
             )
             print(f"Saved detection results to: {json_output_path}")
 
@@ -483,6 +522,58 @@ IMPORTANT:
 
         return image
 
+    def _run_verification(
+        self,
+        redacted_image: Image.Image,
+        original_image: Optional[Image.Image] = None
+    ) -> tuple[Image.Image, Optional[VerificationResult], List[PIIElement]]:
+        """
+        Run verification agent to check for remaining PII and apply additional redactions.
+
+        Args:
+            redacted_image: Image after initial redaction
+            original_image: Original image (optional, for over-redaction check)
+
+        Returns:
+            Tuple of (final image, verification result, additional elements redacted)
+        """
+        current_image = redacted_image
+        all_additional_elements = []
+        final_result = None
+
+        for round_num in range(self.max_verification_rounds):
+            print(f"\n  --- Verification Round {round_num + 1}/{self.max_verification_rounds} ---")
+
+            # Verify current state
+            result = self._verification_agent.verify_redaction(
+                current_image,
+                original_image
+            )
+            final_result = result
+
+            # If clean, we're done
+            if result.is_clean:
+                print(f"  Verification passed after {round_num + 1} round(s)")
+                break
+
+            # Apply additional redactions if remaining PII found
+            if result.remaining_pii:
+                current_image, additional = self._verification_agent.apply_additional_redactions(
+                    current_image,
+                    result.remaining_pii,
+                    self._extract_text_with_ocr_from_image
+                )
+                all_additional_elements.extend(additional)
+
+                # If we couldn't redact anything new, stop
+                if not additional:
+                    print("  Warning: Could not locate remaining PII for redaction")
+                    break
+            else:
+                break
+
+        return current_image, final_result, all_additional_elements
+
     def _save_json_output(
         self,
         pii_result: PIIDetectionResult,
@@ -490,7 +581,9 @@ IMPORTANT:
         output_path: Path,
         json_output_path: Path,
         ocr_results: List[OCRText],
-        vision_pii_texts: List[PIITextItem]
+        vision_pii_texts: List[PIITextItem],
+        verification_result: Optional[VerificationResult] = None,
+        additional_elements: Optional[List[PIIElement]] = None
     ) -> None:
         """
         Save PII detection results as JSON with additional debug info.
@@ -502,6 +595,8 @@ IMPORTANT:
             json_output_path: Path to save JSON output
             ocr_results: OCR results for debugging
             vision_pii_texts: Vision LLM identified texts for debugging
+            verification_result: Optional verification result
+            additional_elements: Optional list of additionally redacted elements
         """
         output_data = {
             "metadata": {
@@ -509,6 +604,7 @@ IMPORTANT:
                 "output_file": str(output_path.name),
                 "timestamp": datetime.now().isoformat(),
                 "processing_method": "vision_ocr",
+                "verification_enabled": self.enable_verification,
                 "total_ocr_texts": len(ocr_results),
                 "total_vision_pii": len(vision_pii_texts),
                 "total_matched_pii": len(pii_result.pii_elements)
@@ -547,6 +643,46 @@ IMPORTANT:
                 for element in pii_result.pii_elements
             ]
         }
+
+        # Add verification results if available
+        if verification_result is not None:
+            output_data["verification"] = {
+                "is_clean": verification_result.is_clean,
+                "confidence": verification_result.confidence,
+                "notes": verification_result.notes,
+                "remaining_pii_found": [
+                    {
+                        "text": pii.text,
+                        "type": pii.type,
+                        "reason": pii.reason
+                    }
+                    for pii in verification_result.remaining_pii
+                ],
+                "over_redactions": [
+                    {
+                        "description": over.description,
+                        "reason": over.reason,
+                        "can_recover": over.can_recover
+                    }
+                    for over in verification_result.over_redactions
+                ]
+            }
+
+        # Add additional elements redacted during verification
+        if additional_elements:
+            output_data["verification_additional_redactions"] = [
+                {
+                    "type": element.type,
+                    "text": element.text,
+                    "bbox": {
+                        "x": element.bbox.x,
+                        "y": element.bbox.y,
+                        "width": element.bbox.width,
+                        "height": element.bbox.height
+                    }
+                }
+                for element in additional_elements
+            ]
 
         with open(json_output_path, "w", encoding="utf-8") as f:
             json.dump(output_data, f, indent=2, ensure_ascii=False)

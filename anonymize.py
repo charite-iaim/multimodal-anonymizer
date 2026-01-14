@@ -154,12 +154,19 @@ def process_file(
     if anonymize_paths and filename_anonymizer is None:
         filename_anonymizer = FilenameAnonymizer(config, output_dir=output_dir)
 
+    # Determine folder path for file uniqueness
+    if preserve_structure and relative_path:
+        folder_path = str(relative_path.parent) if relative_path.parent != Path('.') else ""
+    else:
+        folder_path = input_path.stem  # Use file stem as folder path for standalone files
+
     # Anonymize filename if enabled
     if anonymize_paths and filename_anonymizer:
         print(f"Anonymizing filename: {input_path.name}")
         anonymization_result = filename_anonymizer.anonymize_filename(
             input_path.name,
-            is_directory=False
+            is_directory=False,
+            folder_path=folder_path
         )
         anonymized_filename = anonymization_result.anonymized_filename
         print(f"Anonymized filename: {anonymized_filename}")
@@ -179,8 +186,6 @@ def process_file(
 
         # Record file mapping for CSV export
         if anonymize_paths and filename_anonymizer and anonymization_result:
-            # Get folder path for grouping (e.g., "patient_ID_ID/csv")
-            folder_path = str(relative_path.parent) if relative_path.parent != Path('.') else ""
             filename_anonymizer.add_file_mapping(
                 folder_path=folder_path,
                 original_filename=input_path.name,
@@ -197,7 +202,7 @@ def process_file(
         # Record file mapping for CSV export
         if anonymize_paths and filename_anonymizer and anonymization_result:
             filename_anonymizer.add_file_mapping(
-                folder_path=file_stem,  # Use file stem as folder path for standalone files
+                folder_path=folder_path,
                 original_filename=input_path.name,
                 anonymized_filename=anonymized_filename,
                 phi_detections=anonymization_result.phi_detections

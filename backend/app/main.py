@@ -183,7 +183,7 @@ async def process_file(
 
         # Anonymize filename using LLM
         filename_anonymizer = FilenameAnonymizer(config)
-        filename_result = filename_anonymizer.anonymize_filename(file.filename, is_directory=False)
+        filename_result = filename_anonymizer.anonymize_filename(file.filename, is_directory=False, folder_path=job_id)
         output_filename = filename_result.anonymized_filename
         output_path = output_dir / output_filename
 
