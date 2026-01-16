@@ -162,7 +162,7 @@ class ProcessingTracker:
 
         self.data["files"][path_str] = {
             "timestamp": datetime.now().isoformat(),
-            "output_path": str(output_path.absolute()),
+            "output_path": str(output_path.absolute()) if output_path else None,
             "status": "completed" if success else "failed",
             "hash": file_hash,
         }

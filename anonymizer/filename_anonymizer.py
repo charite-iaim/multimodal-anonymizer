@@ -87,6 +87,11 @@ class FilenameAnonymizer:
         # Key: anonymized folder name (e.g., "patient_ID_ID"), Value: counter
         self.folder_counters: Dict[str, int] = defaultdict(int)
 
+        # Counter for file name sequences within folders
+        # Key: (folder_path, base_filename) tuple, Value: counter
+        # This ensures files like "ID.hea" get unique names like "ID_001.hea", "ID_002.hea"
+        self.file_counters: Dict[tuple, int] = defaultdict(int)
+
         # Track which CSV files have been initialized with headers
         self._initialized_csv_files: set = set()
 
@@ -147,14 +152,44 @@ class FilenameAnonymizer:
         counter = self.folder_counters[base_anonymized_name]
         return f"{base_anonymized_name}_{counter:03d}"
 
-    def anonymize_filename(self, filename: str, is_directory: bool = False) -> FilenameAnonymizationResult:
+    def get_sequential_filename(self, folder_path: str, base_anonymized_name: str) -> str:
+        """
+        Get a sequential filename with a counter suffix to ensure uniqueness within a folder.
+
+        Args:
+            folder_path: Path to the folder containing the file (e.g., "patient_ID_ID_001/csv")
+            base_anonymized_name: Base anonymized filename (e.g., "ID.hea", "ID.pdf")
+
+        Returns:
+            Sequential filename (e.g., "ID_001.hea", "ID_002.hea")
+        """
+        # Split filename into stem and extension
+        if '.' in base_anonymized_name:
+            # Find the last dot for extension
+            last_dot = base_anonymized_name.rfind('.')
+            stem = base_anonymized_name[:last_dot]
+            ext = base_anonymized_name[last_dot:]
+        else:
+            stem = base_anonymized_name
+            ext = ''
+
+        # Create a unique key for this folder + filename combination
+        key = (folder_path, base_anonymized_name)
+        self.file_counters[key] += 1
+        counter = self.file_counters[key]
+
+        return f"{stem}_{counter:04d}{ext}"
+
+    def anonymize_filename(self, filename: str, is_directory: bool = False, folder_path: str = "") -> FilenameAnonymizationResult:
         """
         Detect PII in filename and replace with generic category placeholders.
         For directories, adds a sequential counter suffix (e.g., patient_ID_ID_001).
+        For files, adds a sequential counter to ensure uniqueness within the folder.
 
         Args:
             filename: Original filename (without path)
             is_directory: Whether this is a directory name
+            folder_path: Path to the folder containing the file (used for file uniqueness)
 
         Returns:
             FilenameAnonymizationResult with original filename, anonymized filename, and PHI detections
@@ -217,6 +252,10 @@ If no PHI: return original filename with empty phi_detections list.
                 base_anonymized_name = result.anonymized_filename
                 sequential_name = self.get_sequential_folder_name(base_anonymized_name)
                 anonymized_filename = sequential_name
+            elif not is_directory and folder_path:
+                # For files within a folder, always add sequential number to ensure uniqueness
+                base_anonymized_name = result.anonymized_filename
+                anonymized_filename = self.get_sequential_filename(folder_path, base_anonymized_name)
             else:
                 anonymized_filename = result.anonymized_filename
 
@@ -235,6 +274,9 @@ If no PHI: return original filename with empty phi_detections list.
             # For directories containing "ID", still add sequential counter even in fallback
             if is_directory and "ID" in fallback_name:
                 fallback_name = self.get_sequential_folder_name(fallback_name)
+            elif not is_directory and folder_path:
+                # For files, add sequential number even in fallback
+                fallback_name = self.get_sequential_filename(folder_path, fallback_name)
 
             return FilenameAnonymizationResult(
                 original_filename=filename,
@@ -431,3 +473,4 @@ If no PHI: return original filename with empty phi_detections list.
         self.file_mappings_by_folder.clear()
         self.folder_mappings.clear()
         self.folder_counters.clear()
+        self.file_counters.clear()

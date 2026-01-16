@@ -239,14 +239,40 @@ class HEAEvaluationResult:
 
 
 @dataclass
+class DateShiftEvaluationResult:
+    """Results from evaluating date shifting for a single file"""
+    filename: str
+    total_dates: int = 0
+    correctly_shifted: int = 0  # Date was shifted (different from original)
+    not_shifted: int = 0  # Date is still the same as original
+    incorrectly_redacted: int = 0  # Date was redacted instead of shifted
+    shift_failed: int = 0  # Date shifting failed (contains [SHIFT_FAILED] or similar)
+    dates_not_shifted: List[str] = field(default_factory=list)
+    dates_redacted: List[str] = field(default_factory=list)
+    dates_failed: List[str] = field(default_factory=list)
+
+    @property
+    def shift_rate(self) -> float:
+        """Fraction of dates that were correctly shifted"""
+        return self.correctly_shifted / self.total_dates if self.total_dates > 0 else 1.0
+
+    @property
+    def redaction_error_rate(self) -> float:
+        """Fraction of dates that were incorrectly redacted"""
+        return self.incorrectly_redacted / self.total_dates if self.total_dates > 0 else 0.0
+
+
+@dataclass
 class PatientEvaluationResult:
     """Aggregated results for a single patient"""
     original_folder: str
     anonymized_folder: str
     csv_results: List[CSVEvaluationResult] = field(default_factory=list)
+    csv_date_results: List[DateShiftEvaluationResult] = field(default_factory=list)
     image_results: List[ImageEvaluationResult] = field(default_factory=list)
     pdf_results: List[ImageEvaluationResult] = field(default_factory=list)
     hea_results: List[HEAEvaluationResult] = field(default_factory=list)
+    hea_date_results: List[DateShiftEvaluationResult] = field(default_factory=list)
     filename_results: List[FilenameEvaluationResult] = field(default_factory=list)
 
 
@@ -311,6 +337,15 @@ class OverallEvaluationResult:
     filename_anonymized: int = 0
     filename_phi_leaked: int = 0
 
+    # Aggregate Date Shift metrics (CSV + HEA combined)
+    date_total: int = 0
+    date_correctly_shifted: int = 0
+    date_not_shifted: int = 0
+    date_incorrectly_redacted: int = 0
+    date_shift_failed: int = 0
+    date_shift_rate: float = 0.0
+    date_redaction_error_rate: float = 0.0
+
     # Combined macro-averaged metrics (across all document types)
     combined_macro_sensitivity: float = 0.0
     combined_macro_specificity: float = 0.0
@@ -318,6 +353,22 @@ class OverallEvaluationResult:
     combined_macro_precision: float = 0.0
     combined_macro_fnr: float = 0.0
     combined_macro_fpr: float = 0.0
+
+    # Universal metrics (ALL document types: CSV, HEA, Images, PDFs, DICOM)
+    # Coverage is treated as sensitivity for images/PDFs
+    universal_macro_sensitivity: float = 0.0  # Includes image/PDF coverage as sensitivity
+    universal_macro_specificity: float = 0.0
+    universal_macro_accuracy: float = 0.0
+    universal_macro_precision: float = 0.0
+    universal_n_documents: int = 0  # Total documents included
+
+    # Universal metrics WITH date shift evaluation
+    # Date shift rate is treated as an additional accuracy component
+    universal_with_dates_macro_sensitivity: float = 0.0
+    universal_with_dates_macro_specificity: float = 0.0
+    universal_with_dates_macro_accuracy: float = 0.0
+    universal_with_dates_macro_precision: float = 0.0
+    universal_with_dates_n_documents: int = 0
 
 
 # ============================================================================
@@ -328,6 +379,66 @@ def extract_phi_from_text(text: str) -> Set[str]:
     """Extract all PHI values from text marked with <PER> tags"""
     pattern = r'<PER>(.*?)</PER>'
     return set(re.findall(pattern, text))
+
+
+def is_year_only_or_range(date_str: str) -> bool:
+    """
+    Check if the date string is just a year (e.g., "2140") or a year range (e.g., "2011 - 2013").
+    These formats are excluded from date shift evaluation because they are ambiguous
+    and may represent non-date values.
+    """
+    date_str = date_str.strip()
+    # Year only: exactly 4 digits
+    if re.match(r'^\d{4}$', date_str):
+        return True
+    # Year range: e.g., "2011 - 2013", "2011-2013", "2011 – 2013"
+    if re.match(r'^\d{4}\s*[-–]\s*\d{4}$', date_str):
+        return True
+    return False
+
+
+def extract_dates_from_text(text: str) -> Set[str]:
+    """Extract all date values from text marked with <DATE> tags"""
+    pattern = r'<DATE>(.*?)</DATE>'
+    return set(re.findall(pattern, text))
+
+
+def extract_dates_with_positions(text: str) -> List[Tuple[str, int, int]]:
+    """
+    Extract all date values from text with their positions (after tag removal).
+
+    Returns list of (date_value, start_pos, end_pos) tuples where positions
+    refer to the text AFTER tags have been removed.
+    """
+    date_positions = []
+    pattern = r'<DATE>(.*?)</DATE>'
+
+    # We need to calculate positions after ALL tags (both PER and DATE) are removed
+    # First, find all tags in order
+    all_tags_pattern = r'<(?:PER|DATE)>(.*?)</(?:PER|DATE)>'
+
+    current_pos = 0
+    adjusted_pos = 0
+
+    for match in re.finditer(all_tags_pattern, text):
+        tag_value = match.group(1)
+        match_start = match.start()
+        match_end = match.end()
+
+        # Add the length of text before this match
+        adjusted_pos += (match_start - current_pos)
+
+        # Check if this is a DATE tag
+        if text[match_start:match_start+6] == '<DATE>':
+            start_in_clean = adjusted_pos
+            end_in_clean = adjusted_pos + len(tag_value)
+            date_positions.append((tag_value, start_in_clean, end_in_clean))
+
+        # Update positions
+        adjusted_pos += len(tag_value)
+        current_pos = match_end
+
+    return date_positions
 
 
 def extract_phi_with_positions(text: str) -> List[Tuple[str, int, int]]:
@@ -487,7 +598,6 @@ def detect_redaction_patterns(text: str) -> Set[str]:
         r'<[\w_]+>',             # <NAME>, <DATE>, etc.
         r'\*+',                  # ***, ****, etc.
         r'X{3,}',                # XXX, XXXX, etc.
-        r'_+',                   # ___, ____, etc.
         r'REDACTED',             # REDACTED
         r'ANONYMIZED',           # ANONYMIZED
         r'PHI_\w+',              # PHI_NAME, PHI_DATE, etc.
@@ -609,6 +719,183 @@ def evaluate_csv_field(source_value: str, redacted_value: str, min_phi_length: i
     return tp, fn, fp, tn, not_redacted, over_redacted
 
 
+def is_redacted(value: str) -> bool:
+    """Check if a value appears to be redacted (replaced with asterisks or redaction markers)"""
+    if not value:
+        return False
+    # Check for common redaction patterns
+    value_stripped = value.strip()
+    # All asterisks
+    if re.match(r'^\*+$', value_stripped):
+        return True
+    # Redaction markers
+    if value_stripped.upper() in ['REDACTED', 'ANONYMIZED', '[REDACTED]', '[ANONYMIZED]']:
+        return True
+    # Pattern like [NAME], [DATE], etc.
+    if re.match(r'^\[[\w_]+\]$', value_stripped):
+        return True
+    return False
+
+
+def is_valid_shifted_date(original_date: str, result_value: str) -> bool:
+    """
+    Check if the result value is a valid time-shifted version of the original date.
+
+    A valid shift means:
+    1. The result is a valid date/datetime in a similar format
+    2. The result is different from the original
+    3. The result is NOT redacted (asterisks or redaction markers)
+    """
+    if not result_value or is_redacted(result_value):
+        return False
+
+    # Check if result contains failure markers
+    if '[SHIFT_FAILED]' in result_value:
+        return False
+
+    # The date should be different from the original
+    if result_value.strip() == original_date.strip():
+        return False
+
+    # Try to parse both dates to verify they're valid and different
+    try:
+        from anonymizer.tools.time_shift_tool import detect_format
+
+        original_format = detect_format(original_date)
+        result_format = detect_format(result_value)
+
+        if original_format and result_format:
+            # Both are valid dates - consider it shifted
+            return True
+    except ImportError:
+        pass
+
+    # If we can't parse the format but the value changed and isn't redacted,
+    # assume it was shifted
+    return result_value.strip() != original_date.strip()
+
+
+def evaluate_date_shift_field(source_value: str, result_value: str) -> Tuple[int, int, int, int, List[str], List[str], List[str]]:
+    """
+    Evaluate date shifting for a single field.
+
+    Args:
+        source_value: The labeled source value (with <DATE> tags)
+        result_value: The anonymized result value
+
+    Returns:
+        Tuple of (correctly_shifted, not_shifted, incorrectly_redacted, shift_failed,
+                  dates_not_shifted, dates_redacted, dates_failed)
+    """
+    correctly_shifted = 0
+    not_shifted = 0
+    incorrectly_redacted = 0
+    shift_failed = 0
+    dates_not_shifted = []
+    dates_redacted = []
+    dates_failed = []
+
+    # Extract dates with positions from the source
+    date_positions = extract_dates_with_positions(source_value)
+
+    if not date_positions:
+        return 0, 0, 0, 0, [], [], []
+
+    # Get clean source text (without tags)
+    clean_source = remove_tags(source_value)
+
+    for date_value, start_pos, end_pos in date_positions:
+        # Skip year-only and year-range formats (too ambiguous for evaluation)
+        if is_year_only_or_range(date_value):
+            continue
+
+        # Check what's at this position in the result
+        if start_pos >= len(result_value):
+            # Position doesn't exist - check if the whole value looks redacted
+            if is_redacted(result_value):
+                incorrectly_redacted += 1
+                dates_redacted.append(f"{date_value}@pos{start_pos}")
+            else:
+                shift_failed += 1
+                dates_failed.append(f"{date_value}@pos{start_pos}")
+            continue
+
+        # Extract the value at the corresponding position in the result
+        # Since dates can vary in length after shifting, look for a date-like pattern
+        window_start = max(0, start_pos - 5)
+        window_end = min(len(result_value), end_pos + 10)
+        window_text = result_value[window_start:window_end]
+
+        # Check if the original date is still there (not shifted)
+        if date_value in window_text:
+            not_shifted += 1
+            dates_not_shifted.append(f"{date_value}@pos{start_pos}")
+        # Check if it was incorrectly redacted
+        elif is_redacted(window_text) or re.match(r'^\*+', result_value[start_pos:end_pos+5]):
+            incorrectly_redacted += 1
+            dates_redacted.append(f"{date_value}@pos{start_pos}")
+        # Check for shift failure markers
+        elif '[SHIFT_FAILED]' in result_value:
+            shift_failed += 1
+            dates_failed.append(f"{date_value}@pos{start_pos}")
+        else:
+            # Date was changed and is not redacted - assume correctly shifted
+            correctly_shifted += 1
+
+    return correctly_shifted, not_shifted, incorrectly_redacted, shift_failed, dates_not_shifted, dates_redacted, dates_failed
+
+
+def evaluate_csv_date_shifts(label_path: str, result_path: str) -> DateShiftEvaluationResult:
+    """
+    Evaluate date shifting for a single CSV file.
+
+    Checks if dates marked with <DATE> tags were correctly time-shifted
+    (not redacted, not unchanged).
+    """
+    filename = os.path.basename(label_path)
+    result = DateShiftEvaluationResult(filename=filename)
+
+    if not os.path.exists(label_path):
+        return result
+
+    if not os.path.exists(result_path):
+        return result
+
+    # Read both files
+    with open(label_path, 'r', encoding='utf-8') as f:
+        label_rows = list(csv.DictReader(f))
+
+    with open(result_path, 'r', encoding='utf-8') as f:
+        result_rows = list(csv.DictReader(f))
+
+    # Compare row by row
+    for label_row, result_row in zip(label_rows, result_rows):
+        for field_name in label_row.keys():
+            if field_name not in result_row:
+                continue
+
+            label_value = label_row[field_name] or ''
+            result_value = result_row[field_name] or ''
+
+            # Only evaluate fields that have DATE tags
+            if '<DATE>' not in label_value:
+                continue
+
+            shifted, not_shifted, redacted, failed, dates_not_shifted, dates_redacted, dates_failed = \
+                evaluate_date_shift_field(label_value, result_value)
+
+            result.total_dates += shifted + not_shifted + redacted + failed
+            result.correctly_shifted += shifted
+            result.not_shifted += not_shifted
+            result.incorrectly_redacted += redacted
+            result.shift_failed += failed
+            result.dates_not_shifted.extend(dates_not_shifted)
+            result.dates_redacted.extend(dates_redacted)
+            result.dates_failed.extend(dates_failed)
+
+    return result
+
+
 def evaluate_csv_file(label_path: str, result_path: str) -> CSVEvaluationResult:
     """
     Evaluate a single CSV file by comparing labeled PHI with anonymized output.
@@ -709,6 +996,57 @@ def evaluate_hea_file(label_path: str, result_path: str) -> HEAEvaluationResult:
         result.phi_not_redacted.extend(not_redacted)
         result.over_redacted.extend(over_redacted)
     
+    return result
+
+
+def evaluate_hea_date_shifts(label_path: str, result_path: str) -> DateShiftEvaluationResult:
+    """
+    Evaluate date shifting for a single HEA (text) file.
+
+    Checks if dates marked with <DATE> tags were correctly time-shifted
+    (not redacted, not unchanged).
+    """
+    filename = os.path.basename(label_path)
+    result = DateShiftEvaluationResult(filename=filename)
+
+    if not os.path.exists(label_path):
+        return result
+
+    if not os.path.exists(result_path):
+        return result
+
+    # Read both files
+    with open(label_path, 'r', encoding='utf-8') as f:
+        label_content = f.read()
+
+    with open(result_path, 'r', encoding='utf-8') as f:
+        result_content = f.read()
+
+    # Split into lines for line-by-line comparison
+    label_lines = label_content.split('\n')
+    result_lines = result_content.split('\n')
+
+    # Compare line by line
+    for i, label_line in enumerate(label_lines):
+        # Get corresponding result line (if exists)
+        result_line = result_lines[i] if i < len(result_lines) else ''
+
+        # Only evaluate lines that have DATE tags
+        if '<DATE>' not in label_line:
+            continue
+
+        shifted, not_shifted, redacted, failed, dates_not_shifted, dates_redacted, dates_failed = \
+            evaluate_date_shift_field(label_line, result_line)
+
+        result.total_dates += shifted + not_shifted + redacted + failed
+        result.correctly_shifted += shifted
+        result.not_shifted += not_shifted
+        result.incorrectly_redacted += redacted
+        result.shift_failed += failed
+        result.dates_not_shifted.extend(dates_not_shifted)
+        result.dates_redacted.extend(dates_redacted)
+        result.dates_failed.extend(dates_failed)
+
     return result
 
 
@@ -1207,10 +1545,21 @@ def evaluate_patient(labels_dir: str, results_dir: str,
             
             csv_result = evaluate_csv_file(label_path, result_path)
             result.csv_results.append(csv_result)
-            
+
+            # Also evaluate date shifts for this file
+            date_result = evaluate_csv_date_shifts(label_path, result_path)
+            if date_result.total_dates > 0:
+                result.csv_date_results.append(date_result)
+
             status = "✓" if csv_result.false_negatives == 0 else "✗"
             print(f"  {status} {label_file}: {csv_result.true_positives}/{csv_result.total_phi} PHI redacted "
                   f"(recall: {csv_result.recall:.2%})")
+
+            # Print date shift status if there are dates
+            if date_result.total_dates > 0:
+                date_status = "✓" if date_result.incorrectly_redacted == 0 and date_result.not_shifted == 0 else "✗"
+                print(f"    {date_status} Dates: {date_result.correctly_shifted}/{date_result.total_dates} shifted "
+                      f"({date_result.incorrectly_redacted} redacted, {date_result.not_shifted} unchanged)")
     
     # ---- CXR/Image Evaluation ----
     for modality in ['cxr', 'ecg', 'echo']:
@@ -1294,10 +1643,21 @@ def evaluate_patient(labels_dir: str, results_dir: str,
                 
                 hea_result = evaluate_hea_file(label_path, result_path)
                 result.hea_results.append(hea_result)
-                
+
+                # Also evaluate date shifts for HEA files
+                hea_date_result = evaluate_hea_date_shifts(label_path, result_path)
+                if hea_date_result.total_dates > 0:
+                    result.hea_date_results.append(hea_date_result)
+
                 status = "✓" if hea_result.false_negatives == 0 else "✗"
                 print(f"  {status} {label_file}: {hea_result.true_positives}/{hea_result.total_phi} PHI redacted "
                       f"(recall: {hea_result.recall:.2%})")
+
+                # Print date shift status if there are dates
+                if hea_date_result.total_dates > 0:
+                    date_status = "✓" if hea_date_result.incorrectly_redacted == 0 and hea_date_result.not_shifted == 0 else "✗"
+                    print(f"    {date_status} Dates: {hea_date_result.correctly_shifted}/{hea_date_result.total_dates} shifted "
+                          f"({hea_date_result.incorrectly_redacted} redacted, {hea_date_result.not_shifted} unchanged)")
         
         # Evaluate filename anonymization
         for mapping in result_mappings:
@@ -1382,6 +1742,14 @@ def run_evaluation_pipeline(labels_dir: str, results_dir: str, output_dir: str) 
     hea_fnrs = []
     hea_fprs = []
 
+    # Lists for universal metrics (all document types including images/PDFs)
+    # For images/PDFs, we use coverage as a proxy for sensitivity
+    image_coverages = []  # Per-image coverage (treated as sensitivity)
+    pdf_coverages = []    # Per-PDF coverage (treated as sensitivity)
+
+    # Lists for date shift metrics per document
+    date_shift_rates = []  # Per-document date shift success rate
+
     for patient in overall.patient_results:
         # CSV metrics
         for csv_result in patient.csv_results:
@@ -1392,13 +1760,17 @@ def run_evaluation_pipeline(labels_dir: str, results_dir: str, output_dir: str) 
             overall.csv_true_negatives += csv_result.true_negatives
 
             # Collect per-document metrics for macro-averaging
-            # Only include documents that have relevant data
-            if csv_result.total_phi > 0 or csv_result.true_negatives > 0:
+            # Only include documents that have PHI (for sensitivity/precision)
+            # or have non-PHI data (for specificity)
+            if csv_result.total_phi > 0:
                 csv_sensitivities.append(csv_result.sensitivity)
-                csv_specificities.append(csv_result.specificity)
-                csv_accuracies.append(csv_result.accuracy)
                 csv_precisions.append(csv_result.precision)
                 csv_fnrs.append(csv_result.false_negative_rate)
+            
+            # Include all documents with any tokens for specificity, accuracy, FPR
+            if csv_result.total_phi > 0 or csv_result.true_negatives > 0:
+                csv_specificities.append(csv_result.specificity)
+                csv_accuracies.append(csv_result.accuracy)
                 csv_fprs.append(csv_result.false_positive_rate)
 
         # Image metrics (DICOM, PNG only)
@@ -1410,6 +1782,9 @@ def run_evaluation_pipeline(labels_dir: str, results_dir: str, output_dir: str) 
             # Accumulate weighted coverage and IoU (mean * number of regions)
             image_coverage_weighted_sum += img_result.mean_coverage * img_result.total_phi_regions
             image_iou_weighted_sum += img_result.mean_iou * img_result.total_phi_regions
+            # Collect per-document coverage for universal metrics
+            if img_result.total_phi_regions > 0:
+                image_coverages.append(img_result.mean_coverage)
 
         # PDF metrics (separate)
         for pdf_result in patient.pdf_results:
@@ -1420,6 +1795,9 @@ def run_evaluation_pipeline(labels_dir: str, results_dir: str, output_dir: str) 
             # Accumulate weighted coverage and IoU (mean * number of regions)
             pdf_coverage_weighted_sum += pdf_result.mean_coverage * pdf_result.total_phi_regions
             pdf_iou_weighted_sum += pdf_result.mean_iou * pdf_result.total_phi_regions
+            # Collect per-document coverage for universal metrics
+            if pdf_result.total_phi_regions > 0:
+                pdf_coverages.append(pdf_result.mean_coverage)
 
         # HEA (text) metrics
         for hea_result in patient.hea_results:
@@ -1430,12 +1808,17 @@ def run_evaluation_pipeline(labels_dir: str, results_dir: str, output_dir: str) 
             overall.hea_true_negatives += hea_result.true_negatives
 
             # Collect per-document metrics for macro-averaging
-            if hea_result.total_phi > 0 or hea_result.true_negatives > 0:
+            # Only include documents that have PHI (for sensitivity/precision)
+            # or have non-PHI data (for specificity)
+            if hea_result.total_phi > 0:
                 hea_sensitivities.append(hea_result.sensitivity)
-                hea_specificities.append(hea_result.specificity)
-                hea_accuracies.append(hea_result.accuracy)
                 hea_precisions.append(hea_result.precision)
                 hea_fnrs.append(hea_result.false_negative_rate)
+            
+            # Include all documents with any tokens for specificity, accuracy, FPR
+            if hea_result.total_phi > 0 or hea_result.true_negatives > 0:
+                hea_specificities.append(hea_result.specificity)
+                hea_accuracies.append(hea_result.accuracy)
                 hea_fprs.append(hea_result.false_positive_rate)
 
         # Filename metrics
@@ -1445,6 +1828,28 @@ def run_evaluation_pipeline(labels_dir: str, results_dir: str, output_dir: str) 
                 overall.filename_anonymized += 1
             else:
                 overall.filename_phi_leaked += 1
+
+        # Date shift metrics (from CSV files)
+        for date_result in patient.csv_date_results:
+            overall.date_total += date_result.total_dates
+            overall.date_correctly_shifted += date_result.correctly_shifted
+            overall.date_not_shifted += date_result.not_shifted
+            overall.date_incorrectly_redacted += date_result.incorrectly_redacted
+            overall.date_shift_failed += date_result.shift_failed
+            # Collect per-document date shift rate for universal metrics with dates
+            if date_result.total_dates > 0:
+                date_shift_rates.append(date_result.shift_rate)
+
+        # Date shift metrics (from HEA files)
+        for date_result in patient.hea_date_results:
+            overall.date_total += date_result.total_dates
+            overall.date_correctly_shifted += date_result.correctly_shifted
+            overall.date_not_shifted += date_result.not_shifted
+            # Collect per-document date shift rate for universal metrics with dates
+            if date_result.total_dates > 0:
+                date_shift_rates.append(date_result.shift_rate)
+            overall.date_incorrectly_redacted += date_result.incorrectly_redacted
+            overall.date_shift_failed += date_result.shift_failed
 
     # Calculate micro-averaged rates
     if overall.csv_total_phi > 0:
@@ -1460,6 +1865,11 @@ def run_evaluation_pipeline(labels_dir: str, results_dir: str, output_dir: str) 
 
     if overall.hea_total_phi > 0:
         overall.hea_recall = overall.hea_true_positives / overall.hea_total_phi
+
+    # Calculate date shift rates
+    if overall.date_total > 0:
+        overall.date_shift_rate = overall.date_correctly_shifted / overall.date_total
+        overall.date_redaction_error_rate = overall.date_incorrectly_redacted / overall.date_total
 
     # Calculate macro-averaged metrics for CSV
     if csv_sensitivities:
@@ -1494,7 +1904,46 @@ def run_evaluation_pipeline(labels_dir: str, results_dir: str, output_dir: str) 
         overall.combined_macro_precision = sum(all_precisions) / len(all_precisions)
         overall.combined_macro_fnr = sum(all_fnrs) / len(all_fnrs)
         overall.combined_macro_fpr = sum(all_fprs) / len(all_fprs)
-    
+
+    # Calculate UNIVERSAL macro-averaged metrics (ALL document types: CSV, HEA, Images, PDFs)
+    # For images/PDFs, coverage is treated as sensitivity (how much PHI was covered/detected)
+    # For images/PDFs, we don't have specificity/precision/accuracy, so we only include
+    # sensitivity-like metrics from them
+    universal_sensitivities = csv_sensitivities + hea_sensitivities + image_coverages + pdf_coverages
+    # For specificity, accuracy, precision: only text-based documents have these
+    universal_specificities = csv_specificities + hea_specificities
+    universal_accuracies = csv_accuracies + hea_accuracies
+    universal_precisions = csv_precisions + hea_precisions
+
+    if universal_sensitivities:
+        overall.universal_macro_sensitivity = sum(universal_sensitivities) / len(universal_sensitivities)
+        overall.universal_n_documents = len(universal_sensitivities)
+    if universal_specificities:
+        overall.universal_macro_specificity = sum(universal_specificities) / len(universal_specificities)
+    if universal_accuracies:
+        overall.universal_macro_accuracy = sum(universal_accuracies) / len(universal_accuracies)
+    if universal_precisions:
+        overall.universal_macro_precision = sum(universal_precisions) / len(universal_precisions)
+
+    # Calculate UNIVERSAL WITH DATES macro-averaged metrics
+    # This includes date shift rates as additional "accuracy" measurements
+    # Date shift rate = correctly_shifted / total_dates (how accurate was the date shifting)
+    universal_with_dates_sensitivities = universal_sensitivities
+    universal_with_dates_specificities = universal_specificities
+    # For accuracy, we include both text document accuracies AND date shift rates
+    universal_with_dates_accuracies = csv_accuracies + hea_accuracies + date_shift_rates
+    universal_with_dates_precisions = universal_precisions
+
+    if universal_with_dates_sensitivities:
+        overall.universal_with_dates_macro_sensitivity = sum(universal_with_dates_sensitivities) / len(universal_with_dates_sensitivities)
+        overall.universal_with_dates_n_documents = len(universal_with_dates_sensitivities) + len(date_shift_rates)
+    if universal_with_dates_specificities:
+        overall.universal_with_dates_macro_specificity = sum(universal_with_dates_specificities) / len(universal_with_dates_specificities)
+    if universal_with_dates_accuracies:
+        overall.universal_with_dates_macro_accuracy = sum(universal_with_dates_accuracies) / len(universal_with_dates_accuracies)
+    if universal_with_dates_precisions:
+        overall.universal_with_dates_macro_precision = sum(universal_with_dates_precisions) / len(universal_with_dates_precisions)
+
     return overall
 
 
@@ -1512,11 +1961,11 @@ def print_summary(overall: OverallEvaluationResult):
     print(f"   Correctly kept (TN):      {overall.csv_true_negatives}")
     print(f"   Recall (micro):           {overall.csv_recall:.2%}")
     print(f"\n   Macro-averaged per document:")
-    print(f"   ├─ Sensitivity:           {overall.csv_macro_sensitivity:.2%}")
+    print(f"   ├─ Sensitivity:           {overall.csv_macro_sensitivity:.2%} (based on {len([p for p in overall.patient_results for c in p.csv_results if c.total_phi > 0])} docs with PHI)")
     print(f"   ├─ Specificity:           {overall.csv_macro_specificity:.2%}")
     print(f"   ├─ Accuracy:              {overall.csv_macro_accuracy:.2%}")
-    print(f"   ├─ Precision:             {overall.csv_macro_precision:.2%}")
-    print(f"   ├─ False-Negative-Rate:   {overall.csv_macro_fnr:.2%}")
+    print(f"   ├─ Precision:             {overall.csv_macro_precision:.2%} (based on {len([p for p in overall.patient_results for c in p.csv_results if c.total_phi > 0])} docs with PHI)")
+    print(f"   ├─ False-Negative-Rate:   {overall.csv_macro_fnr:.2%} (based on {len([p for p in overall.patient_results for c in p.csv_results if c.total_phi > 0])} docs with PHI)")
     print(f"   └─ False-Positive-Rate:   {overall.csv_macro_fpr:.2%}")
 
     if overall.csv_false_negatives > 0:
@@ -1580,9 +2029,25 @@ def print_summary(overall: OverallEvaluationResult):
     else:
         print(f"   ✓ All filenames properly anonymized!")
 
-    # Combined macro-averaged metrics
+    print(f"\n📅 DATE SHIFT EVALUATION:")
+    print(f"   Total dates:              {overall.date_total}")
+    print(f"   Correctly shifted:        {overall.date_correctly_shifted}")
+    print(f"   Not shifted (unchanged):  {overall.date_not_shifted}")
+    print(f"   Incorrectly redacted:     {overall.date_incorrectly_redacted}")
+    print(f"   Shift failed:             {overall.date_shift_failed}")
+    print(f"   Shift rate:               {overall.date_shift_rate:.2%}")
+    print(f"   Redaction error rate:     {overall.date_redaction_error_rate:.2%}")
+
+    if overall.date_incorrectly_redacted > 0:
+        print(f"   ⚠️  WARNING: {overall.date_incorrectly_redacted} dates were incorrectly REDACTED instead of shifted!")
+    if overall.date_not_shifted > 0:
+        print(f"   ⚠️  WARNING: {overall.date_not_shifted} dates were NOT shifted (still original)!")
+    if overall.date_incorrectly_redacted == 0 and overall.date_not_shifted == 0 and overall.date_total > 0:
+        print(f"   ✓ All dates successfully time-shifted!")
+
+    # Combined macro-averaged metrics (CSV + HEA only)
     print(f"\n{'─'*80}")
-    print(f"📈 COMBINED MACRO-AVERAGED METRICS (across all documents):")
+    print(f"📈 COMBINED MACRO-AVERAGED METRICS (CSV + HEA only):")
     print(f"   ├─ Sensitivity:           {overall.combined_macro_sensitivity:.2%}")
     print(f"   ├─ Specificity:           {overall.combined_macro_specificity:.2%}")
     print(f"   ├─ Accuracy:              {overall.combined_macro_accuracy:.2%}")
@@ -1590,9 +2055,34 @@ def print_summary(overall: OverallEvaluationResult):
     print(f"   ├─ False-Negative-Rate:   {overall.combined_macro_fnr:.2%}")
     print(f"   └─ False-Positive-Rate:   {overall.combined_macro_fpr:.2%}")
 
+    # Universal metrics (ALL document types)
+    print(f"\n{'─'*80}")
+    print(f"🌐 UNIVERSAL METRICS (CSV + HEA + Images + PDFs):")
+    print(f"   Documents included:       {overall.universal_n_documents}")
+    print(f"   ├─ Sensitivity*:          {overall.universal_macro_sensitivity:.2%}")
+    print(f"   ├─ Specificity†:          {overall.universal_macro_specificity:.2%}")
+    print(f"   ├─ Accuracy†:             {overall.universal_macro_accuracy:.2%}")
+    print(f"   └─ Precision†:            {overall.universal_macro_precision:.2%}")
+    print(f"   (* Image/PDF coverage treated as sensitivity)")
+    print(f"   († Only from CSV/HEA documents)")
+
+    # Universal metrics WITH date shift
+    print(f"\n{'─'*80}")
+    print(f"🌐📅 UNIVERSAL METRICS WITH DATE SHIFT (CSV + HEA + Images + PDFs + Dates):")
+    print(f"   Documents/evaluations:    {overall.universal_with_dates_n_documents}")
+    print(f"   ├─ Sensitivity*:          {overall.universal_with_dates_macro_sensitivity:.2%}")
+    print(f"   ├─ Specificity†:          {overall.universal_with_dates_macro_specificity:.2%}")
+    print(f"   ├─ Accuracy‡:             {overall.universal_with_dates_macro_accuracy:.2%}")
+    print(f"   └─ Precision†:            {overall.universal_with_dates_macro_precision:.2%}")
+    print(f"   (* Image/PDF coverage treated as sensitivity)")
+    print(f"   († Only from CSV/HEA documents)")
+    print(f"   (‡ Includes date shift rate as accuracy component)")
+
     # Overall assessment
     print(f"\n{'='*80}")
-    total_issues = overall.csv_false_negatives + overall.image_not_covered + overall.pdf_not_covered + overall.hea_false_negatives + overall.filename_phi_leaked
+    total_issues = (overall.csv_false_negatives + overall.image_not_covered + overall.pdf_not_covered +
+                    overall.hea_false_negatives + overall.filename_phi_leaked +
+                    overall.date_incorrectly_redacted + overall.date_not_shifted)
     if total_issues == 0:
         print("🎉 OVERALL: All anonymization checks passed!")
     else:
@@ -1666,6 +2156,15 @@ def save_results(overall: OverallEvaluationResult, output_dir: str):
             'anonymized': overall.filename_anonymized,
             'phi_leaked': overall.filename_phi_leaked
         },
+        'date_shift_metrics': {
+            'total_dates': overall.date_total,
+            'correctly_shifted': overall.date_correctly_shifted,
+            'not_shifted': overall.date_not_shifted,
+            'incorrectly_redacted': overall.date_incorrectly_redacted,
+            'shift_failed': overall.date_shift_failed,
+            'shift_rate': overall.date_shift_rate,
+            'redaction_error_rate': overall.date_redaction_error_rate
+        },
         'combined_macro_averaged': {
             'sensitivity': overall.combined_macro_sensitivity,
             'specificity': overall.combined_macro_specificity,
@@ -1673,6 +2172,22 @@ def save_results(overall: OverallEvaluationResult, output_dir: str):
             'precision': overall.combined_macro_precision,
             'false_negative_rate': overall.combined_macro_fnr,
             'false_positive_rate': overall.combined_macro_fpr
+        },
+        'universal_metrics': {
+            'description': 'Macro-averaged across ALL document types (CSV, HEA, Images, PDFs). Image/PDF coverage is treated as sensitivity.',
+            'n_documents': overall.universal_n_documents,
+            'sensitivity': overall.universal_macro_sensitivity,
+            'specificity': overall.universal_macro_specificity,
+            'accuracy': overall.universal_macro_accuracy,
+            'precision': overall.universal_macro_precision
+        },
+        'universal_with_dates_metrics': {
+            'description': 'Macro-averaged across ALL document types including date shift evaluation. Date shift rate is included in accuracy calculation.',
+            'n_documents': overall.universal_with_dates_n_documents,
+            'sensitivity': overall.universal_with_dates_macro_sensitivity,
+            'specificity': overall.universal_with_dates_macro_specificity,
+            'accuracy': overall.universal_with_dates_macro_accuracy,
+            'precision': overall.universal_with_dates_macro_precision
         },
         'patients_evaluated': len(overall.patient_results)
     }
@@ -1735,6 +2250,24 @@ def save_results(overall: OverallEvaluationResult, output_dir: str):
             for fn_result in patient.filename_results:
                 writer.writerow([patient.original_folder, 'filename', fn_result.original, 'is_anonymized', fn_result.is_anonymized])
 
+            # Date shift results from CSV files
+            for date_result in patient.csv_date_results:
+                writer.writerow([patient.original_folder, 'csv_date_shift', date_result.filename, 'total_dates', date_result.total_dates])
+                writer.writerow([patient.original_folder, 'csv_date_shift', date_result.filename, 'correctly_shifted', date_result.correctly_shifted])
+                writer.writerow([patient.original_folder, 'csv_date_shift', date_result.filename, 'not_shifted', date_result.not_shifted])
+                writer.writerow([patient.original_folder, 'csv_date_shift', date_result.filename, 'incorrectly_redacted', date_result.incorrectly_redacted])
+                writer.writerow([patient.original_folder, 'csv_date_shift', date_result.filename, 'shift_failed', date_result.shift_failed])
+                writer.writerow([patient.original_folder, 'csv_date_shift', date_result.filename, 'shift_rate', f"{date_result.shift_rate:.4f}"])
+
+            # Date shift results from HEA files
+            for date_result in patient.hea_date_results:
+                writer.writerow([patient.original_folder, 'hea_date_shift', date_result.filename, 'total_dates', date_result.total_dates])
+                writer.writerow([patient.original_folder, 'hea_date_shift', date_result.filename, 'correctly_shifted', date_result.correctly_shifted])
+                writer.writerow([patient.original_folder, 'hea_date_shift', date_result.filename, 'not_shifted', date_result.not_shifted])
+                writer.writerow([patient.original_folder, 'hea_date_shift', date_result.filename, 'incorrectly_redacted', date_result.incorrectly_redacted])
+                writer.writerow([patient.original_folder, 'hea_date_shift', date_result.filename, 'shift_failed', date_result.shift_failed])
+                writer.writerow([patient.original_folder, 'hea_date_shift', date_result.filename, 'shift_rate', f"{date_result.shift_rate:.4f}"])
+
     print(f"📁 Detailed report saved to: {csv_report_file}")
 
 
@@ -1775,7 +2308,9 @@ def main():
     save_results(overall, args.output)
     
     # Exit with error code if there are issues
-    total_issues = overall.csv_false_negatives + overall.image_not_covered + overall.pdf_not_covered + overall.filename_phi_leaked
+    total_issues = (overall.csv_false_negatives + overall.image_not_covered + overall.pdf_not_covered +
+                    overall.hea_false_negatives + overall.filename_phi_leaked +
+                    overall.date_incorrectly_redacted + overall.date_not_shifted)
     if total_issues > 0:
         exit(1)
 

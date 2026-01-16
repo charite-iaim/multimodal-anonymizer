@@ -10,6 +10,8 @@ from .processors.pdf_ocr_processor import PDFOCRProcessor
 from .processors.csv_processor import CSVProcessor
 from .processors.text_processor import TextProcessor
 from .processors.dicom_processor import DICOMProcessor
+from .processors.agentic_text_processor import AgenticTextProcessor
+from .processors.agentic_csv_processor import AgenticCSVProcessor
 from .file_type_detector import FileTypeDetector, DataType, FileTypeResult
 from .processing_tracker import ProcessingTracker
 
@@ -22,6 +24,8 @@ __all__ = [
     "CSVProcessor",
     "TextProcessor",
     "DICOMProcessor",
+    "AgenticTextProcessor",
+    "AgenticCSVProcessor",
     "FileTypeDetector",
     "DataType",
     "FileTypeResult",

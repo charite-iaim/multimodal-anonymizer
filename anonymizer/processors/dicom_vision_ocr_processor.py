@@ -24,7 +24,15 @@ from .png_vision_ocr_processor import PNGVisionOCRProcessor
 class DICOMVisionOCRProcessor(FileProcessor):
     """Processor for DICOM images using Vision LLM + OCR approach."""
 
-    def __init__(self, config: AnonymizerConfig, save_intermediate: bool = None, similarity_threshold: float = 0.6):
+    def __init__(
+        self,
+        config: AnonymizerConfig,
+        save_intermediate: bool = None,
+        similarity_threshold: float = 0.6,
+        enable_verification: bool = True,
+        check_over_redaction: bool = False,
+        max_verification_rounds: int = 2
+    ):
         """
         Initialize DICOM Vision+OCR processor.
 
@@ -33,25 +41,47 @@ class DICOMVisionOCRProcessor(FileProcessor):
             save_intermediate: If True, save intermediate PNG files for development.
                              If None, uses config.save_debug_files
             similarity_threshold: Minimum similarity for fuzzy text matching (0.0-1.0)
+            enable_verification: If True, run verification agent after initial redaction
+            check_over_redaction: If True, also check for over-redaction
+            max_verification_rounds: Maximum rounds of verify-and-redact
         """
         super().__init__(config)
         self.save_intermediate = save_intermediate if save_intermediate is not None else config.save_debug_files
-        self.png_processor = PNGVisionOCRProcessor(config, similarity_threshold=similarity_threshold)
+        self.enable_verification = enable_verification
+        self.check_over_redaction = check_over_redaction
+        self.max_verification_rounds = max_verification_rounds
+        self.png_processor = PNGVisionOCRProcessor(
+            config,
+            similarity_threshold=similarity_threshold,
+            enable_verification=enable_verification,
+            check_over_redaction=check_over_redaction,
+            max_verification_rounds=max_verification_rounds
+        )
 
     def can_process(self, file_path: Path) -> bool:
         """Check if file is a DICOM image."""
+        # First check extension
         if file_path.suffix.lower() in ['.dcm', '.dicom']:
             return True
 
+        # For files without DICOM extension, check for DICOM magic bytes
+        # DICOM files have "DICM" at byte offset 128
         try:
-            pydicom.dcmread(file_path, stop_before_pixels=True)
-            return True
-        except:
-            return False
+            with open(file_path, 'rb') as f:
+                f.seek(128)
+                magic = f.read(4)
+                if magic == b'DICM':
+                    return True
+        except (IOError, OSError):
+            pass
+
+        # Don't try pydicom.dcmread with force=True for unknown files
+        # as it will accept almost any file and fail later on pixel decoding
+        return False
 
     def extract_content(self, file_path: Path) -> str:
         """Extract content from DICOM file."""
-        ds = pydicom.dcmread(file_path)
+        ds = pydicom.dcmread(file_path, force=True)
         return str(ds)
 
     def _dicom_to_images(self, dicom_path: Path) -> tuple[list[Image.Image], pydicom.Dataset, bool]:
@@ -64,8 +94,38 @@ class DICOMVisionOCRProcessor(FileProcessor):
         Returns:
             Tuple of (list of PIL Images, DICOM dataset, is_multiframe)
         """
-        ds = pydicom.dcmread(dicom_path)
-        pixel_array = ds.pixel_array
+        ds = pydicom.dcmread(dicom_path, force=True)
+        
+        # Handle missing transfer syntax by setting a default
+        if not hasattr(ds, 'file_meta') or ds.file_meta is None:
+            ds.file_meta = pydicom.dataset.FileMetaDataset()
+        
+        if not hasattr(ds.file_meta, 'TransferSyntaxUID') or ds.file_meta.TransferSyntaxUID is None:
+            # Try to infer transfer syntax from the data
+            # Common transfer syntaxes to try in order
+            transfer_syntaxes = [
+                pydicom.uid.ImplicitVRLittleEndian,  # Most common for files without header
+                pydicom.uid.ExplicitVRLittleEndian,
+                pydicom.uid.ExplicitVRBigEndian,
+            ]
+            
+            pixel_array = None
+            for ts in transfer_syntaxes:
+                try:
+                    ds.file_meta.TransferSyntaxUID = ts
+                    pixel_array = ds.pixel_array
+                    print(f"Successfully decoded with Transfer Syntax: {ts.name}")
+                    break
+                except Exception as e:
+                    continue
+            
+            if pixel_array is None:
+                raise ValueError(
+                    "Unable to decode pixel data with any common transfer syntax. "
+                    "The DICOM file may be corrupted or use an unsupported format."
+                )
+        else:
+            pixel_array = ds.pixel_array
 
         is_multiframe = len(pixel_array.shape) == 4
 
@@ -278,6 +338,8 @@ class DICOMVisionOCRProcessor(FileProcessor):
         Returns:
             List containing single redacted image
         """
+        original_image = image.copy()  # Keep for verification
+
         if self.save_intermediate:
             intermediate_dir = output_path.parent / "intermediate"
             intermediate_dir.mkdir(parents=True, exist_ok=True)
@@ -290,6 +352,17 @@ class DICOMVisionOCRProcessor(FileProcessor):
         print(f"Found {len(pii_elements)} PHI elements")
 
         redacted_image = self.png_processor._apply_redactions(image.copy(), pii_elements)
+
+        # Verification phase
+        verification_result = None
+        additional_elements = []
+        if self.enable_verification and self.png_processor._verification_agent is not None:
+            print("\n=== Verification Phase ===")
+            redacted_image, verification_result, additional_elements = self.png_processor._run_verification(
+                redacted_image,
+                original_image if self.check_over_redaction else None
+            )
+            pii_elements.extend(additional_elements)
 
         if self.save_intermediate:
             redacted_intermediate_path = intermediate_dir / f"{input_path.stem}_redacted.png"
@@ -307,6 +380,7 @@ class DICOMVisionOCRProcessor(FileProcessor):
                     "output_file": str(output_path.name),
                     "timestamp": datetime.now().isoformat(),
                     "processing_method": "vision_ocr_singleframe",
+                    "verification_enabled": self.enable_verification,
                     "total_pii_elements": len(pii_elements)
                 },
                 "pii_elements": [
@@ -324,6 +398,37 @@ class DICOMVisionOCRProcessor(FileProcessor):
                 ]
             }
 
+            # Add verification results if available
+            if verification_result is not None:
+                output_data["verification"] = {
+                    "is_clean": verification_result.is_clean,
+                    "confidence": verification_result.confidence,
+                    "notes": verification_result.notes,
+                    "remaining_pii_found": [
+                        {"text": pii.text, "type": pii.type, "reason": pii.reason}
+                        for pii in verification_result.remaining_pii
+                    ],
+                    "over_redactions": [
+                        {"description": o.description, "reason": o.reason, "can_recover": o.can_recover}
+                        for o in verification_result.over_redactions
+                    ]
+                }
+
+            if additional_elements:
+                output_data["verification_additional_redactions"] = [
+                    {
+                        "type": element.type,
+                        "text": element.text,
+                        "bbox": {
+                            "x": element.bbox.x,
+                            "y": element.bbox.y,
+                            "width": element.bbox.width,
+                            "height": element.bbox.height
+                        }
+                    }
+                    for element in additional_elements
+                ]
+
             with open(json_dest, "w", encoding="utf-8") as f:
                 json.dump(output_data, f, indent=2, ensure_ascii=False)
             print(f"Saved detection results to: {json_dest}")
@@ -339,6 +444,9 @@ class DICOMVisionOCRProcessor(FileProcessor):
         """
         Anonymize multi-frame DICOM using first-frame-only detection.
 
+        For multi-frame DICOMs, verification is performed on the first frame after
+        initial redaction. Any additional bounding boxes found are applied to all frames.
+
         Args:
             images: List of all frame images
             input_path: Original input path
@@ -348,6 +456,7 @@ class DICOMVisionOCRProcessor(FileProcessor):
             List of all redacted images
         """
         num_frames = len(images)
+        original_first_frame = images[0].copy()  # Keep for verification
         print(f"Analyzing first frame only (out of {num_frames} total frames)...")
 
         print(f"Detecting PHI in first frame using Vision+OCR...")
@@ -361,13 +470,30 @@ class DICOMVisionOCRProcessor(FileProcessor):
             images[0].save(first_frame_path)
             print(f"Saved first frame to: {first_frame_path}")
 
+        # Apply initial redactions to first frame for verification
+        redacted_first_frame = self.png_processor._apply_redactions(images[0].copy(), first_frame_bboxes)
+
+        # Verification phase on first frame
+        verification_result = None
+        additional_elements = []
+        all_bboxes = list(first_frame_bboxes)  # Start with initial bboxes
+
+        if self.enable_verification and self.png_processor._verification_agent is not None:
+            print("\n=== Verification Phase (First Frame) ===")
+            redacted_first_frame, verification_result, additional_elements = self.png_processor._run_verification(
+                redacted_first_frame,
+                original_first_frame if self.check_over_redaction else None
+            )
+            all_bboxes.extend(additional_elements)
+
+        # Now apply ALL bounding boxes (initial + verification) to all frames
         print(f"Applying redactions to all {num_frames} frames...")
         redacted_images = []
         for i, image in enumerate(images):
             if i % 10 == 0 or i == num_frames - 1:
                 print(f"  Redacting frame {i + 1}/{num_frames}...")
 
-            redacted_image = self.png_processor._apply_redactions(image.copy(), first_frame_bboxes)
+            redacted_image = self.png_processor._apply_redactions(image.copy(), all_bboxes)
             redacted_images.append(redacted_image)
 
         if self.save_intermediate:
@@ -377,7 +503,7 @@ class DICOMVisionOCRProcessor(FileProcessor):
 
         if self.config.save_debug_files:
             from ..models import PIIDetectionResult
-            pii_result = PIIDetectionResult(pii_elements=first_frame_bboxes)
+            pii_result = PIIDetectionResult(pii_elements=all_bboxes)
 
             json_dest = output_path.with_suffix(".json")
             output_data = {
@@ -386,9 +512,12 @@ class DICOMVisionOCRProcessor(FileProcessor):
                     "output_file": str(output_path.name),
                     "timestamp": datetime.now().isoformat(),
                     "processing_method": "vision_ocr_multiframe_first_frame_only",
+                    "verification_enabled": self.enable_verification,
                     "total_frames": num_frames,
                     "analyzed_frames": 1,
-                    "total_pii_elements": len(first_frame_bboxes)
+                    "total_pii_elements": len(all_bboxes),
+                    "initial_pii_elements": len(first_frame_bboxes),
+                    "verification_additional_elements": len(additional_elements)
                 },
                 "pii_elements": [
                     {
@@ -401,9 +530,40 @@ class DICOMVisionOCRProcessor(FileProcessor):
                             "height": element.bbox.height
                         }
                     }
-                    for element in first_frame_bboxes
+                    for element in all_bboxes
                 ]
             }
+
+            # Add verification results if available
+            if verification_result is not None:
+                output_data["verification"] = {
+                    "is_clean": verification_result.is_clean,
+                    "confidence": verification_result.confidence,
+                    "notes": verification_result.notes,
+                    "remaining_pii_found": [
+                        {"text": pii.text, "type": pii.type, "reason": pii.reason}
+                        for pii in verification_result.remaining_pii
+                    ],
+                    "over_redactions": [
+                        {"description": o.description, "reason": o.reason, "can_recover": o.can_recover}
+                        for o in verification_result.over_redactions
+                    ]
+                }
+
+            if additional_elements:
+                output_data["verification_additional_redactions"] = [
+                    {
+                        "type": element.type,
+                        "text": element.text,
+                        "bbox": {
+                            "x": element.bbox.x,
+                            "y": element.bbox.y,
+                            "width": element.bbox.width,
+                            "height": element.bbox.height
+                        }
+                    }
+                    for element in additional_elements
+                ]
 
             with open(json_dest, "w", encoding="utf-8") as f:
                 json.dump(output_data, f, indent=2, ensure_ascii=False)
