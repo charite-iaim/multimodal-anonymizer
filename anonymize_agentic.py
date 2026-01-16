@@ -1,6 +1,13 @@
 #!/usr/bin/env python3
 """
-Main script for anonymizing files using LLM-based processors.
+Main script for anonymizing files using agentic/vision-based LLM processors.
+
+This script uses:
+- AgenticCSVProcessor for CSV files (tool-calling approach)
+- AgenticTextProcessor for text files (tool-calling approach)
+- DICOMVisionOCRProcessor for DICOM images (Vision LLM + OCR)
+- PDFVisionOCRProcessor for PDF files (Vision LLM + OCR)
+- PNGVisionOCRProcessor for PNG/JPG images (Vision LLM + OCR)
 """
 
 import argparse
@@ -9,15 +16,14 @@ from typing import List
 
 from anonymizer import (
     AnonymizerConfig,
-    PNGProcessor,
-    PNGOCRProcessor,
-    PDFOCRProcessor,
-    CSVProcessor,
-    TextProcessor,
-    DICOMProcessor,
     FileTypeDetector,
     DataType,
 )
+from anonymizer.processors.agentic_csv_processor import AgenticCSVProcessor
+from anonymizer.processors.agentic_text_processor import AgenticTextProcessor
+from anonymizer.processors.dicom_vision_ocr_processor import DICOMVisionOCRProcessor
+from anonymizer.processors.pdf_vision_ocr_processor import PDFVisionOCRProcessor
+from anonymizer.processors.png_vision_ocr_processor import PNGVisionOCRProcessor
 from anonymizer.filename_anonymizer import FilenameAnonymizer
 from anonymizer.processing_tracker import ProcessingTracker
 from anonymizer.parallel_processor import (
@@ -26,20 +32,42 @@ from anonymizer.parallel_processor import (
 )
 
 
+def generate_patient_time_offset() -> int:
+    """
+    Generate a random time offset for a patient.
+
+    Returns a random offset between 1-3 years (positive or negative),
+    in days. This ensures each patient gets a unique but consistent
+    time shift for all their files.
+
+    Returns:
+        int: Time offset in days (between 365-1095 or -1095 to -365)
+    """
+    import random
+    # Random offset between 1-3 years (365-1095 days)
+    # This gives us a truly random value, e.g., 1 year 2 months, 2 years 7 months, etc.
+    days = random.randint(365, 1095)
+    # Random sign (positive or negative)
+    if random.random() < 0.5:
+        days = -days
+    return days
+
+
 def get_processor(
     file_path: Path,
     config: AnonymizerConfig,
-    use_ocr: bool = False,
-    use_llm_detection: bool = False
+    use_llm_detection: bool = False,
+    time_offset_days: int = None
 ):
     """
-    Get appropriate processor for the file type.
+    Get appropriate agentic processor for the file type.
 
     Args:
         file_path: Path to the file
         config: Anonymizer configuration
-        use_ocr: If True, use OCR-based processor for images; otherwise use vision-based processor
         use_llm_detection: If True, use multimodal LLM to detect file type and choose processor
+        time_offset_days: Optional time offset in days for date shifting. If None, processor
+                          will generate its own random offset.
 
     Returns:
         FileProcessor instance or None
@@ -53,58 +81,45 @@ def get_processor(
         if detection_result.data_type == DataType.TEXT:
             # Text data -> use suggested processor
             if detection_result.suggested_processor == "text":
-                processor = TextProcessor(config)
+                processor = AgenticTextProcessor(config, time_offset_days=time_offset_days)
                 if processor.can_process(file_path):
-                    print(f"Using Text processor based on LLM detection")
+                    print(f"Using Agentic Text processor based on LLM detection")
                     return processor
             elif detection_result.suggested_processor == "csv":
-                processor = CSVProcessor(config)
+                processor = AgenticCSVProcessor(config, time_offset_days=time_offset_days)
                 if processor.can_process(file_path):
-                    print(f"Using CSV processor based on LLM detection")
+                    print(f"Using Agentic CSV processor based on LLM detection")
                     return processor
 
             # Fallback: try both processors
-            text_processor = TextProcessor(config)
+            text_processor = AgenticTextProcessor(config, time_offset_days=time_offset_days)
             if text_processor.can_process(file_path):
-                print(f"Using Text processor (fallback)")
+                print(f"Using Agentic Text processor (fallback)")
                 return text_processor
 
-            csv_processor = CSVProcessor(config)
+            csv_processor = AgenticCSVProcessor(config, time_offset_days=time_offset_days)
             if csv_processor.can_process(file_path):
-                print(f"Using CSV processor (fallback)")
+                print(f"Using Agentic CSV processor (fallback)")
                 return csv_processor
 
         elif detection_result.data_type == DataType.IMAGE:
-            # Image data -> use OCR or vision processor based on suggestion
-            if detection_result.suggested_processor == "ocr" or use_ocr:
-                processor = PNGOCRProcessor(config)
-            else:
-                processor = PNGProcessor(config)
-
+            # Image data -> use Vision OCR processor
+            processor = PNGVisionOCRProcessor(config)
             if processor.can_process(file_path):
-                print(f"Using {detection_result.suggested_processor} processor based on LLM detection")
+                print(f"Using Vision+OCR processor based on LLM detection")
                 return processor
 
         # If LLM detection didn't work or type is unknown, fall back to extension-based matching
         print(f"LLM detected type '{detection_result.data_type}' but no suitable processor found, falling back to extension-based matching")
 
-    # Original extension-based processor selection
-    if use_ocr:
-        processors = [
-            DICOMProcessor(config),
-            PNGOCRProcessor(config),
-            PDFOCRProcessor(config),
-            TextProcessor(config),
-            CSVProcessor(config),
-        ]
-    else:
-        processors = [
-            DICOMProcessor(config),
-            PNGProcessor(config),
-            PDFOCRProcessor(config),
-            TextProcessor(config),
-            CSVProcessor(config),
-        ]
+    # Original extension-based processor selection with agentic processors
+    processors = [
+        DICOMVisionOCRProcessor(config),
+        PNGVisionOCRProcessor(config),
+        PDFVisionOCRProcessor(config),
+        AgenticTextProcessor(config, time_offset_days=time_offset_days),
+        AgenticCSVProcessor(config, time_offset_days=time_offset_days),
+    ]
 
     for processor in processors:
         if processor.can_process(file_path):
@@ -117,13 +132,13 @@ def process_file(
     input_path: Path,
     output_dir: Path,
     config: AnonymizerConfig,
-    use_ocr: bool = False,
     use_llm_detection: bool = False,
     preserve_structure: bool = False,
     relative_path: Path = None,
     filename_anonymizer: FilenameAnonymizer = None,
     anonymize_paths: bool = True,
-    tracker: ProcessingTracker = None
+    tracker: ProcessingTracker = None,
+    time_offset_days: int = None
 ) -> bool:
     """
     Process a single file.
@@ -132,13 +147,14 @@ def process_file(
         input_path: Path to input file
         output_dir: Directory for output
         config: Anonymizer configuration
-        use_ocr: If True, use OCR-based processor
         use_llm_detection: If True, use multimodal LLM to detect file type
         preserve_structure: If True, preserve directory structure in output
         relative_path: Relative path from input root (used when preserve_structure=True)
         filename_anonymizer: Optional FilenameAnonymizer instance for anonymizing filenames
         anonymize_paths: If True, automatically anonymize filename (default: True)
         tracker: Optional ProcessingTracker instance for tracking processed files
+        time_offset_days: Patient-specific time offset in days for date shifting.
+                          If None, processor will generate its own random offset.
 
     Returns:
         True if successful
@@ -148,7 +164,7 @@ def process_file(
         print(f"Skipping already processed file: {input_path.name}")
         return True
 
-    processor = get_processor(input_path, config, use_ocr, use_llm_detection)
+    processor = get_processor(input_path, config, use_llm_detection, time_offset_days=time_offset_days)
 
     if processor is None:
         print(f"No processor available for: {input_path.name}")
@@ -241,7 +257,6 @@ def process_directory(
     input_dir: Path,
     output_dir: Path,
     config: AnonymizerConfig,
-    use_ocr: bool = False,
     use_llm_detection: bool = False,
     recursive: bool = False,
     preserve_structure: bool = False,
@@ -258,13 +273,14 @@ def process_directory(
         input_dir: Input directory path
         output_dir: Output directory path
         config: Anonymizer configuration
-        use_ocr: If True, use OCR-based processor
         use_llm_detection: If True, use multimodal LLM to detect file type
         recursive: If True, process subdirectories recursively
         preserve_structure: If True, preserve directory structure in output
         skip_hidden: If True, skip hidden files and directories (starting with '.')
         anonymize_paths: If True, anonymize file and folder names
         tracker: Optional ProcessingTracker instance for tracking processed files
+        parallel: If True, use parallel processing
+        num_workers: Number of parallel workers
     """
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -297,7 +313,7 @@ def process_directory(
                 skipped += 1
                 continue
 
-            if process_file(file_path, output_dir, config, use_ocr, use_llm_detection,
+            if process_file(file_path, output_dir, config, use_llm_detection,
                           filename_anonymizer=filename_anonymizer, anonymize_paths=anonymize_paths,
                           tracker=tracker):
                 successful += 1
@@ -323,7 +339,6 @@ def process_directory(
             input_dir=input_dir,
             output_dir=output_dir,
             config=config,
-            use_ocr=use_ocr,
             use_llm_detection=use_llm_detection,
             preserve_structure=preserve_structure,
             skip_hidden=skip_hidden,
@@ -338,7 +353,6 @@ def _process_directory_parallel(
     input_dir: Path,
     output_dir: Path,
     config: AnonymizerConfig,
-    use_ocr: bool = False,
     use_llm_detection: bool = False,
     preserve_structure: bool = True,
     skip_hidden: bool = True,
@@ -353,7 +367,6 @@ def _process_directory_parallel(
         input_dir: Input directory path
         output_dir: Output directory path
         config: Anonymizer configuration
-        use_ocr: If True, use OCR-based processor
         use_llm_detection: If True, use multimodal LLM to detect file type
         preserve_structure: If True, preserve directory structure in output
         skip_hidden: If True, skip hidden files and directories
@@ -411,10 +424,9 @@ def _process_directory_parallel(
         unique_folders = set()
         for file_path in files_to_process:
             relative_path = file_path.relative_to(input_dir)
-            for parent in relative_path.parents:
-                if parent != Path('.'):
-                    for part in parent.parts:
-                        unique_folders.add(part)
+            # Get all folder names in the path (excluding the filename)
+            for part in relative_path.parent.parts:
+                unique_folders.add(part)
 
         for folder_name in sorted(unique_folders):
             result = filename_anonymizer.anonymize_filename(folder_name, is_directory=True)
@@ -425,14 +437,34 @@ def _process_directory_parallel(
                 phi_detections=result.phi_detections
             )
 
+    # Generate patient-specific time offsets
+    # Each top-level folder (patient folder) gets a unique random time offset
+    print("Generating patient-specific time offsets (1-3 years)...")
+    patient_time_offsets = {}
+    for file_path in files_to_process:
+        relative_path = file_path.relative_to(input_dir)
+        # Get the top-level folder (patient folder)
+        if relative_path.parent.parts:
+            patient_folder = relative_path.parent.parts[0]
+        else:
+            # File is directly in input_dir, use filename stem as "patient"
+            patient_folder = file_path.stem
+
+        if patient_folder not in patient_time_offsets:
+            patient_time_offsets[patient_folder] = generate_patient_time_offset()
+            print(f"  Patient '{patient_folder}': {patient_time_offsets[patient_folder]} days ({patient_time_offsets[patient_folder] // 365} years)")
+
+    print(f"Generated time offsets for {len(patient_time_offsets)} patients")
+
     # Create parallel processor
     parallel_processor = ParallelFileProcessor(
         config=config,
         num_workers=num_workers,
-        use_ocr=use_ocr,
+        use_ocr=False,  # Not used for agentic processors
         use_llm_detection=use_llm_detection,
         preserve_structure=preserve_structure,
-        anonymize_paths=anonymize_paths
+        anonymize_paths=anonymize_paths,
+        processor_module='anonymize_agentic'
     )
 
     # Create jobs for all files
@@ -440,10 +472,10 @@ def _process_directory_parallel(
     for file_path in files_to_process:
         relative_path = file_path.relative_to(input_dir)
 
-        # Build anonymized relative path
+        # Build anonymized relative path (all folder parts, not the filename)
         if anonymize_paths and folder_mapping:
             anonymized_parts = []
-            for part in relative_path.parts[:-1]:  # All parts except filename
+            for part in relative_path.parent.parts:  # All folder parts
                 anonymized_parts.append(folder_mapping.get(part, part))
             anonymized_relative_path = Path(*anonymized_parts) if anonymized_parts else Path('.')
         else:
@@ -473,13 +505,21 @@ def _process_directory_parallel(
         else:
             anonymized_filename = f"anonymized_{file_path.name}"
 
+        # Get patient-specific time offset
+        if relative_path.parent.parts:
+            patient_folder = relative_path.parent.parts[0]
+        else:
+            patient_folder = file_path.stem
+        time_offset = patient_time_offsets.get(patient_folder)
+
         job = parallel_processor.create_job(
             input_path=file_path,
             output_dir=output_dir,
             relative_path=relative_path,
             anonymized_relative_path=anonymized_relative_path,
             anonymized_filename=anonymized_filename,
-            folder_path=str(relative_path.parent) if relative_path.parent != Path('.') else ""
+            folder_path=str(relative_path.parent) if relative_path.parent != Path('.') else "",
+            time_offset_days=time_offset
         )
         jobs.append(job)
 
@@ -533,7 +573,6 @@ def process_directory_recursive(
     input_dir: Path,
     output_dir: Path,
     config: AnonymizerConfig,
-    use_ocr: bool = False,
     use_llm_detection: bool = False,
     preserve_structure: bool = True,
     skip_hidden: bool = True,
@@ -543,6 +582,7 @@ def process_directory_recursive(
     _stats: dict = None,
     _filename_anonymizer: FilenameAnonymizer = None,
     _folder_mapping: dict = None,
+    _patient_time_offsets: dict = None,
     parallel: bool = True,
     num_workers: int = None
 ):
@@ -553,7 +593,6 @@ def process_directory_recursive(
         input_dir: Input directory path
         output_dir: Output directory path
         config: Anonymizer configuration
-        use_ocr: If True, use OCR-based processor
         use_llm_detection: If True, use multimodal LLM to detect file type
         preserve_structure: If True, preserve directory structure in output
         skip_hidden: If True, skip hidden files and directories
@@ -563,6 +602,9 @@ def process_directory_recursive(
         _stats: Internal parameter for tracking statistics
         _filename_anonymizer: Internal parameter for filename anonymization
         _folder_mapping: Internal parameter for tracking folder name mappings
+        _patient_time_offsets: Internal parameter for tracking patient-specific time offsets
+        parallel: If True, use parallel processing
+        num_workers: Number of parallel workers
     """
     # Initialize on first call
     is_root_call = _root_dir is None
@@ -570,6 +612,7 @@ def process_directory_recursive(
         _root_dir = input_dir
         _stats = {"successful": 0, "failed": 0, "skipped": 0}
         _folder_mapping = {}
+        _patient_time_offsets = {}
         if anonymize_paths:
             _filename_anonymizer = FilenameAnonymizer(config, output_dir=output_dir)
         print(f"Starting recursive directory processing...")
@@ -588,7 +631,6 @@ def process_directory_recursive(
                 input_dir=input_dir,
                 output_dir=output_dir,
                 config=config,
-                use_ocr=use_ocr,
                 use_llm_detection=use_llm_detection,
                 preserve_structure=preserve_structure,
                 skip_hidden=skip_hidden,
@@ -633,17 +675,29 @@ def process_directory_recursive(
                 _stats["skipped"] += 1
                 continue
 
+            # Get patient-specific time offset (top-level folder is the patient)
+            if original_relative_path.parent.parts:
+                patient_folder = original_relative_path.parent.parts[0]
+            else:
+                patient_folder = item.stem
+
+            if patient_folder not in _patient_time_offsets:
+                _patient_time_offsets[patient_folder] = generate_patient_time_offset()
+                print(f"  Generated time offset for patient '{patient_folder}': {_patient_time_offsets[patient_folder]} days ({_patient_time_offsets[patient_folder] // 365} years)")
+
+            time_offset = _patient_time_offsets[patient_folder]
+
             success = process_file(
                 input_path=item,
                 output_dir=output_dir,
                 config=config,
-                use_ocr=use_ocr,
                 use_llm_detection=use_llm_detection,
                 preserve_structure=preserve_structure,
                 relative_path=original_relative_path if not anonymize_paths else anonymized_relative_path / item.name,
                 filename_anonymizer=_filename_anonymizer,
                 anonymize_paths=anonymize_paths,
-                tracker=tracker
+                tracker=tracker,
+                time_offset_days=time_offset
             )
 
             if success:
@@ -693,7 +747,6 @@ def process_directory_recursive(
                 input_dir=item,
                 output_dir=output_dir,
                 config=config,
-                use_ocr=use_ocr,
                 use_llm_detection=use_llm_detection,
                 preserve_structure=preserve_structure,
                 skip_hidden=skip_hidden,
@@ -702,7 +755,8 @@ def process_directory_recursive(
                 _root_dir=_root_dir,
                 _stats=_stats,
                 _filename_anonymizer=_filename_anonymizer,
-                _folder_mapping=_folder_mapping
+                _folder_mapping=_folder_mapping,
+                _patient_time_offsets=_patient_time_offsets
             )
 
     # Print summary and save mappings only on initial call
@@ -729,18 +783,14 @@ def process_directory_recursive(
 def main():
     """Main entry point."""
     parser = argparse.ArgumentParser(
-        description="Anonymize files using LLM-based detection and redaction"
+        description="Anonymize files using agentic/vision-based LLM processors"
     )
     parser.add_argument(
         "input", type=str, help="Input file or directory path"
     )
     parser.add_argument(
-        "--output", "-o", type=str, default="data/output",
-        help="Output directory (default: data/output)"
-    )
-    parser.add_argument(
-        "--mode", "-m", type=str, choices=["vision", "ocr"], default="ocr",
-        help="Processing mode: 'vision' for direct LLM vision analysis, 'ocr' for OCR + LLM classification (default: vision)"
+        "--output", "-o", type=str, default="data/output-agentic",
+        help="Output directory (default: data/output-agentic)"
     )
     parser.add_argument(
         "--auto-detect", "-a", action="store_true",
@@ -802,7 +852,6 @@ def main():
 
     input_path = Path(args.input)
     output_dir = Path(args.output)
-    use_ocr = (args.mode == "ocr")
     use_llm_detection = args.auto_detect
     num_workers = args.workers
 
@@ -823,10 +872,16 @@ def main():
         print(f"Error: Input path does not exist: {input_path}")
         return
 
+    print("Using AGENTIC/VISION-BASED processors:")
+    print("  - AgenticCSVProcessor (tool-calling approach)")
+    print("  - AgenticTextProcessor (tool-calling approach)")
+    print("  - DICOMVisionOCRProcessor (Vision LLM + OCR)")
+    print("  - PDFVisionOCRProcessor (Vision LLM + OCR)")
+    print("  - PNGVisionOCRProcessor (Vision LLM + OCR)")
+    print()
+
     if use_llm_detection:
         print(f"Using automatic file type detection with multimodal LLM")
-    else:
-        print(f"Using processing mode: {args.mode}")
 
     if args.recursive:
         print(f"Recursive processing: enabled")
@@ -864,14 +919,13 @@ def main():
 
     if input_path.is_file():
         # For single file, process with automatic filename anonymization
-        process_file(input_path, output_dir, config, use_ocr, use_llm_detection,
+        process_file(input_path, output_dir, config, use_llm_detection,
                     anonymize_paths=anonymize_paths, tracker=tracker)
     elif input_path.is_dir():
         process_directory(
             input_path,
             output_dir,
             config,
-            use_ocr,
             use_llm_detection,
             recursive=args.recursive,
             preserve_structure=args.preserve_structure,

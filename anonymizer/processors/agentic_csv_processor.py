@@ -14,6 +14,8 @@ from datetime import datetime
 from typing import List, Dict, Optional, Set, Tuple
 import random
 import time
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from langchain_openai import AzureChatOpenAI
 from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
@@ -71,21 +73,49 @@ class AgenticCSVProcessor(FileProcessor):
     2. Anonymization Phase: LLM anonymizes all other PII (names, addresses, IDs, etc.)
     """
 
-    def __init__(self, config: AnonymizerConfig, time_offset_days: Optional[int] = None):
+    def __init__(
+        self,
+        config: AnonymizerConfig,
+        time_offset_days: Optional[int] = None,
+        max_workers: int = 4,
+        batch_size_phase2: int = 15,  # Reduced from 30 to improve attention on each row
+        batch_size_phase3: int = 15   # Reduced from 25 to improve verification quality
+    ):
         """
         Initialize agentic CSV processor.
 
         Args:
             config: Configuration object with LLM settings
             time_offset_days: Fixed offset for time shifting. If None, a random offset is generated.
+            max_workers: Maximum number of parallel workers for batch processing.
+            batch_size_phase2: Number of rows per batch in Phase 2 (PII anonymization).
+            batch_size_phase3: Number of rows per batch in Phase 3 (verification).
         """
         super().__init__(config)
+
+        # Parallelization settings
+        self.max_workers = max_workers
+        self.batch_size_phase2 = batch_size_phase2
+        self.batch_size_phase3 = batch_size_phase3
+
+        # Thread-safe lock for print statements
+        self._print_lock = threading.Lock()
 
         # Generate random offset if not provided (between -365 and +365 days)
         if time_offset_days is None:
             self.time_offset_days = random.randint(-365, 365)
         else:
             self.time_offset_days = time_offset_days
+
+        # Store config for creating LLM instances in worker threads
+        self._llm_config = {
+            "azure_deployment": config.azure_deployment_name,
+            "azure_endpoint": config.azure_endpoint,
+            "api_key": config.azure_api_key,
+            "api_version": config.azure_api_version,
+            "temperature": config.temperature,
+            "timeout": 300,
+        }
 
         # Initialize LLM with tools for phase 1 (time shifting)
         self.llm_with_tools = AzureChatOpenAI(
@@ -94,28 +124,60 @@ class AgenticCSVProcessor(FileProcessor):
             api_key=config.azure_api_key,
             api_version=config.azure_api_version,
             temperature=config.temperature,
-            timeout=300,
+            timeout=600,
+            max_tokens=16000,
         ).bind_tools([shift_datetime])
 
-        # Initialize LLM with tools for phase 2 (PII anonymization)
+        # Initialize LLM with tools for phase 2 (PII anonymization) - main thread fallback
         self.llm_anonymize = AzureChatOpenAI(
             azure_deployment=config.azure_deployment_name,
             azure_endpoint=config.azure_endpoint,
             api_key=config.azure_api_key,
             api_version=config.azure_api_version,
             temperature=config.temperature,
-            timeout=300,
+            timeout=600,
+            max_tokens=16000,
         ).bind_tools([redact_text])
 
-        # Initialize LLM with tools for phase 3 (verification)
+        # Initialize LLM with tools for phase 3 (verification) - main thread fallback
         self.llm_verify = AzureChatOpenAI(
             azure_deployment=config.azure_deployment_name,
             azure_endpoint=config.azure_endpoint,
             api_key=config.azure_api_key,
             api_version=config.azure_api_version,
             temperature=config.temperature,
-            timeout=300,
+            timeout=600,
+            max_tokens=16000,
         ).bind_tools([shift_datetime, redact_text, restore_text])
+
+    def _create_llm_anonymize(self) -> AzureChatOpenAI:
+        """Create a new LLM instance for anonymization (thread-safe)."""
+        return AzureChatOpenAI(
+            azure_deployment=self._llm_config["azure_deployment"],
+            azure_endpoint=self._llm_config["azure_endpoint"],
+            api_key=self._llm_config["api_key"],
+            api_version=self._llm_config["api_version"],
+            temperature=self._llm_config["temperature"],
+            timeout=600,
+            max_tokens=16000,
+        ).bind_tools([redact_text])
+
+    def _create_llm_verify(self) -> AzureChatOpenAI:
+        """Create a new LLM instance for verification (thread-safe)."""
+        return AzureChatOpenAI(
+            azure_deployment=self._llm_config["azure_deployment"],
+            azure_endpoint=self._llm_config["azure_endpoint"],
+            api_key=self._llm_config["api_key"],
+            api_version=self._llm_config["api_version"],
+            temperature=self._llm_config["temperature"],
+            timeout=600,
+            max_tokens=16000,
+        ).bind_tools([shift_datetime, redact_text, restore_text])
+
+    def _safe_print(self, message: str) -> None:
+        """Thread-safe print."""
+        with self._print_lock:
+            print(message)
 
     def can_process(self, file_path: Path) -> bool:
         """Check if file is a CSV."""
@@ -173,12 +235,30 @@ class AgenticCSVProcessor(FileProcessor):
         print(f"Applied {pii_redactions} PII redactions")
 
         # Step 5: Phase 3 - Verification (optional but recommended)
+        # Use iterative verification to catch all remaining PIIs
         if verify:
-            print("\n=== Phase 3: Verification ===")
-            anonymized_rows, fixes_applied = self._phase3_verify_and_fix(
-                original_rows, anonymized_rows, headers
-            )
-            print(f"Verification complete. Applied {fixes_applied} fixes.")
+            print("\n=== Phase 3: Iterative Verification ===")
+            max_iterations = 3  # Maximum number of verification passes
+            total_fixes = 0
+            
+            for iteration in range(max_iterations):
+                print(f"\n  Verification pass {iteration + 1}/{max_iterations}...")
+                anonymized_rows, fixes_applied = self._phase3_verify_and_fix(
+                    original_rows, anonymized_rows, headers
+                )
+                total_fixes += fixes_applied
+                print(f"  Pass {iteration + 1}: Applied {fixes_applied} fixes.")
+                
+                # Stop if no more fixes were needed
+                if fixes_applied == 0:
+                    print(f"  No more issues found. Verification complete after {iteration + 1} pass(es).")
+                    break
+            else:
+                # All iterations completed but still finding issues
+                print(f"  Warning: Completed {max_iterations} passes with {total_fixes} total fixes.")
+                print(f"  Consider reviewing the output manually for any remaining PIIs.")
+            
+            print(f"\nVerification summary: Applied {total_fixes} total fixes across all passes.")
 
         # Step 6: Save anonymized CSV
         output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -376,41 +456,45 @@ class AgenticCSVProcessor(FileProcessor):
 
         return modified_rows, all_shifts
 
-    def _phase2_anonymize_pii(
+    def _process_single_batch_phase2(
         self,
-        rows: List[Dict[str, str]],
-        headers: List[str]
-    ) -> Tuple[List[Dict[str, str]], int]:
+        batch_rows: List[Dict[str, str]],
+        headers: List[str],
+        start_idx: int,
+        batch_num: int,
+        total_batches: int
+    ) -> Tuple[List[Dict[str, str]], int, List[Tuple[int, str, str, str]]]:
         """
-        Phase 2: Anonymize all PII using agentic tool-calling with redact_text.
+        Process a single batch for Phase 2 (PII anonymization).
 
-        The LLM identifies PII and calls the redact_text tool for each item found.
-        Redactions are applied in real-time as the tools are called.
+        This method is designed to be called in parallel from multiple threads.
+        Each thread gets its own LLM instance.
 
         Args:
-            rows: CSV rows (with dates already shifted)
+            batch_rows: The rows in this batch (copies, safe to modify)
             headers: Column headers
+            start_idx: Absolute start index of this batch in the full CSV
+            batch_num: Batch number (for logging)
+            total_batches: Total number of batches (for logging)
 
         Returns:
-            Tuple of (anonymized rows, number of redactions applied)
+            Tuple of (modified batch rows, redaction count, list of redactions applied)
+            Each redaction is (row_index, column_name, original_text, redacted_text)
         """
-        modified_rows = [row.copy() for row in rows]
-        total_redactions = 0
+        # Create thread-local LLM instance
+        llm = self._create_llm_anonymize()
 
-        # Process in batches for large files
-        batch_size = 30
-        total_batches = (len(rows) + batch_size - 1) // batch_size
+        modified_batch = [row.copy() for row in batch_rows]
+        end_idx = start_idx + len(batch_rows)
+        redactions_applied: List[Tuple[int, str, str, str]] = []
 
-        for batch_num in range(total_batches):
-            start_idx = batch_num * batch_size
-            end_idx = min(start_idx + batch_size, len(rows))
-            batch_rows = modified_rows[start_idx:end_idx]
+        self._safe_print(f"  Phase 2 - Batch {batch_num + 1}/{total_batches} (rows {start_idx}-{end_idx-1})")
 
-            print(f"  Phase 2 - Batch {batch_num + 1}/{total_batches} (rows {start_idx}-{end_idx-1})")
+        csv_preview = self._format_csv_for_llm(batch_rows, headers, start_idx)
 
-            csv_preview = self._format_csv_for_llm(batch_rows, headers, start_idx)
+        prompt = f"""You are a PII anonymization agent. Analyze this CSV data and redact ALL Personal Identifiable Information (PII).
 
-            prompt = f"""You are a PII anonymization agent. Analyze this CSV data and redact all Personal Identifiable Information (PII).
+CRITICAL: You MUST scan the ENTIRE content of each cell, even if it's very long. Do NOT skip any PIIs!
 
 IMPORTANT: Dates and times have ALREADY been anonymized (shifted). Do NOT redact dates!
 
@@ -420,19 +504,30 @@ CSV Data (rows {start_idx} to {end_idx-1}):
 You have the redact_text tool available. For EACH piece of PII you find, call:
   redact_text(text_to_redact="exact PII text", row_index=N, column_name="column")
 
-PII categories to redact:
-- Patient names, physician names, doctor names, staff names
-- Physical addresses, specific facility/hospital names
-- Patient IDs, medical record numbers, unit numbers
-- Phone numbers, fax numbers
-- Email addresses
-- Ages (specific numbers like "62 years old")
+PII categories to redact (BE THOROUGH - check EVERY occurrence):
+- name: Patient names, physician names, doctor names, family member names, caregiver names, any other personal names
+- address: Physical addresses, street addresses, facility names, location names (e.g. hospital names)
+- id: Patient IDs, medical record numbers, unit numbers, note_ids, subject_ids, hadm_ids, any other numeric identifiers
+- phone: Phone numbers
+- fax: Fax numbers
+- email: Email addresses
+- ids: Any other identifiers that can link to an individual or organization (provider IDs, account numbers, caregiver IDs, etc.)
+- other: Any other specific information that can identify an individual
 
 DO NOT redact:
 - Dates and times (already shifted)
 - Medical terminology, diagnoses, procedures, medications
 - Generic locations like "EMERGENCY ROOM", "HOME", "ICU"
 - Sequence numbers, lab codes, medical codes
+
+Redaction examples:
+- "Emily Carter" → "************" (12 asterisks)
+- "2140-09-28" → "**********" (10 asterisks)
+- "note_id: 12364" → "note_id: *****" (5 asterisks) 
+- "617-555-3942" → "************" (12 asterisks)
+- "discharge_location: DIRECT EMER." → "discharge_location: DIRECT EMER." (no change, as "DIRECT EMER." is not PHI)
+- "admission_location: CLINIC REFERRAL" → "admission_location: CLINIC REFERRAL" (no change, as "CLINIC REFERRAL" is not PHI)
+- "poe_seq: 5" → "poe_seq: 5" (no change, as "5" is not PHI)
 
 IMPORTANT:
 - Call redact_text for EACH piece of PII you find
@@ -444,107 +539,172 @@ Example: If you see "Name: John Smith" in row 0, column "text":
   → call redact_text(text_to_redact="John Smith", row_index=0, column_name="text")
 """
 
-            messages = [HumanMessage(content=prompt)]
-            batch_redactions = 0
+        messages = [HumanMessage(content=prompt)]
+        batch_redactions = 0
 
-            # Agentic loop
-            max_iterations = 50  # Allow many iterations for thorough redaction
-            iteration = 0
+        # Agentic loop
+        max_iterations = 50
+        iteration = 0
 
-            while iteration < max_iterations:
-                iteration += 1
+        while iteration < max_iterations:
+            iteration += 1
 
-                try:
-                    response = self.llm_anonymize.invoke(messages)
-                    messages.append(response)
+            try:
+                response = llm.invoke(messages)
+                messages.append(response)
 
-                    if not response.tool_calls:
-                        # No more tool calls - agent is done with this batch
-                        break
-
-                    for tool_call in response.tool_calls:
-                        tool_name = tool_call["name"]
-                        tool_args = tool_call["args"]
-
-                        if tool_name == "redact_text":
-                            text_to_redact = tool_args.get("text_to_redact", "")
-                            row_idx = tool_args.get("row_index", 0)
-                            col_name = tool_args.get("column_name", "")
-
-                            # Get the redacted version (asterisks)
-                            result = redact_text.invoke(tool_args)
-
-                            if "[REDACT_FAILED" not in result and text_to_redact:
-                                # Apply to the specific cell
-                                if 0 <= row_idx < len(modified_rows):
-                                    cell_value = str(modified_rows[row_idx].get(col_name, ""))
-                                    if text_to_redact in cell_value:
-                                        modified_rows[row_idx][col_name] = cell_value.replace(
-                                            text_to_redact, result
-                                        )
-                                        batch_redactions += 1
-                                        # Truncate long text for display
-                                        display_text = text_to_redact[:30] + "..." if len(text_to_redact) > 30 else text_to_redact
-                                        print(f"    Redacted: '{display_text}' in row {row_idx}, col '{col_name}'")
-
-                            messages.append(ToolMessage(
-                                content=f"Redacted: '{text_to_redact}' → '{result}'",
-                                tool_call_id=tool_call["id"]
-                            ))
-
-                except Exception as e:
-                    print(f"    Error in batch {batch_num + 1}: {e}")
+                if not response.tool_calls:
                     break
 
-            total_redactions += batch_redactions
+                for tool_call in response.tool_calls:
+                    tool_name = tool_call["name"]
+                    tool_args = tool_call["args"]
 
-        return modified_rows, total_redactions
+                    if tool_name == "redact_text":
+                        text_to_redact = tool_args.get("text_to_redact", "")
+                        row_idx = tool_args.get("row_index", 0)
+                        col_name = tool_args.get("column_name", "")
 
-    def _phase3_verify_and_fix(
+                        result = redact_text.invoke(tool_args)
+
+                        if "[REDACT_FAILED" not in result and text_to_redact:
+                            # Convert absolute row index to batch-local index
+                            local_idx = row_idx - start_idx
+                            if 0 <= local_idx < len(modified_batch):
+                                cell_value = str(modified_batch[local_idx].get(col_name, ""))
+                                if text_to_redact in cell_value:
+                                    modified_batch[local_idx][col_name] = cell_value.replace(
+                                        text_to_redact, result
+                                    )
+                                    batch_redactions += 1
+                                    redactions_applied.append((row_idx, col_name, text_to_redact, result))
+                                    display_text = text_to_redact[:30] + "..." if len(text_to_redact) > 30 else text_to_redact
+                                    self._safe_print(f"    Redacted: '{display_text}' in row {row_idx}, col '{col_name}'")
+
+                        messages.append(ToolMessage(
+                            content=f"Redacted: '{text_to_redact}' → '{result}'",
+                            tool_call_id=tool_call["id"]
+                        ))
+
+            except Exception as e:
+                self._safe_print(f"    Error in batch {batch_num + 1}: {e}")
+                break
+
+        return modified_batch, batch_redactions, redactions_applied
+
+    def _phase2_anonymize_pii(
         self,
-        original_rows: List[Dict[str, str]],
-        anonymized_rows: List[Dict[str, str]],
+        rows: List[Dict[str, str]],
         headers: List[str]
     ) -> Tuple[List[Dict[str, str]], int]:
         """
-        Phase 3: Verification agent checks the anonymized output and fixes any issues.
+        Phase 2: Anonymize all PII using agentic tool-calling with redact_text.
 
-        The agent compares original and anonymized data to identify:
-        1. Unshifted dates (dates that appear in both original and anonymized)
-        2. Unredacted PII (names, IDs, etc. that weren't anonymized)
-        3. Over-redaction (non-PII that was incorrectly redacted)
+        The LLM identifies PII and calls the redact_text tool for each item found.
+        Batches are processed in parallel for better performance on large files.
 
         Args:
-            original_rows: Original CSV rows (before anonymization)
-            anonymized_rows: Anonymized CSV rows
+            rows: CSV rows (with dates already shifted)
             headers: Column headers
 
         Returns:
-            Tuple of (fixed rows, number of fixes applied)
+            Tuple of (anonymized rows, number of redactions applied)
         """
-        modified_rows = [row.copy() for row in anonymized_rows]
-        total_fixes = 0
+        batch_size = self.batch_size_phase2
+        total_batches = (len(rows) + batch_size - 1) // batch_size
 
-        # Process in batches for large files
-        batch_size = 10
-        total_batches = (len(original_rows) + batch_size - 1) // batch_size
-
+        # Prepare batches with their metadata
+        batches = []
         for batch_num in range(total_batches):
             start_idx = batch_num * batch_size
-            end_idx = min(start_idx + batch_size, len(original_rows))
+            end_idx = min(start_idx + batch_size, len(rows))
+            batch_rows = [rows[i].copy() for i in range(start_idx, end_idx)]
+            batches.append((batch_rows, headers, start_idx, batch_num, total_batches))
 
-            print(f"  Verifying batch {batch_num + 1}/{total_batches} (rows {start_idx}-{end_idx - 1})")
+        # Process batches in parallel
+        # Results: dict mapping start_idx -> (modified_rows, redaction_count)
+        results: Dict[int, Tuple[List[Dict[str, str]], int]] = {}
+        total_redactions = 0
 
-            # Prepare comparison data for this batch
-            comparison_data = self._format_comparison_for_llm(
-                original_rows[start_idx:end_idx],
-                modified_rows[start_idx:end_idx],
-                headers,
-                start_idx
-            )
+        print(f"  Processing {total_batches} batches with {self.max_workers} workers...")
 
-            prompt = f"""You are a verification agent for medical data anonymization.
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            future_to_batch = {
+                executor.submit(
+                    self._process_single_batch_phase2,
+                    batch_rows, hdrs, start_idx, batch_num, total
+                ): start_idx
+                for batch_rows, hdrs, start_idx, batch_num, total in batches
+            }
+
+            for future in as_completed(future_to_batch):
+                start_idx = future_to_batch[future]
+                try:
+                    modified_batch, redaction_count, _ = future.result()
+                    results[start_idx] = (modified_batch, redaction_count)
+                    total_redactions += redaction_count
+                except Exception as e:
+                    self._safe_print(f"    Batch starting at {start_idx} failed: {e}")
+                    # Keep original rows for failed batch
+                    batch_num = start_idx // batch_size
+                    end_idx = min(start_idx + batch_size, len(rows))
+                    results[start_idx] = ([rows[i].copy() for i in range(start_idx, end_idx)], 0)
+
+        # Reassemble rows in correct order
+        modified_rows: List[Dict[str, str]] = []
+        for batch_num in range(total_batches):
+            start_idx = batch_num * batch_size
+            batch_result, _ = results[start_idx]
+            modified_rows.extend(batch_result)
+
+        return modified_rows, total_redactions
+
+    def _process_single_batch_phase3(
+        self,
+        original_batch: List[Dict[str, str]],
+        anonymized_batch: List[Dict[str, str]],
+        headers: List[str],
+        start_idx: int,
+        batch_num: int,
+        total_batches: int
+    ) -> Tuple[List[Dict[str, str]], int]:
+        """
+        Process a single batch for Phase 3 (verification).
+
+        This method is designed to be called in parallel from multiple threads.
+        Each thread gets its own LLM instance.
+
+        Args:
+            original_batch: Original rows for this batch
+            anonymized_batch: Anonymized rows for this batch (copies, safe to modify)
+            headers: Column headers
+            start_idx: Absolute start index of this batch in the full CSV
+            batch_num: Batch number (for logging)
+            total_batches: Total number of batches (for logging)
+
+        Returns:
+            Tuple of (modified batch rows, number of fixes applied)
+        """
+        # Create thread-local LLM instance
+        llm = self._create_llm_verify()
+
+        modified_batch = [row.copy() for row in anonymized_batch]
+        end_idx = start_idx + len(anonymized_batch)
+
+        self._safe_print(f"  Verifying batch {batch_num + 1}/{total_batches} (rows {start_idx}-{end_idx - 1})")
+
+        comparison_data = self._format_comparison_for_llm(
+            original_batch,
+            anonymized_batch,
+            headers,
+            start_idx
+        )
+
+        prompt = f"""You are a verification agent for medical data anonymization.
 Compare the ORIGINAL and ANONYMIZED data below and identify any issues.
+
+CRITICAL: You MUST check the ENTIRE content carefully, especially in long text fields!
+Do NOT stop at the first few lines - scan ALL the way to the end of each field.
 
 {comparison_data}
 
@@ -555,7 +715,7 @@ You have THREE tools available:
 2. redact_text - to redact PII that was missed
 3. restore_text - to fix over-redaction (restore incorrectly redacted content)
 
-Your tasks:
+Your tasks (BE THOROUGH - check EVERY line of long text fields):
 
 1. CHECK FOR UNSHIFTED DATES: Look for dates in the ANONYMIZED data that are identical to the ORIGINAL.
    All dates should be shifted by {self.time_offset_days} days.
@@ -575,7 +735,7 @@ Your tasks:
    - Generic locations (EMERGENCY ROOM, ICU, HOME, etc.)
    - Dates that were redacted instead of shifted
    → Use restore_text(redacted_text, original_text, row_index, column_name) to fix
-   
+
    Example: If "diabetes" was redacted to "********", call:
    restore_text(redacted_text="********", original_text="diabetes", row_index=0, column_name="text")
 
@@ -587,103 +747,172 @@ IMPORTANT:
 Call the appropriate tool for each issue you find. When done, summarize your findings.
 """
 
-            messages = [HumanMessage(content=prompt)]
+        messages = [HumanMessage(content=prompt)]
 
-            # Agentic loop for verification
-            max_iterations = 30
-            iteration = 0
-            batch_fixes = 0
+        max_iterations = 30
+        iteration = 0
+        batch_fixes = 0
 
-            while iteration < max_iterations:
-                iteration += 1
+        while iteration < max_iterations:
+            iteration += 1
 
-                try:
-                    response = self.llm_verify.invoke(messages)
-                    messages.append(response)
+            try:
+                response = llm.invoke(messages)
+                messages.append(response)
 
-                    if not response.tool_calls:
-                        # No more tool calls - agent is done
-                        break
-
-                    for tool_call in response.tool_calls:
-                        tool_name = tool_call["name"]
-                        tool_args = tool_call["args"]
-
-                        if tool_name == "shift_datetime":
-                            original_date = tool_args.get("datetime_str", "")
-                            result = shift_datetime.invoke(tool_args)
-
-                            if "[SHIFT_FAILED]" not in result:
-                                # Apply the fix to all occurrences in this batch
-                                for row_idx in range(start_idx, end_idx):
-                                    for col_name in headers:
-                                        cell_value = str(modified_rows[row_idx].get(col_name, ""))
-                                        if original_date in cell_value:
-                                            modified_rows[row_idx][col_name] = cell_value.replace(
-                                                original_date, result
-                                            )
-                                            batch_fixes += 1
-                                            print(f"    Fixed date: {original_date} → {result}")
-
-                            messages.append(ToolMessage(
-                                content=f"Date shifted: {original_date} → {result}",
-                                tool_call_id=tool_call["id"]
-                            ))
-
-                        elif tool_name == "redact_text":
-                            text_to_redact = tool_args.get("text_to_redact", "")
-                            row_idx = tool_args.get("row_index", 0)
-                            col_name = tool_args.get("column_name", "")
-                            
-                            # Get the redacted version (asterisks)
-                            result = redact_text.invoke(tool_args)
-                            
-                            if "[REDACT_FAILED" not in result:
-                                # Apply to the specific cell
-                                if start_idx <= row_idx < end_idx:
-                                    cell_value = str(modified_rows[row_idx].get(col_name, ""))
-                                    if text_to_redact in cell_value:
-                                        modified_rows[row_idx][col_name] = cell_value.replace(
-                                            text_to_redact, result
-                                        )
-                                        batch_fixes += 1
-                                        print(f"    Fixed PII: '{text_to_redact}' → '{result}'")
-
-                            messages.append(ToolMessage(
-                                content=f"Text redacted: '{text_to_redact}' → '{result}'",
-                                tool_call_id=tool_call["id"]
-                            ))
-
-                        elif tool_name == "restore_text":
-                            redacted_text = tool_args.get("redacted_text", "")
-                            original_text = tool_args.get("original_text", "")
-                            row_idx = tool_args.get("row_index", 0)
-                            col_name = tool_args.get("column_name", "")
-                            
-                            # Get the original text to restore
-                            result = restore_text.invoke(tool_args)
-                            
-                            if "[RESTORE_FAILED" not in result:
-                                # Apply to the specific cell - replace redacted with original
-                                if start_idx <= row_idx < end_idx:
-                                    cell_value = str(modified_rows[row_idx].get(col_name, ""))
-                                    if redacted_text in cell_value:
-                                        modified_rows[row_idx][col_name] = cell_value.replace(
-                                            redacted_text, result
-                                        )
-                                        batch_fixes += 1
-                                        print(f"    Restored: '{redacted_text}' → '{result}'")
-
-                            messages.append(ToolMessage(
-                                content=f"Text restored: '{redacted_text}' → '{result}'",
-                                tool_call_id=tool_call["id"]
-                            ))
-
-                except Exception as e:
-                    print(f"    Verification error: {e}")
+                if not response.tool_calls:
                     break
 
-            total_fixes += batch_fixes
+                for tool_call in response.tool_calls:
+                    tool_name = tool_call["name"]
+                    tool_args = tool_call["args"]
+
+                    if tool_name == "shift_datetime":
+                        original_date = tool_args.get("datetime_str", "")
+                        result = shift_datetime.invoke(tool_args)
+
+                        if "[SHIFT_FAILED]" not in result:
+                            # Apply the fix to all occurrences in this batch
+                            for local_idx in range(len(modified_batch)):
+                                for col_name in headers:
+                                    cell_value = str(modified_batch[local_idx].get(col_name, ""))
+                                    if original_date in cell_value:
+                                        modified_batch[local_idx][col_name] = cell_value.replace(
+                                            original_date, result
+                                        )
+                                        batch_fixes += 1
+                                        self._safe_print(f"    Fixed date: {original_date} → {result}")
+
+                        messages.append(ToolMessage(
+                            content=f"Date shifted: {original_date} → {result}",
+                            tool_call_id=tool_call["id"]
+                        ))
+
+                    elif tool_name == "redact_text":
+                        text_to_redact = tool_args.get("text_to_redact", "")
+                        row_idx = tool_args.get("row_index", 0)
+                        col_name = tool_args.get("column_name", "")
+
+                        result = redact_text.invoke(tool_args)
+
+                        if "[REDACT_FAILED" not in result:
+                            # Convert absolute row index to batch-local index
+                            local_idx = row_idx - start_idx
+                            if 0 <= local_idx < len(modified_batch):
+                                cell_value = str(modified_batch[local_idx].get(col_name, ""))
+                                if text_to_redact in cell_value:
+                                    modified_batch[local_idx][col_name] = cell_value.replace(
+                                        text_to_redact, result
+                                    )
+                                    batch_fixes += 1
+                                    self._safe_print(f"    Fixed PII: '{text_to_redact}' → '{result}'")
+
+                        messages.append(ToolMessage(
+                            content=f"Text redacted: '{text_to_redact}' → '{result}'",
+                            tool_call_id=tool_call["id"]
+                        ))
+
+                    elif tool_name == "restore_text":
+                        redacted_text = tool_args.get("redacted_text", "")
+                        original_text = tool_args.get("original_text", "")
+                        row_idx = tool_args.get("row_index", 0)
+                        col_name = tool_args.get("column_name", "")
+
+                        result = restore_text.invoke(tool_args)
+
+                        if "[RESTORE_FAILED" not in result:
+                            # Convert absolute row index to batch-local index
+                            local_idx = row_idx - start_idx
+                            if 0 <= local_idx < len(modified_batch):
+                                cell_value = str(modified_batch[local_idx].get(col_name, ""))
+                                if redacted_text in cell_value:
+                                    modified_batch[local_idx][col_name] = cell_value.replace(
+                                        redacted_text, result
+                                    )
+                                    batch_fixes += 1
+                                    self._safe_print(f"    Restored: '{redacted_text}' → '{result}'")
+
+                        messages.append(ToolMessage(
+                            content=f"Text restored: '{redacted_text}' → '{result}'",
+                            tool_call_id=tool_call["id"]
+                        ))
+
+            except Exception as e:
+                self._safe_print(f"    Verification error in batch {batch_num + 1}: {e}")
+                break
+
+        return modified_batch, batch_fixes
+
+    def _phase3_verify_and_fix(
+        self,
+        original_rows: List[Dict[str, str]],
+        anonymized_rows: List[Dict[str, str]],
+        headers: List[str]
+    ) -> Tuple[List[Dict[str, str]], int]:
+        """
+        Phase 3: Verification agent checks the anonymized output and fixes any issues.
+
+        The agent compares original and anonymized data to identify:
+        1. Unshifted dates (dates that appear in both original and anonymized)
+        2. Unredacted PII (names, IDs, etc. that weren't anonymized)
+        3. Over-redaction (non-PII that was incorrectly redacted)
+
+        Batches are processed in parallel for better performance.
+
+        Args:
+            original_rows: Original CSV rows (before anonymization)
+            anonymized_rows: Anonymized CSV rows
+            headers: Column headers
+
+        Returns:
+            Tuple of (fixed rows, number of fixes applied)
+        """
+        batch_size = self.batch_size_phase3
+        total_batches = (len(original_rows) + batch_size - 1) // batch_size
+
+        # Prepare batches with their metadata
+        batches = []
+        for batch_num in range(total_batches):
+            start_idx = batch_num * batch_size
+            end_idx = min(start_idx + batch_size, len(original_rows))
+            original_batch = [original_rows[i].copy() for i in range(start_idx, end_idx)]
+            anonymized_batch = [anonymized_rows[i].copy() for i in range(start_idx, end_idx)]
+            batches.append((original_batch, anonymized_batch, headers, start_idx, batch_num, total_batches))
+
+        # Process batches in parallel
+        results: Dict[int, Tuple[List[Dict[str, str]], int]] = {}
+        total_fixes = 0
+
+        print(f"  Verifying {total_batches} batches with {self.max_workers} workers...")
+
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            future_to_batch = {
+                executor.submit(
+                    self._process_single_batch_phase3,
+                    orig_batch, anon_batch, hdrs, start_idx, batch_num, total
+                ): start_idx
+                for orig_batch, anon_batch, hdrs, start_idx, batch_num, total in batches
+            }
+
+            for future in as_completed(future_to_batch):
+                start_idx = future_to_batch[future]
+                try:
+                    modified_batch, fix_count = future.result()
+                    results[start_idx] = (modified_batch, fix_count)
+                    total_fixes += fix_count
+                except Exception as e:
+                    self._safe_print(f"    Verification batch at {start_idx} failed: {e}")
+                    # Keep the anonymized rows (without verification fixes) for failed batch
+                    batch_num = start_idx // batch_size
+                    end_idx = min(start_idx + batch_size, len(anonymized_rows))
+                    results[start_idx] = ([anonymized_rows[i].copy() for i in range(start_idx, end_idx)], 0)
+
+        # Reassemble rows in correct order
+        modified_rows: List[Dict[str, str]] = []
+        for batch_num in range(total_batches):
+            start_idx = batch_num * batch_size
+            batch_result, _ = results[start_idx]
+            modified_rows.extend(batch_result)
 
         return modified_rows, total_fixes
 
@@ -710,16 +939,16 @@ Call the appropriate tool for each issue you find. When done, summarize your fin
 
                 # Only show if there's content and it changed
                 if orig_val or anon_val:
-                    # Truncate very long values for the prompt
-                    orig_display = orig_val[:500] + "..." if len(orig_val) > 500 else orig_val
-                    anon_display = anon_val[:500] + "..." if len(anon_val) > 500 else anon_val
-
+                    # Show full content for verification - no truncation!
+                    # Truncation was hiding PIIs in long text fields
                     if orig_val != anon_val:
                         lines.append(f"\n[{header}] (CHANGED)")
-                        lines.append(f"  ORIGINAL: {orig_display}")
-                        lines.append(f"  ANONYMIZED: {anon_display}")
+                        lines.append(f"  ORIGINAL: {orig_val}")
+                        lines.append(f"  ANONYMIZED: {anon_val}")
                     else:
-                        lines.append(f"\n[{header}] (unchanged): {orig_display[:200]}...")
+                        # Only show preview for unchanged fields to save tokens
+                        orig_display = orig_val[:200] + "..." if len(orig_val) > 200 else orig_val
+                        lines.append(f"\n[{header}] (unchanged): {orig_display}")
 
         return "\n".join(lines)
 

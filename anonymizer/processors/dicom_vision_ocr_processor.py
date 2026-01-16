@@ -60,18 +60,28 @@ class DICOMVisionOCRProcessor(FileProcessor):
 
     def can_process(self, file_path: Path) -> bool:
         """Check if file is a DICOM image."""
+        # First check extension
         if file_path.suffix.lower() in ['.dcm', '.dicom']:
             return True
 
+        # For files without DICOM extension, check for DICOM magic bytes
+        # DICOM files have "DICM" at byte offset 128
         try:
-            pydicom.dcmread(file_path, stop_before_pixels=True)
-            return True
-        except:
-            return False
+            with open(file_path, 'rb') as f:
+                f.seek(128)
+                magic = f.read(4)
+                if magic == b'DICM':
+                    return True
+        except (IOError, OSError):
+            pass
+
+        # Don't try pydicom.dcmread with force=True for unknown files
+        # as it will accept almost any file and fail later on pixel decoding
+        return False
 
     def extract_content(self, file_path: Path) -> str:
         """Extract content from DICOM file."""
-        ds = pydicom.dcmread(file_path)
+        ds = pydicom.dcmread(file_path, force=True)
         return str(ds)
 
     def _dicom_to_images(self, dicom_path: Path) -> tuple[list[Image.Image], pydicom.Dataset, bool]:
@@ -84,8 +94,38 @@ class DICOMVisionOCRProcessor(FileProcessor):
         Returns:
             Tuple of (list of PIL Images, DICOM dataset, is_multiframe)
         """
-        ds = pydicom.dcmread(dicom_path)
-        pixel_array = ds.pixel_array
+        ds = pydicom.dcmread(dicom_path, force=True)
+        
+        # Handle missing transfer syntax by setting a default
+        if not hasattr(ds, 'file_meta') or ds.file_meta is None:
+            ds.file_meta = pydicom.dataset.FileMetaDataset()
+        
+        if not hasattr(ds.file_meta, 'TransferSyntaxUID') or ds.file_meta.TransferSyntaxUID is None:
+            # Try to infer transfer syntax from the data
+            # Common transfer syntaxes to try in order
+            transfer_syntaxes = [
+                pydicom.uid.ImplicitVRLittleEndian,  # Most common for files without header
+                pydicom.uid.ExplicitVRLittleEndian,
+                pydicom.uid.ExplicitVRBigEndian,
+            ]
+            
+            pixel_array = None
+            for ts in transfer_syntaxes:
+                try:
+                    ds.file_meta.TransferSyntaxUID = ts
+                    pixel_array = ds.pixel_array
+                    print(f"Successfully decoded with Transfer Syntax: {ts.name}")
+                    break
+                except Exception as e:
+                    continue
+            
+            if pixel_array is None:
+                raise ValueError(
+                    "Unable to decode pixel data with any common transfer syntax. "
+                    "The DICOM file may be corrupted or use an unsupported format."
+                )
+        else:
+            pixel_array = ds.pixel_array
 
         is_multiframe = len(pixel_array.shape) == 4
 

@@ -20,17 +20,21 @@ class TimeShiftInput(BaseModel):
 class RedactTextInput(BaseModel):
     """Input schema for the redact text tool."""
     text_to_redact: str = Field(description="The exact PII text to redact (e.g., 'John Smith', '555-123-4567')")
-    row_index: int = Field(description="Row index (0-based) where the PII was found")
-    column_name: str = Field(description="Column name where the PII was found")
+    row_index: int = Field(default=-1, description="Row index (0-based) where the PII was found. Use -1 for plain text files.")
+    column_name: str = Field(default="", description="Column name where the PII was found. Leave empty for plain text files.")
 
 
 class RestoreTextInput(BaseModel):
     """Input schema for the restore text tool (to fix over-redaction)."""
     redacted_text: str = Field(description="The incorrectly redacted text (asterisks) to find")
     original_text: str = Field(description="The original text to restore (from the original data)")
-    row_index: int = Field(description="Row index (0-based) where the over-redaction occurred")
-    column_name: str = Field(description="Column name where the over-redaction occurred")
+    row_index: int = Field(default=-1, description="Row index (0-based) where the over-redaction occurred. Use -1 for plain text files.")
+    column_name: str = Field(default="", description="Column name where the over-redaction occurred. Leave empty for plain text files.")
 
+
+# Special format markers for non-standard date formats
+YEAR_ONLY_FORMAT = "YEAR_ONLY"  # e.g., "2140"
+YEAR_RANGE_FORMAT = "YEAR_RANGE"  # e.g., "2011 - 2013"
 
 # Common date/time formats to try when parsing
 DATE_FORMATS = [
@@ -38,6 +42,7 @@ DATE_FORMATS = [
     "%Y-%m-%d",
     "%Y-%m-%dT%H:%M:%S",
     "%Y-%m-%dT%H:%M:%S.%f",
+    "%Y-%m-%d %H:%M:%S.%f",  # ISO with space separator and milliseconds
     "%Y-%m-%d %H:%M:%S",
     "%Y-%m-%d %H:%M",
     # ISO with 12-hour AM/PM formats (medical records often use these)
@@ -80,6 +85,15 @@ def detect_format(datetime_str: str) -> Optional[str]:
     """
     datetime_str = datetime_str.strip()
 
+    # Check for year range format (e.g., "2011 - 2013", "2011-2013")
+    year_range_match = re.match(r'^(\d{4})\s*[-–]\s*(\d{4})$', datetime_str)
+    if year_range_match:
+        return YEAR_RANGE_FORMAT
+
+    # Check for year-only format (e.g., "2140")
+    if re.match(r'^\d{4}$', datetime_str):
+        return YEAR_ONLY_FORMAT
+
     for fmt in DATE_FORMATS:
         try:
             datetime.strptime(datetime_str, fmt)
@@ -109,6 +123,32 @@ def shift_datetime_value(datetime_str: str, offset_days: int) -> str:
         return f"{datetime_str} [SHIFT_FAILED]"
 
     try:
+        # Handle year-only format (e.g., "2140")
+        if detected_format == YEAR_ONLY_FORMAT:
+            year = int(datetime_str)
+            # Convert days to years (approximate: 365.25 days per year)
+            year_offset = offset_days // 365
+            shifted_year = year + year_offset
+            return str(shifted_year)
+
+        # Handle year range format (e.g., "2011 - 2013")
+        if detected_format == YEAR_RANGE_FORMAT:
+            match = re.match(r'^(\d{4})\s*([-–])\s*(\d{4})$', datetime_str)
+            if match:
+                year1 = int(match.group(1))
+                separator = match.group(2)
+                year2 = int(match.group(3))
+                year_offset = offset_days // 365
+                shifted_year1 = year1 + year_offset
+                shifted_year2 = year2 + year_offset
+                # Preserve the original separator and spacing
+                if ' - ' in datetime_str:
+                    return f"{shifted_year1} - {shifted_year2}"
+                elif ' – ' in datetime_str:
+                    return f"{shifted_year1} – {shifted_year2}"
+                else:
+                    return f"{shifted_year1}{separator}{shifted_year2}"
+
         parsed = datetime.strptime(datetime_str, detected_format)
         shifted = parsed + timedelta(days=offset_days)
         return shifted.strftime(detected_format)
