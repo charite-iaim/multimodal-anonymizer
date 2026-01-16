@@ -464,11 +464,13 @@ def _process_directory_parallel(
         use_llm_detection=use_llm_detection,
         preserve_structure=preserve_structure,
         anonymize_paths=anonymize_paths,
-        processor_module='anonymize_agentic'
+        processor_module='anonymize_agentic',
+        max_retries=3  # Initial retry count per file
     )
 
     # Create jobs for all files
     jobs = []
+    job_lookup = {}  # Map file path to job data for retries
     for file_path in files_to_process:
         relative_path = file_path.relative_to(input_dir)
 
@@ -522,13 +524,16 @@ def _process_directory_parallel(
             time_offset_days=time_offset
         )
         jobs.append(job)
+        # Also store job data for potential retry
+        job_lookup[str(file_path)] = job
 
     # Process all files in parallel
     results = parallel_processor.process_files_parallel(jobs, show_progress=True)
 
-    # Update tracker with results
+    # Update tracker with results and collect failed files
     successful = 0
     failed = 0
+    retryable_failed = []
 
     for result in results:
         if result.success:
@@ -538,13 +543,91 @@ def _process_directory_parallel(
         else:
             failed += 1
             if tracker:
-                tracker.mark_file_processed(result.input_path, result.output_path, success=False)
+                tracker.mark_file_processed(
+                    result.input_path, 
+                    result.output_path, 
+                    success=False,
+                    error=result.error,
+                    is_retryable=result.is_retryable_error,
+                    retries_attempted=result.retries_attempted
+                )
+            if result.is_retryable_error:
+                retryable_failed.append(result.input_path)
             print(f"\nError processing {result.input_path.name}:")
             if result.error:
                 # Print first few lines of error
                 error_lines = result.error.split('\n')[:3]
                 for line in error_lines:
                     print(f"  {line}")
+
+    # Retry loop for retryable failures
+    max_global_retries = 3
+    retry_round = 0
+    
+    while retryable_failed and retry_round < max_global_retries:
+        retry_round += 1
+        print(f"\n{'='*60}")
+        print(f"RETRY ROUND {retry_round}/{max_global_retries}: {len(retryable_failed)} files to retry")
+        print(f"{'='*60}")
+        
+        # Wait a bit before retrying to allow rate limits to reset
+        wait_time = 30 * retry_round  # Progressive wait: 30s, 60s, 90s
+        print(f"Waiting {wait_time} seconds before retry...")
+        time.sleep(wait_time)
+        
+        # Create retry jobs with increased max_retries
+        retry_jobs = []
+        for file_path in retryable_failed:
+            job_data = job_lookup.get(str(file_path))
+            if job_data:
+                # Increase max_retries for this retry round
+                job_data['max_retries'] = 5
+                retry_jobs.append(job_data)
+        
+        # Clear failed status from tracker to allow reprocessing
+        for file_path in retryable_failed:
+            if tracker:
+                tracker.clear_file(file_path)
+        
+        # Process retries
+        retry_results = parallel_processor.process_files_parallel(retry_jobs, show_progress=True)
+        
+        # Update counts and tracker
+        new_retryable_failed = []
+        for result in retry_results:
+            if result.success:
+                successful += 1
+                failed -= 1
+                if tracker:
+                    tracker.mark_file_processed(result.input_path, result.output_path, success=True)
+                print(f"  ✓ Successfully processed on retry: {result.input_path.name}")
+            else:
+                if tracker:
+                    tracker.mark_file_processed(
+                        result.input_path, 
+                        result.output_path, 
+                        success=False,
+                        error=result.error,
+                        is_retryable=result.is_retryable_error,
+                        retries_attempted=result.retries_attempted
+                    )
+                if result.is_retryable_error:
+                    new_retryable_failed.append(result.input_path)
+                else:
+                    print(f"  ✗ Non-retryable error for: {result.input_path.name}")
+        
+        retryable_failed = new_retryable_failed
+        
+        if not retryable_failed:
+            print(f"\n✓ All retryable files have been successfully processed!")
+            break
+    
+    if retryable_failed:
+        print(f"\n{'='*60}")
+        print(f"WARNING: {len(retryable_failed)} files still failed after {max_global_retries} retry rounds:")
+        for fp in retryable_failed:
+            print(f"  - {fp.name}")
+        print(f"\nRun the command again to retry these files.")
 
     # Save mappings
     if anonymize_paths and filename_anonymizer:
@@ -564,9 +647,19 @@ def _process_directory_parallel(
     print(f"  Failed: {failed}")
     print(f"  Skipped: {skipped}")
     print(f"  Total processed: {successful + failed}")
-    print(f"  Average time per file: {elapsed_time / len(files_to_process):.2f}s")
+    if len(files_to_process) > 0:
+        print(f"  Average time per file: {elapsed_time / len(files_to_process):.2f}s")
 
-    return {"successful": successful, "failed": failed, "skipped": skipped}
+    # Final verification message
+    if failed == 0:
+        print(f"\n✅ SUCCESS: All {successful} files have been processed successfully!")
+    elif len(retryable_failed) == 0 and failed > 0:
+        print(f"\n⚠️  COMPLETED WITH ERRORS: {successful} succeeded, {failed} failed (non-retryable)")
+    else:
+        print(f"\n⚠️  INCOMPLETE: {successful} succeeded, {len(retryable_failed)} retryable failures remaining")
+        print(f"   Run with --retry-failed to retry failed files")
+
+    return {"successful": successful, "failed": failed, "skipped": skipped, "retryable_remaining": len(retryable_failed)}
 
 
 def process_directory_recursive(
@@ -836,6 +929,18 @@ def main():
         "--workers", "-w", type=int, default=None,
         help="Number of parallel workers (default: CPU count - 1)"
     )
+    parser.add_argument(
+        "--retry-failed", action="store_true",
+        help="Only retry previously failed files from the tracking file (requires --tracking-file)"
+    )
+    parser.add_argument(
+        "--max-retries", type=int, default=3,
+        help="Maximum number of retries per file for transient errors (default: 3)"
+    )
+    parser.add_argument(
+        "--retry-rounds", type=int, default=3,
+        help="Maximum number of global retry rounds for failed files at the end (default: 3)"
+    )
 
     args = parser.parse_args()
 
@@ -867,6 +972,32 @@ def main():
             tracker.clear_all()
             tracker.save()
             print("Tracking data cleared.\n")
+
+    # Handle --retry-failed mode
+    if args.retry_failed:
+        if not tracker:
+            print("Error: --retry-failed requires --tracking-file to be specified")
+            return
+        
+        failed_files = tracker.get_failed_files()
+        if not failed_files:
+            print("No failed files found in tracking data.")
+            return
+        
+        print(f"\n{'='*60}")
+        print(f"RETRY MODE: Processing {len(failed_files)} previously failed files")
+        print(f"{'='*60}\n")
+        
+        # Clear failed status to allow reprocessing
+        tracker.clear_failed_files()
+        tracker.save()
+        
+        # Show the files to be retried
+        for fp in failed_files[:10]:
+            print(f"  - {fp.name}")
+        if len(failed_files) > 10:
+            print(f"  ... and {len(failed_files) - 10} more")
+        print()
 
     if not input_path.exists():
         print(f"Error: Input path does not exist: {input_path}")

@@ -24,6 +24,7 @@ from pydantic import BaseModel, Field
 from ..base_processor import FileProcessor
 from ..config import AnonymizerConfig
 from ..tools.time_shift_tool import shift_datetime, redact_text, restore_text
+from ..retry_utils import retry_with_backoff, RetryConfig, create_retry_callback
 
 
 class DateTimeShift(BaseModel):
@@ -106,6 +107,15 @@ class AgenticCSVProcessor(FileProcessor):
             self.time_offset_days = random.randint(-365, 365)
         else:
             self.time_offset_days = time_offset_days
+
+        # Configure retry settings for LLM calls
+        self.retry_config = RetryConfig(
+            max_retries=3,
+            initial_delay=2.0,
+            max_delay=60.0,
+            exponential_base=2.0,
+            jitter=True,
+        )
 
         # Store config for creating LLM instances in worker threads
         self._llm_config = {
@@ -507,7 +517,7 @@ You have the redact_text tool available. For EACH piece of PII you find, call:
 PII categories to redact (BE THOROUGH - check EVERY occurrence):
 - name: Patient names, physician names, doctor names, family member names, caregiver names, any other personal names
 - address: Physical addresses, street addresses, facility names, location names (e.g. hospital names)
-- id: Patient IDs, medical record numbers, unit numbers, note_ids, subject_ids, hadm_ids, any other numeric identifiers
+- id: Patient IDs, medical record numbers, unit numbers, order ids, note ids, subject ids and any other numeric identifiers
 - phone: Phone numbers
 - fax: Fax numbers
 - email: Email addresses
@@ -542,6 +552,25 @@ Example: If you see "Name: John Smith" in row 0, column "text":
         messages = [HumanMessage(content=prompt)]
         batch_redactions = 0
 
+        # Create retry callback with thread-safe printing
+        retry_callback = lambda attempt, error, delay: self._safe_print(
+            f"    [LLM] Retry {attempt}: {type(error).__name__} - waiting {delay:.1f}s"
+        )
+
+        def invoke_llm_with_retry(msgs):
+            """Invoke LLM with retry logic."""
+            return retry_with_backoff(
+                lambda: llm.invoke(msgs),
+                config=RetryConfig(
+                    max_retries=3,
+                    initial_delay=2.0,
+                    max_delay=60.0,
+                    exponential_base=2.0,
+                    jitter=True,
+                ),
+                on_retry=retry_callback,
+            )
+
         # Agentic loop
         max_iterations = 50
         iteration = 0
@@ -550,7 +579,7 @@ Example: If you see "Name: John Smith" in row 0, column "text":
             iteration += 1
 
             try:
-                response = llm.invoke(messages)
+                response = invoke_llm_with_retry(messages)
                 messages.append(response)
 
                 if not response.tool_calls:
@@ -753,11 +782,30 @@ Call the appropriate tool for each issue you find. When done, summarize your fin
         iteration = 0
         batch_fixes = 0
 
+        # Create retry callback with thread-safe printing
+        verify_retry_callback = lambda attempt, error, delay: self._safe_print(
+            f"    [Verify] Retry {attempt}: {type(error).__name__} - waiting {delay:.1f}s"
+        )
+
+        def invoke_verify_with_retry(msgs):
+            """Invoke verification LLM with retry logic."""
+            return retry_with_backoff(
+                lambda: llm.invoke(msgs),
+                config=RetryConfig(
+                    max_retries=3,
+                    initial_delay=2.0,
+                    max_delay=60.0,
+                    exponential_base=2.0,
+                    jitter=True,
+                ),
+                on_retry=verify_retry_callback,
+            )
+
         while iteration < max_iterations:
             iteration += 1
 
             try:
-                response = llm.invoke(messages)
+                response = invoke_verify_with_retry(messages)
                 messages.append(response)
 
                 if not response.tool_calls:

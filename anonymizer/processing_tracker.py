@@ -7,7 +7,7 @@ anonymized, allowing the pipeline to skip already-processed items on subsequent 
 
 import json
 from pathlib import Path
-from typing import Dict, Set, Optional
+from typing import Dict, Set, Optional, List
 from datetime import datetime
 import hashlib
 
@@ -146,7 +146,10 @@ class ProcessingTracker:
         self,
         file_path: Path,
         output_path: Path,
-        success: bool = True
+        success: bool = True,
+        error: Optional[str] = None,
+        is_retryable: bool = False,
+        retries_attempted: int = 0
     ):
         """
         Mark a file as processed.
@@ -155,6 +158,9 @@ class ProcessingTracker:
             file_path: Path to the input file
             output_path: Path to the output file
             success: Whether processing was successful
+            error: Error message if processing failed
+            is_retryable: Whether the error is retryable (for failed files)
+            retries_attempted: Number of retries that were attempted
         """
         path_str = str(file_path.absolute())
 
@@ -165,6 +171,9 @@ class ProcessingTracker:
             "output_path": str(output_path.absolute()) if output_path else None,
             "status": "completed" if success else "failed",
             "hash": file_hash,
+            "error": error if not success else None,
+            "is_retryable": is_retryable if not success else None,
+            "retries_attempted": retries_attempted,
         }
 
     def mark_directory_processed(
@@ -188,6 +197,52 @@ class ProcessingTracker:
             "file_count": file_count,
             "status": "completed" if success else "failed",
         }
+
+    def get_failed_files(self, retryable_only: bool = False) -> List[Path]:
+        """
+        Get list of files that failed processing.
+
+        Args:
+            retryable_only: If True, only return files with retryable errors
+
+        Returns:
+            List of file paths that failed processing
+        """
+        failed_files = []
+        for path_str, info in self.data["files"].items():
+            if info.get("status") == "failed":
+                if retryable_only and not info.get("is_retryable", False):
+                    continue
+                path = Path(path_str)
+                if path.exists():
+                    failed_files.append(path)
+        return failed_files
+
+    def get_retryable_files(self) -> List[Path]:
+        """
+        Get list of files that failed with retryable errors.
+
+        Returns:
+            List of file paths that can be retried
+        """
+        return self.get_failed_files(retryable_only=True)
+
+    def clear_failed_files(self, retryable_only: bool = False):
+        """
+        Remove failed files from tracking to allow reprocessing.
+
+        Args:
+            retryable_only: If True, only clear files with retryable errors
+        """
+        to_remove = []
+        for path_str, info in self.data["files"].items():
+            if info.get("status") == "failed":
+                if retryable_only and not info.get("is_retryable", False):
+                    continue
+                to_remove.append(path_str)
+        
+        for path_str in to_remove:
+            del self.data["files"][path_str]
 
     def clear_file(self, file_path: Path):
         """
@@ -215,6 +270,43 @@ class ProcessingTracker:
         """Clear all tracking data."""
         self.data = self._create_empty_data()
 
+    def get_failed_files(self, only_retryable: bool = False) -> List[Path]:
+        """
+        Get list of failed files from tracking data.
+
+        Args:
+            only_retryable: If True, only return files with retryable errors
+
+        Returns:
+            List of Path objects for failed files
+        """
+        failed_files = []
+        for path_str, file_info in self.data["files"].items():
+            if file_info.get("status") == "failed":
+                if only_retryable and not file_info.get("is_retryable", False):
+                    continue
+                path = Path(path_str)
+                if path.exists():
+                    failed_files.append(path)
+        return failed_files
+
+    def clear_failed_files(self, only_retryable: bool = False):
+        """
+        Clear failed files from tracking to allow reprocessing.
+
+        Args:
+            only_retryable: If True, only clear files with retryable errors
+        """
+        paths_to_clear = []
+        for path_str, file_info in self.data["files"].items():
+            if file_info.get("status") == "failed":
+                if only_retryable and not file_info.get("is_retryable", False):
+                    continue
+                paths_to_clear.append(path_str)
+        
+        for path_str in paths_to_clear:
+            del self.data["files"][path_str]
+
     def get_stats(self) -> Dict:
         """
         Get statistics about processed files and directories.
@@ -231,6 +323,10 @@ class ProcessingTracker:
             1 for f in self.data["files"].values()
             if f.get("status") == "failed"
         )
+        retryable_files = sum(
+            1 for f in self.data["files"].values()
+            if f.get("status") == "failed" and f.get("is_retryable", False)
+        )
 
         total_dirs = len(self.data["directories"])
         completed_dirs = sum(
@@ -242,6 +338,7 @@ class ProcessingTracker:
             "total_files": total_files,
             "completed_files": completed_files,
             "failed_files": failed_files,
+            "retryable_files": retryable_files,
             "total_directories": total_dirs,
             "completed_directories": completed_dirs,
             "last_updated": self.data.get("last_updated"),
@@ -254,6 +351,8 @@ class ProcessingTracker:
         print(f"  Files tracked: {stats['total_files']}")
         print(f"    - Completed: {stats['completed_files']}")
         print(f"    - Failed: {stats['failed_files']}")
+        if stats['retryable_files'] > 0:
+            print(f"    - Retryable: {stats['retryable_files']}")
         print(f"  Directories tracked: {stats['total_directories']}")
         print(f"    - Completed: {stats['completed_directories']}")
         print(f"  Last updated: {stats['last_updated']}")

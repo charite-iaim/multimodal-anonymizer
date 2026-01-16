@@ -38,6 +38,7 @@ from langchain_core.messages import HumanMessage
 from pydantic import BaseModel, Field
 
 from ..base_processor import FileProcessor
+from ..retry_utils import retry_with_backoff, RetryConfig, create_retry_callback
 from ..config import AnonymizerConfig
 from ..models import PIIDetectionResult, PIIElement, BoundingBox
 from .image_verification_agent import ImageVerificationAgent, VerificationResult
@@ -355,7 +356,20 @@ IMPORTANT:
         )
 
         try:
-            result: VisionPIIResult = self.vision_llm.invoke([message])
+            # Use retry logic for LLM call
+            retry_config = RetryConfig(
+                max_retries=3,
+                initial_delay=2.0,
+                max_delay=60.0,
+                exponential_base=2.0,
+                jitter=True,
+            )
+            
+            result: VisionPIIResult = retry_with_backoff(
+                lambda: self.vision_llm.invoke([message]),
+                config=retry_config,
+                on_retry=create_retry_callback(prefix="  [Vision LLM] "),
+            )
 
             for pii in result.pii_texts:
                 print(f"  Vision LLM identified: [{pii.type}] \"{pii.text}\"")
