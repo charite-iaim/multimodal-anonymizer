@@ -8,11 +8,11 @@ from datetime import datetime
 from typing import List, Dict, Optional
 from collections import defaultdict
 
-from langchain_openai import AzureChatOpenAI
 from langchain_core.messages import HumanMessage
 from pydantic import BaseModel, Field
 
 from .config import AnonymizerConfig
+from .llm_factory import create_chat_llm
 
 
 class PHIDetection(BaseModel):
@@ -68,13 +68,18 @@ class FilenameAnonymizer:
         self.output_dir = output_dir
 
         # Initialize LLM for PII detection in filenames
-        self.llm = AzureChatOpenAI(
-            azure_deployment=config.azure_deployment_name,
-            azure_endpoint=config.azure_endpoint,
-            api_key=config.azure_api_key,
-            api_version=config.azure_api_version,
+        # Note: max_tokens needs to be high enough to accommodate reasoning models
+        # which use reasoning_tokens within the max_tokens budget (e.g., GLM-4 can use
+        # ~1800 reasoning tokens, so we need at least 2500+ for a complete response)
+        # Reasoning is disabled (reasoning_effort=None) for filename anonymization
+        # since it's a simple task that doesn't benefit from extended reasoning.
+        self.llm = create_chat_llm(
+            config=config,
             temperature=0.0,  # Use deterministic output for consistency
-        ).with_structured_output(FilenameAnonymizationResult)
+            max_tokens=4096,  # Higher limit to accommodate reasoning models
+            structured_output=FilenameAnonymizationResult,
+            reasoning_effort=None,  # Disable reasoning for this simple task
+        )
 
         # Store file mappings by folder for CSV export
         # Key: folder path (e.g., "patient_ID_ID/csv"), Value: list of FileMappings
@@ -95,9 +100,16 @@ class FilenameAnonymizer:
         # Track which CSV files have been initialized with headers
         self._initialized_csv_files: set = set()
 
-        # Initialize folder mapping CSV if output_dir is provided
+        # Track already anonymized mappings (loaded from existing CSVs)
+        # Key: original folder name, Value: anonymized folder name
+        self._existing_folder_mappings: Dict[str, str] = {}
+        # Key: (folder_path, original_filename), Value: anonymized filename
+        self._existing_file_mappings: Dict[tuple, str] = {}
+
+        # Initialize folder mapping CSV if output_dir is provided and load existing mappings
         if self.output_dir:
             self._initialize_folder_csv()
+            self._load_existing_mappings()
 
     def _initialize_folder_csv(self) -> None:
         """Initialize the folder mapping CSV file with headers."""
@@ -112,6 +124,171 @@ class FilenameAnonymizer:
             with open(csv_path, 'w', newline='', encoding='utf-8') as f:
                 writer = csv.writer(f)
                 writer.writerow(['original_foldername', 'anonymized_foldername', 'phi_values', 'phi_categories'])
+
+    def _load_existing_mappings(self) -> None:
+        """Load existing mappings from CSV files to prevent duplicate anonymization."""
+        if not self.output_dir:
+            return
+
+        # Load folder mappings
+        folder_csv_path = self.output_dir / "folder_anonymization.csv"
+        if folder_csv_path.exists():
+            try:
+                with open(folder_csv_path, 'r', newline='', encoding='utf-8') as f:
+                    reader = csv.DictReader(f)
+                    for row in reader:
+                        original = row.get('original_foldername', '')
+                        anonymized = row.get('anonymized_foldername', '')
+                        if original and anonymized:
+                            self._existing_folder_mappings[original] = anonymized
+                            # Also update folder counters to continue from where we left off
+                            # Extract base name and counter from anonymized name (e.g., "patient_ID_ID_001")
+                            self._update_folder_counter_from_anonymized(anonymized)
+                if self._existing_folder_mappings:
+                    print(f"Loaded {len(self._existing_folder_mappings)} existing folder mappings from {folder_csv_path}")
+            except Exception as e:
+                print(f"Warning: Could not load folder mappings from {folder_csv_path}: {e}")
+
+        # Load file mappings from all subdirectories
+        self._load_file_mappings_recursive(self.output_dir)
+
+    def _update_folder_counter_from_anonymized(self, anonymized_name: str) -> None:
+        """
+        Update folder counters based on an existing anonymized folder name.
+
+        Args:
+            anonymized_name: Anonymized folder name (e.g., "patient_ID_ID_001")
+        """
+        # Try to extract base name and counter (e.g., "patient_ID_ID_001" -> base="patient_ID_ID", counter=1)
+        import re
+        match = re.match(r'^(.+)_(\d{3})$', anonymized_name)
+        if match:
+            base_name = match.group(1)
+            counter = int(match.group(2))
+            # Update counter to at least this value
+            if self.folder_counters[base_name] < counter:
+                self.folder_counters[base_name] = counter
+
+    def _update_file_counter_from_anonymized(self, folder_path: str, anonymized_name: str) -> None:
+        """
+        Update file counters based on an existing anonymized filename.
+
+        Args:
+            folder_path: Path to the folder containing the file
+            anonymized_name: Anonymized filename (e.g., "ID_0001.hea")
+        """
+        import re
+        # Extract base name and counter (e.g., "ID_0001.hea" -> base="ID.hea", counter=1)
+        # Handle filenames with extension
+        if '.' in anonymized_name:
+            last_dot = anonymized_name.rfind('.')
+            stem = anonymized_name[:last_dot]
+            ext = anonymized_name[last_dot:]
+        else:
+            stem = anonymized_name
+            ext = ''
+
+        # Try to extract counter from stem (e.g., "ID_0001" -> base="ID", counter=1)
+        match = re.match(r'^(.+)_(\d{4})$', stem)
+        if match:
+            base_stem = match.group(1)
+            counter = int(match.group(2))
+            base_filename = f"{base_stem}{ext}"
+            key = (folder_path, base_filename)
+            # Update counter to at least this value
+            if self.file_counters[key] < counter:
+                self.file_counters[key] = counter
+
+    def _load_file_mappings_recursive(self, directory: Path) -> None:
+        """
+        Recursively load file mappings from filename_anonymization.csv files.
+
+        Args:
+            directory: Directory to search for CSV files
+        """
+        if not directory.exists():
+            return
+
+        file_mapping_count = 0
+
+        for csv_path in directory.rglob("filename_anonymization.csv"):
+            try:
+                # Get folder path relative to output_dir
+                folder_path = str(csv_path.parent.relative_to(self.output_dir))
+                if folder_path == '.':
+                    folder_path = ''
+
+                with open(csv_path, 'r', newline='', encoding='utf-8') as f:
+                    reader = csv.DictReader(f)
+                    for row in reader:
+                        original = row.get('original_filename', '')
+                        anonymized = row.get('anonymized_filename', '')
+                        if original and anonymized:
+                            key = (folder_path, original)
+                            self._existing_file_mappings[key] = anonymized
+                            # Update file counters
+                            self._update_file_counter_from_anonymized(folder_path, anonymized)
+                            file_mapping_count += 1
+
+                # Mark this CSV as initialized
+                self._initialized_csv_files.add(str(csv_path))
+            except Exception as e:
+                print(f"Warning: Could not load file mappings from {csv_path}: {e}")
+
+        if file_mapping_count > 0:
+            print(f"Loaded {file_mapping_count} existing file mappings")
+
+    def is_folder_already_anonymized(self, original_folder_name: str) -> bool:
+        """
+        Check if a folder has already been anonymized.
+
+        Args:
+            original_folder_name: Original folder name to check
+
+        Returns:
+            True if folder was already anonymized
+        """
+        return original_folder_name in self._existing_folder_mappings
+
+    def get_existing_folder_mapping(self, original_folder_name: str) -> Optional[str]:
+        """
+        Get the existing anonymized folder name for an original folder.
+
+        Args:
+            original_folder_name: Original folder name
+
+        Returns:
+            Anonymized folder name if exists, None otherwise
+        """
+        return self._existing_folder_mappings.get(original_folder_name)
+
+    def is_file_already_anonymized(self, folder_path: str, original_filename: str) -> bool:
+        """
+        Check if a file has already been anonymized.
+
+        Args:
+            folder_path: Path to the folder containing the file
+            original_filename: Original filename to check
+
+        Returns:
+            True if file was already anonymized
+        """
+        key = (folder_path, original_filename)
+        return key in self._existing_file_mappings
+
+    def get_existing_file_mapping(self, folder_path: str, original_filename: str) -> Optional[str]:
+        """
+        Get the existing anonymized filename for an original file.
+
+        Args:
+            folder_path: Path to the folder containing the file
+            original_filename: Original filename
+
+        Returns:
+            Anonymized filename if exists, None otherwise
+        """
+        key = (folder_path, original_filename)
+        return self._existing_file_mappings.get(key)
 
     def _initialize_file_csv(self, folder_path: str) -> None:
         """Initialize a file mapping CSV file with headers for a specific folder.
@@ -293,7 +470,7 @@ If no PHI: return original filename with empty phi_detections list.
     ) -> None:
         """
         Add a file mapping and immediately write to CSV if output_dir is set.
-        Only writes to CSV if the filename actually changed.
+        Only writes to CSV if the filename actually changed and wasn't already in existing mappings.
 
         Args:
             folder_path: Path to the folder containing the file (e.g., "patient_ID_ID/csv")
@@ -303,6 +480,11 @@ If no PHI: return original filename with empty phi_detections list.
         """
         # Only add mapping if filename actually changed
         if original_filename == anonymized_filename:
+            return
+
+        # Skip if already in existing mappings (loaded from CSV)
+        key = (folder_path, original_filename)
+        if key in self._existing_file_mappings:
             return
 
         detections = phi_detections or []
@@ -378,7 +560,7 @@ If no PHI: return original filename with empty phi_detections list.
     ) -> None:
         """
         Add a folder mapping and immediately write to CSV if output_dir is set.
-        Only writes to CSV if the folder name actually changed.
+        Only writes to CSV if the folder name actually changed and wasn't already in existing mappings.
 
         Args:
             original_foldername: Original folder name
@@ -387,6 +569,10 @@ If no PHI: return original filename with empty phi_detections list.
         """
         # Only add mapping if folder name actually changed
         if original_foldername == anonymized_foldername:
+            return
+
+        # Skip if already in existing mappings (loaded from CSV)
+        if original_foldername in self._existing_folder_mappings:
             return
 
         detections = phi_detections or []
@@ -409,9 +595,22 @@ If no PHI: return original filename with empty phi_detections list.
         """
         Save file mappings to CSV files (one per folder).
 
+        Note: When output_dir is set during init, mappings are written immediately via
+        _append_file_mapping_to_csv. This method is kept for backwards compatibility
+        and for cases where output_dir is not set during init.
+
         Args:
             output_dir: Root output directory where CSV files will be saved
         """
+        # If output_dir was set during init, mappings were already written incrementally
+        # Only print summary in this case
+        if self.output_dir == output_dir:
+            total_new_mappings = sum(len(m) for m in self.file_mappings_by_folder.values())
+            if total_new_mappings > 0:
+                print(f"Filename mappings already saved incrementally ({total_new_mappings} new mappings)")
+            return
+
+        # Legacy path: write all mappings at once (only used if output_dir was not set during init)
         for folder_path, mappings in self.file_mappings_by_folder.items():
             # Create CSV in the folder where the files are
             csv_path = output_dir / folder_path / "filename_anonymization.csv"
@@ -435,12 +634,23 @@ If no PHI: return original filename with empty phi_detections list.
         """
         Save folder mappings to a CSV file in the root output directory.
 
+        Note: When output_dir is set during init, mappings are written immediately via
+        _append_folder_mapping_to_csv. This method is kept for backwards compatibility
+        and for cases where output_dir is not set during init.
+
         Args:
             output_dir: Root output directory where CSV file will be saved
         """
         if not self.folder_mappings:
             return
 
+        # If output_dir was set during init, mappings were already written incrementally
+        # Only print summary in this case
+        if self.output_dir == output_dir:
+            print(f"Folder mappings already saved incrementally ({len(self.folder_mappings)} new mappings)")
+            return
+
+        # Legacy path: write all mappings at once (only used if output_dir was not set during init)
         csv_path = output_dir / "folder_anonymization.csv"
         csv_path.parent.mkdir(parents=True, exist_ok=True)
 

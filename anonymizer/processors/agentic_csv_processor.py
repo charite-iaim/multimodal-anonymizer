@@ -17,13 +17,13 @@ import time
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from langchain_openai import AzureChatOpenAI
 from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
 from pydantic import BaseModel, Field
 
 from ..base_processor import FileProcessor
 from ..config import AnonymizerConfig
-from ..tools.time_shift_tool import shift_datetime, redact_text, restore_text
+from ..llm_factory import create_chat_llm
+from ..tools.time_shift_tool import shift_datetime, redact_text, restore_text, redact_column
 from ..retry_utils import retry_with_backoff, RetryConfig, create_retry_callback
 
 
@@ -118,71 +118,49 @@ class AgenticCSVProcessor(FileProcessor):
         )
 
         # Store config for creating LLM instances in worker threads
-        self._llm_config = {
-            "azure_deployment": config.azure_deployment_name,
-            "azure_endpoint": config.azure_endpoint,
-            "api_key": config.azure_api_key,
-            "api_version": config.azure_api_version,
-            "temperature": config.temperature,
-            "timeout": 300,
-        }
+        self._config = config
 
         # Initialize LLM with tools for phase 1 (time shifting)
-        self.llm_with_tools = AzureChatOpenAI(
-            azure_deployment=config.azure_deployment_name,
-            azure_endpoint=config.azure_endpoint,
-            api_key=config.azure_api_key,
-            api_version=config.azure_api_version,
-            temperature=config.temperature,
+        self.llm_with_tools = create_chat_llm(
+            config=config,
             timeout=600,
             max_tokens=16000,
-        ).bind_tools([shift_datetime])
+            tools=[shift_datetime],
+        )
 
         # Initialize LLM with tools for phase 2 (PII anonymization) - main thread fallback
-        self.llm_anonymize = AzureChatOpenAI(
-            azure_deployment=config.azure_deployment_name,
-            azure_endpoint=config.azure_endpoint,
-            api_key=config.azure_api_key,
-            api_version=config.azure_api_version,
-            temperature=config.temperature,
+        self.llm_anonymize = create_chat_llm(
+            config=config,
             timeout=600,
             max_tokens=16000,
-        ).bind_tools([redact_text])
+            tools=[redact_text, redact_column],
+        )
 
         # Initialize LLM with tools for phase 3 (verification) - main thread fallback
-        self.llm_verify = AzureChatOpenAI(
-            azure_deployment=config.azure_deployment_name,
-            azure_endpoint=config.azure_endpoint,
-            api_key=config.azure_api_key,
-            api_version=config.azure_api_version,
-            temperature=config.temperature,
+        self.llm_verify = create_chat_llm(
+            config=config,
             timeout=600,
             max_tokens=16000,
-        ).bind_tools([shift_datetime, redact_text, restore_text])
+            tools=[shift_datetime, redact_text, restore_text],
+        )
 
-    def _create_llm_anonymize(self) -> AzureChatOpenAI:
+    def _create_llm_anonymize(self):
         """Create a new LLM instance for anonymization (thread-safe)."""
-        return AzureChatOpenAI(
-            azure_deployment=self._llm_config["azure_deployment"],
-            azure_endpoint=self._llm_config["azure_endpoint"],
-            api_key=self._llm_config["api_key"],
-            api_version=self._llm_config["api_version"],
-            temperature=self._llm_config["temperature"],
+        return create_chat_llm(
+            config=self._config,
             timeout=600,
             max_tokens=16000,
-        ).bind_tools([redact_text])
+            tools=[redact_text, redact_column],
+        )
 
-    def _create_llm_verify(self) -> AzureChatOpenAI:
+    def _create_llm_verify(self):
         """Create a new LLM instance for verification (thread-safe)."""
-        return AzureChatOpenAI(
-            azure_deployment=self._llm_config["azure_deployment"],
-            azure_endpoint=self._llm_config["azure_endpoint"],
-            api_key=self._llm_config["api_key"],
-            api_version=self._llm_config["api_version"],
-            temperature=self._llm_config["temperature"],
+        return create_chat_llm(
+            config=self._config,
             timeout=600,
             max_tokens=16000,
-        ).bind_tools([shift_datetime, redact_text, restore_text])
+            tools=[shift_datetime, redact_text, restore_text],
+        )
 
     def _safe_print(self, message: str) -> None:
         """Thread-safe print."""
@@ -239,9 +217,14 @@ class AgenticCSVProcessor(FileProcessor):
         shifted_rows, dates_shifted = self._phase1_shift_times(rows, headers)
         print(f"Shifted {len(dates_shifted)} date/time values")
 
+        # Step 2b: Phase 1b - Identify and redact entire PII columns
+        print("\n=== Phase 1b: Column-Level PII Detection ===")
+        column_redacted_rows, columns_redacted = self._phase1b_identify_pii_columns(shifted_rows, headers)
+        print(f"Redacted {len(columns_redacted)} entire column(s): {', '.join(columns_redacted) if columns_redacted else 'none'}")
+
         # Step 3: Phase 2 - Anonymize other PII (agentic with redact_text tool)
         print("\n=== Phase 2: PII Anonymization ===")
-        anonymized_rows, pii_redactions = self._phase2_anonymize_pii(shifted_rows, headers)
+        anonymized_rows, pii_redactions = self._phase2_anonymize_pii(column_redacted_rows, headers, columns_redacted)
         print(f"Applied {pii_redactions} PII redactions")
 
         # Step 5: Phase 3 - Verification (optional but recommended)
@@ -466,13 +449,144 @@ class AgenticCSVProcessor(FileProcessor):
 
         return modified_rows, all_shifts
 
+    def _phase1b_identify_pii_columns(
+        self,
+        rows: List[Dict[str, str]],
+        headers: List[str]
+    ) -> Tuple[List[Dict[str, str]], List[str]]:
+        """
+        Phase 1b: Use LLM to identify columns that contain PII and should be fully redacted.
+
+        The LLM analyzes column names and sample values to determine which columns
+        contain identifiers or other PII that should be redacted across all rows.
+
+        Args:
+            rows: CSV rows (with dates already shifted)
+            headers: Column headers
+
+        Returns:
+            Tuple of (rows with PII columns redacted, list of redacted column names)
+        """
+        if not rows:
+            return rows, []
+
+        # Create a sample of the data for the LLM to analyze
+        sample_size = min(5, len(rows))
+        sample_rows = rows[:sample_size]
+
+        # Format sample data for LLM
+        sample_preview = self._format_csv_for_llm(sample_rows, headers, 0)
+
+        prompt = f"""You are a PII detection agent. Analyze this CSV structure and identify columns that contain Personal Identifiable Information (PII) that should be ENTIRELY redacted.
+
+CSV Column Headers: {', '.join(headers)}
+
+Sample Data (first {sample_size} rows):
+{sample_preview}
+
+Your task: Identify columns where ALL values should be redacted because the column contains ONLY identifiers or PII.
+
+Common PII columns to look for:
+- subject_id, patient_id: Patient identifiers
+- hadm_id: Hospital admission ID
+- stay_id: ICU/hospital stay identifier
+- note_id: Clinical note identifier
+- caregiver_id, provider_id: Healthcare provider identifiers
+- order_id: Order identifiers
+- Any column with "id" suffix that links to individuals
+- Columns that only contain names, SSN, phone numbers, addresses, email
+
+DO NOT mark as PII columns:
+- Columns with mixed content that are NOT PURE IDENTIFIERS
+- Date/time columns (already handled by time shifting)
+- Medical codes (ICD, CPT, etc.)
+- Generic categorical columns (admission_type, discharge_location, etc.)
+- Numeric measurements (lab values, vitals, etc.)
+
+For EACH column that should be entirely redacted, call:
+  redact_column(column_name="exact_column_name", reason="brief reason")
+
+If no columns need full redaction, just respond with "No columns identified for full redaction."
+"""
+
+        messages = [HumanMessage(content=prompt)]
+        columns_to_redact: List[str] = []
+
+        # Create retry callback
+        retry_callback = create_retry_callback(
+            lambda msg: self._safe_print(f"    {msg}")
+        )
+
+        def invoke_with_retry(msgs):
+            return retry_with_backoff(
+                lambda: self.llm_anonymize.invoke(msgs),
+                config=self.retry_config,
+                on_retry=retry_callback,
+            )
+
+        max_iterations = 20
+        iteration = 0
+
+        while iteration < max_iterations:
+            iteration += 1
+
+            try:
+                response = invoke_with_retry(messages)
+                messages.append(response)
+
+                if not response.tool_calls:
+                    break
+
+                for tool_call in response.tool_calls:
+                    tool_name = tool_call["name"]
+                    tool_args = tool_call["args"]
+
+                    if tool_name == "redact_column":
+                        col_name = tool_args.get("column_name", "")
+                        reason = tool_args.get("reason", "")
+
+                        result = redact_column.invoke(tool_args)
+
+                        if "[REDACT_COLUMN_FAILED" not in result and col_name in headers:
+                            if col_name not in columns_to_redact:
+                                columns_to_redact.append(col_name)
+                                self._safe_print(f"    Column '{col_name}' marked for redaction: {reason}")
+
+                        messages.append(ToolMessage(
+                            content=result,
+                            tool_call_id=tool_call["id"]
+                        ))
+                    elif tool_name == "redact_text":
+                        # Ignore redact_text calls in this phase
+                        messages.append(ToolMessage(
+                            content="[Ignored in column detection phase - use redact_column instead]",
+                            tool_call_id=tool_call["id"]
+                        ))
+
+            except Exception as e:
+                self._safe_print(f"    Error in column detection: {e}")
+                break
+
+        # Apply column redactions
+        modified_rows = [row.copy() for row in rows]
+
+        if columns_to_redact:
+            for row in modified_rows:
+                for col_name in columns_to_redact:
+                    if col_name in row and row[col_name]:
+                        original_value = row[col_name]
+                        row[col_name] = "*" * len(original_value)
+
+        return modified_rows, columns_to_redact
+
     def _process_single_batch_phase2(
         self,
         batch_rows: List[Dict[str, str]],
         headers: List[str],
         start_idx: int,
         batch_num: int,
-        total_batches: int
+        total_batches: int,
+        already_redacted_columns: Optional[List[str]] = None
     ) -> Tuple[List[Dict[str, str]], int, List[Tuple[int, str, str, str]]]:
         """
         Process a single batch for Phase 2 (PII anonymization).
@@ -486,11 +600,15 @@ class AgenticCSVProcessor(FileProcessor):
             start_idx: Absolute start index of this batch in the full CSV
             batch_num: Batch number (for logging)
             total_batches: Total number of batches (for logging)
+            already_redacted_columns: Columns already redacted in Phase 1b (to skip)
 
         Returns:
             Tuple of (modified batch rows, redaction count, list of redactions applied)
             Each redaction is (row_index, column_name, original_text, redacted_text)
         """
+        if already_redacted_columns is None:
+            already_redacted_columns = []
+
         # Create thread-local LLM instance
         llm = self._create_llm_anonymize()
 
@@ -500,9 +618,16 @@ class AgenticCSVProcessor(FileProcessor):
 
         self._safe_print(f"  Phase 2 - Batch {batch_num + 1}/{total_batches} (rows {start_idx}-{end_idx-1})")
 
-        csv_preview = self._format_csv_for_llm(batch_rows, headers, start_idx)
+        # Filter out already redacted columns from the preview
+        active_headers = [h for h in headers if h not in already_redacted_columns]
+        csv_preview = self._format_csv_for_llm(batch_rows, active_headers, start_idx)
 
-        prompt = f"""You are a PII anonymization agent. Analyze this CSV data and redact ALL Personal Identifiable Information (PII).
+        # Build info about skipped columns
+        skipped_cols_info = ""
+        if already_redacted_columns:
+            skipped_cols_info = f"\n\nNOTE: The following columns have ALREADY been fully redacted and are not shown: {', '.join(already_redacted_columns)}"
+
+        prompt = f"""You are a PII anonymization agent. Analyze this CSV data and redact ALL Personal Identifiable Information (PII).{skipped_cols_info}
 
 CRITICAL: You MUST scan the ENTIRE content of each cell, even if it's very long. Do NOT skip any PIIs!
 
@@ -511,8 +636,14 @@ IMPORTANT: Dates and times have ALREADY been anonymized (shifted). Do NOT redact
 CSV Data (rows {start_idx} to {end_idx-1}):
 {csv_preview}
 
-You have the redact_text tool available. For EACH piece of PII you find, call:
-  redact_text(text_to_redact="exact PII text", row_index=N, column_name="column")
+You have TWO tools available:
+
+1. redact_text - For individual PII values:
+   redact_text(text_to_redact="exact PII text", row_index=N, column_name="column")
+
+2. redact_column - For entire columns containing PII (more efficient):
+   redact_column(column_name="column_name", reason="why this column is PII")
+   Use this when you notice a column contains identifiers in ALL rows (e.g., subject_id, hadm_id, note_id)
 
 PII categories to redact (BE THOROUGH - check EVERY occurrence):
 - name: Patient names, physician names, doctor names, family member names, caregiver names, any other personal names
@@ -523,6 +654,9 @@ PII categories to redact (BE THOROUGH - check EVERY occurrence):
 - email: Email addresses
 - ids: Any other identifiers that can link to an individual or organization (provider IDs, account numbers, caregiver IDs, etc.)
 - other: Any other specific information that can identify an individual
+
+EFFICIENCY TIP: If you notice a column like "subject_id" or "hadm_id" contains identifiers in every row,
+use redact_column ONCE instead of calling redact_text for each row!
 
 DO NOT redact:
 - Dates and times (already shifted)
@@ -615,6 +749,31 @@ Example: If you see "Name: John Smith" in row 0, column "text":
                             tool_call_id=tool_call["id"]
                         ))
 
+                    elif tool_name == "redact_column":
+                        col_name = tool_args.get("column_name", "")
+                        reason = tool_args.get("reason", "")
+
+                        result = redact_column.invoke(tool_args)
+
+                        if "[REDACT_COLUMN_FAILED" not in result and col_name in headers:
+                            # Redact all values in this column for this batch
+                            col_redactions = 0
+                            for local_idx in range(len(modified_batch)):
+                                cell_value = str(modified_batch[local_idx].get(col_name, ""))
+                                if cell_value and not all(c == '*' for c in cell_value):
+                                    original_value = cell_value
+                                    modified_batch[local_idx][col_name] = "*" * len(cell_value)
+                                    col_redactions += 1
+                                    redactions_applied.append((start_idx + local_idx, col_name, original_value, "*" * len(original_value)))
+
+                            batch_redactions += col_redactions
+                            self._safe_print(f"    Redacted entire column '{col_name}' ({col_redactions} values): {reason}")
+
+                        messages.append(ToolMessage(
+                            content=result,
+                            tool_call_id=tool_call["id"]
+                        ))
+
             except Exception as e:
                 self._safe_print(f"    Error in batch {batch_num + 1}: {e}")
                 break
@@ -624,7 +783,8 @@ Example: If you see "Name: John Smith" in row 0, column "text":
     def _phase2_anonymize_pii(
         self,
         rows: List[Dict[str, str]],
-        headers: List[str]
+        headers: List[str],
+        already_redacted_columns: Optional[List[str]] = None
     ) -> Tuple[List[Dict[str, str]], int]:
         """
         Phase 2: Anonymize all PII using agentic tool-calling with redact_text.
@@ -635,10 +795,14 @@ Example: If you see "Name: John Smith" in row 0, column "text":
         Args:
             rows: CSV rows (with dates already shifted)
             headers: Column headers
+            already_redacted_columns: List of column names already redacted in Phase 1b
 
         Returns:
             Tuple of (anonymized rows, number of redactions applied)
         """
+        if already_redacted_columns is None:
+            already_redacted_columns = []
+
         batch_size = self.batch_size_phase2
         total_batches = (len(rows) + batch_size - 1) // batch_size
 
@@ -648,22 +812,24 @@ Example: If you see "Name: John Smith" in row 0, column "text":
             start_idx = batch_num * batch_size
             end_idx = min(start_idx + batch_size, len(rows))
             batch_rows = [rows[i].copy() for i in range(start_idx, end_idx)]
-            batches.append((batch_rows, headers, start_idx, batch_num, total_batches))
+            batches.append((batch_rows, headers, start_idx, batch_num, total_batches, already_redacted_columns))
 
         # Process batches in parallel
         # Results: dict mapping start_idx -> (modified_rows, redaction_count)
         results: Dict[int, Tuple[List[Dict[str, str]], int]] = {}
         total_redactions = 0
 
+        if already_redacted_columns:
+            print(f"  Skipping already redacted columns: {', '.join(already_redacted_columns)}")
         print(f"  Processing {total_batches} batches with {self.max_workers} workers...")
 
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
             future_to_batch = {
                 executor.submit(
                     self._process_single_batch_phase2,
-                    batch_rows, hdrs, start_idx, batch_num, total
+                    batch_rows, hdrs, start_idx, batch_num, total, redacted_cols
                 ): start_idx
-                for batch_rows, hdrs, start_idx, batch_num, total in batches
+                for batch_rows, hdrs, start_idx, batch_num, total, redacted_cols in batches
             }
 
             for future in as_completed(future_to_batch):

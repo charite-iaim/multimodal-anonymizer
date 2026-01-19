@@ -32,6 +32,12 @@ class RestoreTextInput(BaseModel):
     column_name: str = Field(default="", description="Column name where the over-redaction occurred. Leave empty for plain text files.")
 
 
+class RedactColumnInput(BaseModel):
+    """Input schema for the redact column tool."""
+    column_name: str = Field(description="The name of the column to redact entirely (e.g., 'subject_id', 'hadm_id')")
+    reason: str = Field(description="Brief reason why this column contains PII (e.g., 'patient identifier', 'admission ID')")
+
+
 # Special format markers for non-standard date formats
 YEAR_ONLY_FORMAT = "YEAR_ONLY"  # e.g., "2140"
 YEAR_RANGE_FORMAT = "YEAR_RANGE"  # e.g., "2011 - 2013"
@@ -257,6 +263,37 @@ def redact_text_value(text_to_redact: str) -> str:
     if not text_to_redact or not text_to_redact.strip():
         return ""
     return "*" * len(text_to_redact)
+
+
+@tool("redact_column", args_schema=RedactColumnInput)
+def redact_column(column_name: str, reason: str) -> str:
+    """
+    Mark an entire column for redaction because it contains PII.
+
+    Use this tool when you identify that a column contains identifiers or other PII
+    that should be redacted across ALL rows. This is more efficient than calling
+    redact_text for each individual cell.
+
+    Common columns to redact:
+    - subject_id: Patient identifier
+    - hadm_id: Hospital admission ID
+    - stay_id: ICU stay identifier
+    - note_id: Clinical note identifier
+    - caregiver_id: Healthcare provider identifier
+    - provider_id: Provider identifier
+    - Any column containing names, IDs, or other identifiers
+
+    Args:
+        column_name: The exact name of the column to redact
+        reason: Brief explanation of why this column contains PII
+
+    Returns:
+        Confirmation message with the column name and reason
+    """
+    if not column_name or not column_name.strip():
+        return "[REDACT_COLUMN_FAILED: empty column name]"
+
+    return f"[REDACT_COLUMN:{column_name}:{reason}]"
 
 
 @tool("restore_text", args_schema=RestoreTextInput)

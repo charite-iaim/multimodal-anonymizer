@@ -9,11 +9,11 @@ from pathlib import Path
 from PIL import Image, ImageDraw
 from datetime import datetime
 
-from langchain_openai import AzureChatOpenAI
 from langchain_core.messages import HumanMessage
 
 from ..base_processor import FileProcessor
 from ..config import AnonymizerConfig
+from ..llm_factory import create_chat_llm
 from ..models import PIIDetectionResult, PIIElement, BoundingBox
 
 
@@ -21,15 +21,13 @@ class PNGProcessor(FileProcessor):
     """Processor for PNG images using vision LLM."""
 
     def __init__(self, config: AnonymizerConfig):
-        """Initialize PNG processor with Azure vision-capable LLM."""
+        """Initialize PNG processor with vision-capable LLM."""
         super().__init__(config)
-        self.llm = AzureChatOpenAI(
-            azure_deployment=config.azure_deployment_name,
-            azure_endpoint=config.azure_endpoint,
-            api_key=config.azure_api_key,
-            api_version=config.azure_api_version,
-            temperature=config.temperature,
-        ).with_structured_output(PIIDetectionResult)
+        self.llm = create_chat_llm(
+            config=config,
+            structured_output=PIIDetectionResult,
+            use_vision_model=True,
+        )
 
     def can_process(self, file_path: Path) -> bool:
         """Check if file is a supported image format (PNG, JPG, JPEG)."""

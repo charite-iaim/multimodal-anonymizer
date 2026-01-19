@@ -8,12 +8,12 @@ from pathlib import Path
 from datetime import datetime
 from typing import List
 
-from langchain_openai import AzureChatOpenAI
 from langchain_core.messages import HumanMessage
 from pydantic import BaseModel, Field
 
 from ..base_processor import FileProcessor
 from ..config import AnonymizerConfig
+from ..llm_factory import create_chat_llm
 
 
 class TextAnonymization(BaseModel):
@@ -40,13 +40,10 @@ class TextProcessor(FileProcessor):
         super().__init__(config)
 
         # Initialize LLM for PII detection and anonymization
-        self.llm = AzureChatOpenAI(
-            azure_deployment=config.azure_deployment_name,
-            azure_endpoint=config.azure_endpoint,
-            api_key=config.azure_api_key,
-            api_version=config.azure_api_version,
-            temperature=config.temperature,
-        ).with_structured_output(TextAnonymizationResult)
+        self.llm = create_chat_llm(
+            config=config,
+            structured_output=TextAnonymizationResult,
+        )
 
     def can_process(self, file_path: Path) -> bool:
         """Check if file is a text file (.txt or .hea ECG header)."""
