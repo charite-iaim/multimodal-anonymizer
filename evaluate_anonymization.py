@@ -542,6 +542,37 @@ def load_filename_mapping(mapping_file: str) -> List[FileMapping]:
     return mappings
 
 
+def extract_phi_from_annotated_filename(annotated_filename: str) -> List[str]:
+    """Extract PHI values from annotated filename with tags like <PER>, <ID>, etc."""
+    # Match any tag like <PER>value</PER>, <ID>value</ID>, etc.
+    pattern = r'<(\w+)>([^<]+)</\1>'
+    matches = re.findall(pattern, annotated_filename)
+    return [value for tag, value in matches]
+
+
+def load_label_filename_annotations(label_mapping_file: str) -> Dict[str, List[str]]:
+    """Load filename annotations from labels and extract expected PHI values.
+
+    Returns a dict mapping original_filename -> list of expected PHI values
+    """
+    phi_by_filename = {}
+
+    if not os.path.exists(label_mapping_file):
+        return phi_by_filename
+
+    with open(label_mapping_file, 'r', encoding='utf-8') as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            original = row.get('original_filename', '')
+            annotated = row.get('annotated_filename', '')
+
+            if original and annotated:
+                phi_values = extract_phi_from_annotated_filename(annotated)
+                phi_by_filename[original] = phi_values
+
+    return phi_by_filename
+
+
 def load_phi_annotations(csv_path: str) -> List[PHIAnnotation]:
     """Load PHI bounding box annotations from CSV"""
     annotations = []
@@ -1560,7 +1591,36 @@ def evaluate_patient(labels_dir: str, results_dir: str,
                 date_status = "✓" if date_result.incorrectly_redacted == 0 and date_result.not_shifted == 0 else "✗"
                 print(f"    {date_status} Dates: {date_result.correctly_shifted}/{date_result.total_dates} shifted "
                       f"({date_result.incorrectly_redacted} redacted, {date_result.not_shifted} unchanged)")
-    
+
+        # ---- CSV Filename Evaluation ----
+        # Load expected PHI from label annotations
+        label_phi_by_filename = load_label_filename_annotations(label_mapping_file)
+
+        for mapping in result_mappings:
+            expected_phi = label_phi_by_filename.get(mapping.original, [])
+            fn_result = FilenameEvaluationResult(
+                original=mapping.original,
+                anonymized=mapping.anonymized,
+                expected_phi=expected_phi
+            )
+
+            # Check if PHI leaked in anonymized filename
+            for phi in expected_phi:
+                if phi.lower().replace('_', ' ') in mapping.anonymized.lower().replace('_', ' '):
+                    fn_result.phi_in_filename.append(phi)
+                    fn_result.is_anonymized = False
+
+            # Check for fallback anonymization: PHI existed but only _anonymized was added
+            if expected_phi and fn_result.is_anonymized:
+                # If original filename appears unchanged (just with _anonymized suffix), it's a fallback
+                base_anonymized = mapping.anonymized.replace('_anonymized', '').replace('.csv', '')
+                base_original = mapping.original.replace('.csv', '')
+                if base_anonymized == base_original:
+                    fn_result.is_anonymized = False
+                    fn_result.phi_in_filename = expected_phi  # All PHI leaked
+
+            result.filename_results.append(fn_result)
+
     # ---- CXR/Image Evaluation ----
     for modality in ['cxr', 'ecg', 'echo']:
         label_ann_dir = os.path.join(label_base, f"annotations_{modality}")
@@ -1659,22 +1719,56 @@ def evaluate_patient(labels_dir: str, results_dir: str,
                     print(f"    {date_status} Dates: {hea_date_result.correctly_shifted}/{hea_date_result.total_dates} shifted "
                           f"({hea_date_result.incorrectly_redacted} redacted, {hea_date_result.not_shifted} unchanged)")
         
-        # Evaluate filename anonymization
+        # Evaluate filename anonymization using PHI from label annotations
+        # Build a mapping of original filename -> expected PHI from annotations
+        label_phi_by_filename: Dict[str, List[str]] = {}
+        for ann in annotations:
+            if ann.filename not in label_phi_by_filename:
+                label_phi_by_filename[ann.filename] = []
+
+        # Also extract PHI from filename_with_phi_tags if available in the annotation file
+        if os.path.exists(ann_file):
+            with open(ann_file, 'r', encoding='utf-8') as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    filename = row.get('filename', '')
+                    annotated_fn = row.get('filename_with_phi_tags', '')
+                    if filename and annotated_fn:
+                        phi_values = extract_phi_from_annotated_filename(annotated_fn)
+                        if filename not in label_phi_by_filename:
+                            label_phi_by_filename[filename] = []
+                        # Add unique PHI values
+                        for phi in phi_values:
+                            if phi not in label_phi_by_filename[filename]:
+                                label_phi_by_filename[filename].append(phi)
+
         for mapping in result_mappings:
+            # Use PHI from labels if available, otherwise fall back to result mapping
+            expected_phi = label_phi_by_filename.get(mapping.original, mapping.phi_values)
             fn_result = FilenameEvaluationResult(
                 original=mapping.original,
                 anonymized=mapping.anonymized,
-                expected_phi=mapping.phi_values
+                expected_phi=expected_phi
             )
-            
-            # Check if PHI leaked in filename
-            for phi in mapping.phi_values:
+
+            # Check if PHI leaked in anonymized filename
+            for phi in expected_phi:
                 if phi.lower().replace('_', ' ') in mapping.anonymized.lower().replace('_', ' '):
                     fn_result.phi_in_filename.append(phi)
                     fn_result.is_anonymized = False
-            
+
+            # Check for fallback anonymization: PHI existed but only _anonymized was added
+            if expected_phi and fn_result.is_anonymized:
+                # Get base names without extension
+                ext = os.path.splitext(mapping.original)[1]
+                base_anonymized = mapping.anonymized.replace('_anonymized', '').replace(ext, '')
+                base_original = mapping.original.replace(ext, '')
+                if base_anonymized == base_original:
+                    fn_result.is_anonymized = False
+                    fn_result.phi_in_filename = expected_phi  # All PHI leaked
+
             result.filename_results.append(fn_result)
-    
+
     return result
 
 
