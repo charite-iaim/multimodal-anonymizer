@@ -29,12 +29,12 @@ try:
 except ImportError:
     TORCH_AVAILABLE = False
 
-from langchain_openai import AzureChatOpenAI
 from langchain_core.messages import HumanMessage
 from pydantic import BaseModel, Field
 
 from ..base_processor import FileProcessor
 from ..config import AnonymizerConfig
+from ..llm_factory import create_chat_llm
 from ..models import PIIDetectionResult, PIIElement, BoundingBox
 
 
@@ -95,13 +95,10 @@ class PDFOCRProcessor(FileProcessor):
         self.reader = easyocr.Reader(['en'], gpu=use_gpu)
 
         # Initialize LLM for PII classification
-        self.llm = AzureChatOpenAI(
-            azure_deployment=config.azure_deployment_name,
-            azure_endpoint=config.azure_endpoint,
-            api_key=config.azure_api_key,
-            api_version=config.azure_api_version,
-            temperature=config.temperature,
-        ).with_structured_output(PIIClassificationResult)
+        self.llm = create_chat_llm(
+            config=config,
+            structured_output=PIIClassificationResult,
+        )
 
     def can_process(self, file_path: Path) -> bool:
         """Check if file is a PDF."""

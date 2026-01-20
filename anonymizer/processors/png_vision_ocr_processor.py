@@ -33,12 +33,14 @@ try:
 except ImportError:
     TORCH_AVAILABLE = False
 
-from langchain_openai import AzureChatOpenAI
+import re
 from langchain_core.messages import HumanMessage
 from pydantic import BaseModel, Field
 
 from ..base_processor import FileProcessor
+from ..retry_utils import retry_with_backoff, RetryConfig, create_retry_callback
 from ..config import AnonymizerConfig
+from ..llm_factory import create_chat_llm
 from ..models import PIIDetectionResult, PIIElement, BoundingBox
 from .image_verification_agent import ImageVerificationAgent, VerificationResult
 
@@ -47,6 +49,86 @@ class PIITextItem(BaseModel):
     """A single PII text item identified by the vision LLM."""
     text: str = Field(description="The exact text that contains PII as seen in the image")
     type: str = Field(description="PII category (name, date_of_birth, id_number, address, phone, email, location, dates)")
+
+
+def _parse_pii_from_text(text: str) -> List["PIITextItem"]:
+    """
+    Parse PII items from unstructured LLM text response.
+
+    Handles various formats the LLM might return:
+    - JSON embedded in text
+    - Markdown-formatted lists with text/type pairs
+    - Numbered lists with PII information
+
+    Args:
+        text: Raw LLM response text
+
+    Returns:
+        List of PIITextItem objects
+    """
+    pii_items = []
+
+    # Try to find JSON in the response first
+    json_patterns = [
+        r'\{[^{}]*"pii_texts"\s*:\s*\[[^\]]*\][^{}]*\}',  # Full VisionPIIResult
+        r'\[\s*\{[^[\]]*"text"[^[\]]*"type"[^[\]]*\}[^\]]*\]',  # Array of items
+    ]
+
+    for pattern in json_patterns:
+        match = re.search(pattern, text, re.DOTALL)
+        if match:
+            try:
+                json_str = match.group(0)
+                parsed = json.loads(json_str)
+
+                # Handle full VisionPIIResult format
+                if isinstance(parsed, dict) and "pii_texts" in parsed:
+                    for item in parsed["pii_texts"]:
+                        if "text" in item and "type" in item:
+                            pii_items.append(PIITextItem(text=item["text"], type=item["type"]))
+                    return pii_items
+
+                # Handle array of items
+                if isinstance(parsed, list):
+                    for item in parsed:
+                        if isinstance(item, dict) and "text" in item and "type" in item:
+                            pii_items.append(PIITextItem(text=item["text"], type=item["type"]))
+                    return pii_items
+            except (json.JSONDecodeError, KeyError, TypeError):
+                continue
+
+    # Fallback: Parse markdown/text formatted responses
+    # Pattern for "text: ... type: ..." or "**text:** ... **type:** ..."
+    text_type_pattern = r'(?:\*\*)?text(?:\*\*)?\s*[:\-]\s*["\']?([^"\'\n]+)["\']?\s*(?:\n\s*)?(?:\*\*)?type(?:\*\*)?\s*[:\-]\s*["\']?([a-z_]+)["\']?'
+
+    matches = re.findall(text_type_pattern, text, re.IGNORECASE)
+    for text_val, type_val in matches:
+        text_val = text_val.strip().strip('"\'')
+        type_val = type_val.strip().strip('"\'').lower()
+        if text_val and type_val:
+            pii_items.append(PIITextItem(text=text_val, type=type_val))
+
+    if pii_items:
+        return pii_items
+
+    # Another pattern: numbered list items like "1. **Name**: John Doe"
+    # or "- text: John Doe, type: name"
+    list_pattern = r'(?:^|\n)\s*(?:\d+\.|\-|\*)\s*(?:\*\*)?([a-z_]+)(?:\*\*)?\s*[:\-]\s*["\']?([^"\'\n,]+)["\']?'
+    matches = re.findall(list_pattern, text, re.IGNORECASE)
+    for type_val, text_val in matches:
+        type_val = type_val.strip().lower()
+        text_val = text_val.strip().strip('"\'')
+        # Only include if type looks like a valid PII category
+        valid_types = {'name', 'date_of_birth', 'id_number', 'address', 'phone', 'email', 'location', 'dates', 'dob', 'mrn', 'patient_id'}
+        if type_val in valid_types and text_val:
+            # Normalize type names
+            if type_val == 'dob':
+                type_val = 'date_of_birth'
+            elif type_val in ('mrn', 'patient_id'):
+                type_val = 'id_number'
+            pii_items.append(PIITextItem(text=text_val, type=type_val))
+
+    return pii_items
 
 
 class VisionPIIResult(BaseModel):
@@ -119,14 +201,18 @@ class PNGVisionOCRProcessor(FileProcessor):
         print("Initializing EasyOCR reader...")
         self.reader = easyocr.Reader(['en'], gpu=use_gpu)
 
-        # Initialize Vision LLM for PII identification
-        self.vision_llm = AzureChatOpenAI(
-            azure_deployment=config.azure_deployment_name,
-            azure_endpoint=config.azure_endpoint,
-            api_key=config.azure_api_key,
-            api_version=config.azure_api_version,
-            temperature=config.temperature,
-        ).with_structured_output(VisionPIIResult)
+        # Initialize Vision LLM for PII identification (with structured output)
+        self.vision_llm = create_chat_llm(
+            config=config,
+            structured_output=VisionPIIResult,
+            use_vision_model=True,
+        )
+
+        # Initialize fallback Vision LLM (without structured output, for providers that don't support it)
+        self.vision_llm_fallback = create_chat_llm(
+            config=config,
+            use_vision_model=True,
+        )
 
         # Initialize Verification Agent (lazy - only if enabled)
         self._verification_agent = None
@@ -316,7 +402,8 @@ class PNGVisionOCRProcessor(FileProcessor):
         # Create prompt with OCR context
         ocr_text_list = "\n".join([f"- \"{ocr.text}\"" for ocr in ocr_results])
 
-        prompt = f"""Analyze this medical image and identify ALL text that contains Personal Identifiable Information (PII) that should be redacted for patient privacy.
+        # Base prompt for PII identification
+        base_prompt = f"""Analyze this medical image and identify ALL text that contains Personal Identifiable Information (PII) that should be redacted for patient privacy.
 
 The following texts were detected in the image by OCR:
 {ocr_text_list}
@@ -344,9 +431,56 @@ IMPORTANT:
 - Generic medical terms and measurements are NOT PII
 """
 
+        # Prompt with explicit JSON format for fallback
+        fallback_prompt = base_prompt + """
+RESPOND ONLY WITH A JSON OBJECT in the following format (no other text):
+{
+    "pii_texts": [
+        {"text": "exact text from image", "type": "pii_category"},
+        ...
+    ]
+}
+"""
+
         message = HumanMessage(
             content=[
-                {"type": "text", "text": prompt},
+                {"type": "text", "text": base_prompt},
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/png;base64,{base64_image}"},
+                },
+            ]
+        )
+
+        retry_config = RetryConfig(
+            max_retries=3,
+            initial_delay=2.0,
+            max_delay=60.0,
+            exponential_base=2.0,
+            jitter=True,
+        )
+
+        # Try structured output first
+        try:
+            result: VisionPIIResult = retry_with_backoff(
+                lambda: self.vision_llm.invoke([message]),
+                config=retry_config,
+                on_retry=create_retry_callback(prefix="  [Vision LLM] "),
+            )
+
+            for pii in result.pii_texts:
+                print(f"  Vision LLM identified: [{pii.type}] \"{pii.text}\"")
+
+            return result.pii_texts
+
+        except Exception as e:
+            print(f"Structured output failed: {e}")
+            print("Attempting fallback with unstructured LLM...")
+
+        # Fallback: Use unstructured LLM with explicit JSON prompt
+        fallback_message = HumanMessage(
+            content=[
+                {"type": "text", "text": fallback_prompt},
                 {
                     "type": "image_url",
                     "image_url": {"url": f"data:image/png;base64,{base64_image}"},
@@ -355,15 +489,29 @@ IMPORTANT:
         )
 
         try:
-            result: VisionPIIResult = self.vision_llm.invoke([message])
+            response = retry_with_backoff(
+                lambda: self.vision_llm_fallback.invoke([fallback_message]),
+                config=retry_config,
+                on_retry=create_retry_callback(prefix="  [Vision LLM Fallback] "),
+            )
 
-            for pii in result.pii_texts:
-                print(f"  Vision LLM identified: [{pii.type}] \"{pii.text}\"")
+            # Extract text content from response
+            response_text = response.content if hasattr(response, 'content') else str(response)
 
-            return result.pii_texts
+            # Parse the response text
+            pii_items = _parse_pii_from_text(response_text)
+
+            if pii_items:
+                print(f"  Fallback parser extracted {len(pii_items)} PII items")
+                for pii in pii_items:
+                    print(f"  Vision LLM identified: [{pii.type}] \"{pii.text}\"")
+                return pii_items
+            else:
+                print(f"  Warning: Could not parse PII from response: {response_text[:200]}...")
+                return []
 
         except Exception as e:
-            print(f"Error during Vision LLM PII identification: {e}")
+            print(f"Error during fallback Vision LLM PII identification: {e}")
             import traceback
             traceback.print_exc()
             return []

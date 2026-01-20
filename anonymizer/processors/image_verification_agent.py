@@ -17,10 +17,10 @@ from typing import List, Optional, Tuple
 from PIL import Image, ImageDraw
 from pydantic import BaseModel, Field
 
-from langchain_openai import AzureChatOpenAI
 from langchain_core.messages import HumanMessage
 
 from ..config import AnonymizerConfig
+from ..llm_factory import create_chat_llm
 from ..models import PIIElement, BoundingBox
 
 
@@ -86,13 +86,14 @@ class ImageVerificationAgent:
         self.similarity_threshold = similarity_threshold
 
         # Initialize Vision LLM for verification
-        self.vision_llm = AzureChatOpenAI(
-            azure_deployment=config.azure_deployment_name,
-            azure_endpoint=config.azure_endpoint,
-            api_key=config.azure_api_key,
-            api_version=config.azure_api_version,
+        # reasoning_effort=None disables reasoning and allows temperature setting
+        self.vision_llm = create_chat_llm(
+            config=config,
             temperature=0,  # Use 0 temperature for consistent verification
-        ).with_structured_output(VerificationResult)
+            structured_output=VerificationResult,
+            use_vision_model=True,
+            reasoning_effort=None,  # Disable reasoning for verification task
+        )
 
     def verify_redaction(
         self,

@@ -10,11 +10,92 @@
   border-radius: 8px;
 }
 
-.mode-selector label {
-  display: block;
+.toggle-label {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.toggle-text {
   font-weight: 600;
-  margin-bottom: 1rem;
   color: #333;
+  font-size: 1rem;
+}
+
+.toggle-container {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+
+.toggle-option {
+  font-size: 0.9rem;
+  color: #95a5a6;
+  font-weight: 500;
+  transition: color 0.3s;
+}
+
+.toggle-option.active {
+  color: #3498db;
+  font-weight: 600;
+}
+
+.toggle-switch {
+  position: relative;
+  display: inline-block;
+  width: 52px;
+  height: 28px;
+}
+
+.toggle-switch input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.toggle-slider {
+  position: absolute;
+  cursor: pointer;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-color: #ccc;
+  transition: 0.3s;
+  border-radius: 28px;
+}
+
+.toggle-slider:before {
+  position: absolute;
+  content: "";
+  height: 20px;
+  width: 20px;
+  left: 4px;
+  bottom: 4px;
+  background-color: white;
+  transition: 0.3s;
+  border-radius: 50%;
+}
+
+.toggle-switch input:checked + .toggle-slider {
+  background-color: #3498db;
+}
+
+.toggle-switch input:checked + .toggle-slider:before {
+  transform: translateX(24px);
+}
+
+.toggle-switch input:disabled + .toggle-slider {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.mode-description {
+  margin: 0.5rem 0 0 0;
+  font-size: 0.85rem;
+  color: #666;
+  text-align: center;
 }
 
 .radio-group {
@@ -84,8 +165,15 @@
   margin-bottom: 1rem;
 }
 
+.browse-buttons {
+  display: flex;
+  gap: 1rem;
+  justify-content: center;
+  flex-wrap: wrap;
+}
+
 .browse-button {
-  padding: 0.75rem 2rem;
+  padding: 0.75rem 1.5rem;
   background: #3498db;
   color: white;
   border: none;
@@ -93,10 +181,21 @@
   font-size: 1rem;
   cursor: pointer;
   transition: background 0.3s;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
 }
 
 .browse-button:hover {
   background: #2980b9;
+}
+
+.browse-folder {
+  background: #9b59b6;
+}
+
+.browse-folder:hover {
+  background: #8e44ad;
 }
 
 .supported-formats {
@@ -158,6 +257,63 @@
   cursor: not-allowed;
 }
 
+/* Folder upload styles */
+.folder-info {
+  width: 100%;
+  text-align: left;
+}
+
+.folder-header {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 1rem;
+  background: #ffffff;
+  border-radius: 8px;
+  margin-bottom: 1rem;
+}
+
+.folder-file-list {
+  max-height: 200px;
+  overflow-y: auto;
+  background: #f8f9fa;
+  border-radius: 4px;
+  padding: 0.5rem;
+}
+
+.folder-file-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.5rem;
+  border-bottom: 1px solid #eee;
+  font-size: 0.85rem;
+}
+
+.folder-file-item:last-child {
+  border-bottom: none;
+}
+
+.folder-file-name {
+  color: #333;
+  word-break: break-all;
+  flex: 1;
+  margin-right: 1rem;
+}
+
+.folder-file-size {
+  color: #666;
+  white-space: nowrap;
+}
+
+.folder-file-more {
+  padding: 0.5rem;
+  text-align: center;
+  color: #666;
+  font-style: italic;
+  font-size: 0.85rem;
+}
+
 .process-button {
   width: 100%;
   padding: 1rem;
@@ -202,6 +358,201 @@
   color: #155724;
   margin-bottom: 1rem;
   font-weight: 600;
+}
+
+.filename-mapping {
+  background: #f8f9fa;
+  border: 1px solid #dee2e6;
+  border-radius: 8px;
+  padding: 1.5rem;
+  margin-bottom: 1.5rem;
+}
+
+.filename-mapping h3 {
+  margin: 0 0 1rem 0;
+  color: #2c3e50;
+  font-size: 1.1rem;
+}
+
+.filename-comparison {
+  background: white;
+  border-radius: 4px;
+  padding: 1rem;
+  margin-bottom: 1rem;
+}
+
+.filename-item {
+  display: flex;
+  align-items: center;
+  margin-bottom: 0.5rem;
+}
+
+.filename-item:last-child {
+  margin-bottom: 0;
+}
+
+.filename-label {
+  font-weight: 600;
+  color: #7f8c8d;
+  min-width: 100px;
+  font-size: 0.9rem;
+}
+
+.filename-value {
+  color: #2c3e50;
+  font-family: monospace;
+  background: #ecf0f1;
+  padding: 0.25rem 0.5rem;
+  border-radius: 3px;
+  font-size: 0.9rem;
+}
+
+.phi-segments {
+  margin-top: 1rem;
+}
+
+.phi-segments h4 {
+  margin: 0 0 0.75rem 0;
+  color: #34495e;
+  font-size: 1rem;
+}
+
+.phi-segments ul {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.phi-segments li {
+  background: white;
+  padding: 0.75rem;
+  border-radius: 4px;
+  margin-bottom: 0.5rem;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  font-size: 0.9rem;
+}
+
+.phi-segments li:last-child {
+  margin-bottom: 0;
+}
+
+.phi-original {
+  color: #e74c3c;
+  font-family: monospace;
+  font-weight: 600;
+  background: #fee;
+  padding: 0.25rem 0.5rem;
+  border-radius: 3px;
+}
+
+.phi-arrow {
+  color: #95a5a6;
+  font-weight: bold;
+}
+
+.phi-anonymized {
+  color: #27ae60;
+  font-family: monospace;
+  font-weight: 600;
+  background: #efe;
+  padding: 0.25rem 0.5rem;
+  border-radius: 3px;
+}
+
+.phi-category {
+  color: #7f8c8d;
+  font-size: 0.85rem;
+  font-style: italic;
+}
+
+/* Batch results styles */
+.batch-results {
+  background: #f8f9fa;
+  border: 1px solid #dee2e6;
+  border-radius: 8px;
+  padding: 1.5rem;
+  margin-bottom: 1.5rem;
+}
+
+.batch-results h3 {
+  margin: 0 0 1rem 0;
+  color: #2c3e50;
+  font-size: 1.1rem;
+}
+
+.batch-file-list {
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+.batch-file-item {
+  display: flex;
+  align-items: center;
+  padding: 0.75rem;
+  background: white;
+  border-radius: 4px;
+  margin-bottom: 0.5rem;
+  font-size: 0.85rem;
+  gap: 0.5rem;
+}
+
+.batch-file-item:last-child {
+  margin-bottom: 0;
+}
+
+.batch-file-item.error {
+  background: #fee;
+  border: 1px solid #fcc;
+}
+
+.batch-file-original {
+  color: #666;
+  word-break: break-all;
+  flex: 1;
+}
+
+.batch-file-arrow {
+  color: #95a5a6;
+  font-weight: bold;
+  flex-shrink: 0;
+}
+
+.batch-file-anonymized {
+  color: #27ae60;
+  word-break: break-all;
+  flex: 1;
+}
+
+.batch-file-item.error .batch-file-anonymized {
+  color: #c33;
+}
+
+.batch-file-more {
+  padding: 0.75rem;
+  text-align: center;
+  color: #666;
+  font-style: italic;
+}
+
+.warning-text {
+  color: #e67e22;
+}
+
+.processing-progress {
+  font-size: 1rem;
+  margin: 0.25rem 0;
+}
+
+.processing-current-file {
+  font-size: 0.85rem;
+  opacity: 0.7;
+  margin: 0.25rem 0;
+  max-width: 400px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .result-actions {

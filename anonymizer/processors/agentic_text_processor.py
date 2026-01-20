@@ -14,13 +14,14 @@ from datetime import datetime
 from typing import List, Dict, Optional, Set, Tuple
 import random
 
-from langchain_openai import AzureChatOpenAI
 from langchain_core.messages import HumanMessage, ToolMessage
 from pydantic import BaseModel, Field
 
 from ..base_processor import FileProcessor
 from ..config import AnonymizerConfig
+from ..llm_factory import create_chat_llm
 from ..tools.time_shift_tool import shift_datetime, redact_text, restore_text
+from ..retry_utils import retry_with_backoff, RetryConfig, create_retry_callback
 
 
 class DateTimeShift(BaseModel):
@@ -56,38 +57,38 @@ class AgenticTextProcessor(FileProcessor):
         else:
             self.time_offset_days = time_offset_days
 
+        # Configure retry settings for LLM calls
+        self.retry_config = RetryConfig(
+            max_retries=3,
+            initial_delay=2.0,
+            max_delay=60.0,
+            exponential_base=2.0,
+            jitter=True,
+        )
+
         # Initialize LLM with tools for phase 1 (time shifting - only needed if LLM finds additional dates)
-        self.llm_with_tools = AzureChatOpenAI(
-            azure_deployment=config.azure_deployment_name,
-            azure_endpoint=config.azure_endpoint,
-            api_key=config.azure_api_key,
-            api_version=config.azure_api_version,
-            temperature=config.temperature,
+        self.llm_with_tools = create_chat_llm(
+            config=config,
             timeout=600,
             max_tokens=16000,
-        ).bind_tools([shift_datetime])
+            tools=[shift_datetime],
+        )
 
         # Initialize LLM with tools for phase 2 (PII anonymization)
-        self.llm_anonymize = AzureChatOpenAI(
-            azure_deployment=config.azure_deployment_name,
-            azure_endpoint=config.azure_endpoint,
-            api_key=config.azure_api_key,
-            api_version=config.azure_api_version,
-            temperature=config.temperature,
+        self.llm_anonymize = create_chat_llm(
+            config=config,
             timeout=600,
             max_tokens=16000,
-        ).bind_tools([redact_text])
+            tools=[redact_text],
+        )
 
         # Initialize LLM with tools for phase 3 (verification)
-        self.llm_verify = AzureChatOpenAI(
-            azure_deployment=config.azure_deployment_name,
-            azure_endpoint=config.azure_endpoint,
-            api_key=config.azure_api_key,
-            api_version=config.azure_api_version,
-            temperature=config.temperature,
+        self.llm_verify = create_chat_llm(
+            config=config,
             timeout=600,
             max_tokens=16000,
-        ).bind_tools([shift_datetime, redact_text, restore_text])
+            tools=[shift_datetime, redact_text, restore_text],
+        )
 
     def can_process(self, file_path: Path) -> bool:
         """Check if file is a text file (.txt or .hea ECG header)."""
@@ -421,11 +422,19 @@ Example calls:
         max_iterations = 50
         iteration = 0
 
+        def invoke_llm_with_retry(msgs):
+            """Invoke LLM with retry logic."""
+            return retry_with_backoff(
+                lambda: self.llm_anonymize.invoke(msgs),
+                config=self.retry_config,
+                on_retry=create_retry_callback(prefix="    [LLM] "),
+            )
+
         while iteration < max_iterations:
             iteration += 1
 
             try:
-                response = self.llm_anonymize.invoke(messages)
+                response = invoke_llm_with_retry(messages)
                 messages.append(response)
 
                 if not response.tool_calls:
@@ -585,11 +594,19 @@ Call the appropriate tool for each issue you find. When done, summarize your fin
         max_iterations = 30
         iteration = 0
 
+        def invoke_verify_with_retry(msgs):
+            """Invoke verification LLM with retry logic."""
+            return retry_with_backoff(
+                lambda: self.llm_verify.invoke(msgs),
+                config=self.retry_config,
+                on_retry=create_retry_callback(prefix="    [Verify] "),
+            )
+
         while iteration < max_iterations:
             iteration += 1
 
             try:
-                response = self.llm_verify.invoke(messages)
+                response = invoke_verify_with_retry(messages)
                 messages.append(response)
 
                 if not response.tool_calls:

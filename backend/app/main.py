@@ -1,14 +1,17 @@
 from fastapi import FastAPI, File, UploadFile, HTTPException, Form
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
-from typing import Optional
+from typing import Optional, List, Dict
 import os
 import sys
 from pathlib import Path
 import tempfile
 import shutil
 import uuid
+import zipfile
+import asyncio
+import json
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -24,6 +27,8 @@ from anonymizer.processors.csv_processor import CSVProcessor
 from anonymizer.processors.text_processor import TextProcessor
 from anonymizer.processors.dicom_processor import DICOMProcessor
 from anonymizer.processors.pdf_ocr_processor import PDFOCRProcessor
+from anonymizer.processors.agentic_csv_processor import AgenticCSVProcessor
+from anonymizer.processors.agentic_text_processor import AgenticTextProcessor
 from anonymizer.config import AnonymizerConfig
 from anonymizer.filename_anonymizer import FilenameAnonymizer
 
@@ -50,6 +55,9 @@ config: Optional[AnonymizerConfig] = None
 # Temporary directory for processing files
 TEMP_DIR = Path(tempfile.gettempdir()) / "phi_anonymization"
 TEMP_DIR.mkdir(exist_ok=True)
+
+# Progress tracking for jobs
+job_progress: Dict[str, Dict] = {}
 
 
 class CustomLLMConfig(BaseModel):
@@ -93,6 +101,7 @@ async def use_dev_config():
             )
 
         config = AnonymizerConfig(
+            llm_provider="azure",
             azure_endpoint=azure_endpoint,
             azure_api_key=azure_api_key,
             azure_deployment_name=azure_deployment,
@@ -146,10 +155,38 @@ async def get_config_status():
     }
 
 
+@app.get("/api/progress/{job_id}")
+async def get_progress(job_id: str):
+    """SSE endpoint for real-time progress updates."""
+    async def event_generator():
+        while True:
+            if job_id in job_progress:
+                progress = job_progress[job_id]
+                yield f"data: {json.dumps(progress)}\n\n"
+
+                if progress.get("status") in ["completed", "error"]:
+                    # Clean up progress tracking
+                    del job_progress[job_id]
+                    break
+
+            await asyncio.sleep(0.3)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"
+        }
+    )
+
+
 @app.post("/api/process")
 async def process_file(
     file: UploadFile = File(...),
-    mode: str = Form(default="auto")  # auto, vision, ocr
+    mode: str = Form(default="auto"),  # auto, vision, ocr
+    use_agentic: bool = Form(default=False)  # Use agentic processors for CSV/text
 ):
     """
     Process an uploaded file for PHI anonymization.
@@ -157,6 +194,7 @@ async def process_file(
     Args:
         file: The file to process (PNG, JPG, CSV, TXT, DICOM, PDF)
         mode: Processing mode - 'auto' (LLM detection)
+        use_agentic: If True, use agentic processors (tool-calling) for CSV and text files
     """
     if config is None:
         raise HTTPException(
@@ -220,9 +258,9 @@ async def process_file(
             elif detection_result.suggested_processor == "ocr":
                 processor = PNGOCRProcessor(config)
             elif detection_result.suggested_processor == "text":
-                processor = TextProcessor(config)
+                processor = AgenticTextProcessor(config) if use_agentic else TextProcessor(config)
             elif detection_result.suggested_processor == "csv":
-                processor = CSVProcessor(config)
+                processor = AgenticCSVProcessor(config) if use_agentic else CSVProcessor(config)
             elif detection_result.suggested_processor == "dicom":
                 processor = DICOMProcessor(config, save_intermediate=True)
             elif detection_result.suggested_processor == "pdf_ocr":
@@ -230,8 +268,20 @@ async def process_file(
 
         # If LLM detection didn't work, try extension-based detection
         if processor is None or not processor.can_process(input_path):
+            # Build processor list - use agentic versions for CSV/text if requested
+            if use_agentic:
+                processor_classes = [
+                    DICOMProcessor, PDFOCRProcessor, PNGProcessor, PNGOCRProcessor,
+                    AgenticTextProcessor, AgenticCSVProcessor
+                ]
+            else:
+                processor_classes = [
+                    DICOMProcessor, PDFOCRProcessor, PNGProcessor, PNGOCRProcessor,
+                    TextProcessor, CSVProcessor
+                ]
+
             # Try all processors to find a match
-            for proc_class in [DICOMProcessor, PDFOCRProcessor, PNGProcessor, PNGOCRProcessor, TextProcessor, CSVProcessor]:
+            for proc_class in processor_classes:
                 if proc_class == DICOMProcessor:
                     test_processor = proc_class(config, save_intermediate=True)
                 else:
@@ -295,6 +345,231 @@ async def process_file(
         # Clean up on unexpected errors
         shutil.rmtree(job_dir, ignore_errors=True)
         raise HTTPException(status_code=500, detail=f"Processing error: {str(e)}")
+
+
+@app.post("/api/process-folder")
+async def process_folder(
+    files: List[UploadFile] = File(...),
+    paths: List[str] = Form(...),
+    mode: str = Form(default="auto"),
+    use_agentic: bool = Form(default=False),
+    job_id: Optional[str] = Form(default=None)
+):
+    """
+    Process multiple uploaded files (folder) for PHI anonymization.
+
+    Args:
+        files: List of files to process
+        paths: List of relative paths corresponding to each file
+        mode: Processing mode - 'auto' (LLM detection)
+        use_agentic: If True, use agentic processors for CSV and text files
+        job_id: Optional job ID for progress tracking (generated if not provided)
+    """
+    if config is None:
+        raise HTTPException(
+            status_code=400,
+            detail="LLM configuration not set. Please configure the API endpoint first."
+        )
+
+    # Use provided job ID or generate a new one
+    if not job_id:
+        job_id = str(uuid.uuid4())
+    total_files = len(files)
+
+    # Initialize progress tracking
+    job_progress[job_id] = {
+        "status": "processing",
+        "current": 0,
+        "total": total_files,
+        "current_file": ""
+    }
+
+    # Create job-specific directory
+    job_dir = TEMP_DIR / job_id
+    job_dir.mkdir(exist_ok=True)
+    input_dir = job_dir / "input"
+    input_dir.mkdir(exist_ok=True)
+    output_dir = job_dir / "output"
+    output_dir.mkdir(exist_ok=True)
+
+    file_results = []
+    files_processed = 0
+    files_failed = 0
+
+    # Initialize filename anonymizer
+    filename_anonymizer = FilenameAnonymizer(config)
+
+    try:
+        # Save all uploaded files first
+        saved_files = []
+        for file, rel_path in zip(files, paths):
+            # Create directory structure if needed
+            file_input_path = input_dir / rel_path
+            file_input_path.parent.mkdir(parents=True, exist_ok=True)
+
+            with open(file_input_path, "wb") as buffer:
+                shutil.copyfileobj(file.file, buffer)
+
+            saved_files.append((file_input_path, rel_path))
+
+        # Process each file
+        for idx, (input_path, rel_path) in enumerate(saved_files):
+            # Update progress
+            job_progress[job_id] = {
+                "status": "processing",
+                "current": idx + 1,
+                "total": total_files,
+                "current_file": rel_path
+            }
+            try:
+                # Anonymize filename
+                filename_result = filename_anonymizer.anonymize_filename(
+                    input_path.name,
+                    is_directory=False,
+                    folder_path=str(Path(rel_path).parent) if '/' in rel_path else job_id
+                )
+                output_filename = filename_result.anonymized_filename
+
+                # Preserve directory structure in output
+                rel_output_dir = output_dir / Path(rel_path).parent
+                rel_output_dir.mkdir(parents=True, exist_ok=True)
+                output_path = rel_output_dir / output_filename
+
+                # Determine processor
+                processor = None
+
+                if mode == "auto":
+                    detector = FileTypeDetector(config)
+                    detection_result = detector.detect_file_type(input_path)
+
+                    if detection_result.data_type != DataType.UNKNOWN:
+                        if detection_result.suggested_processor == "vision":
+                            processor = PNGProcessor(config)
+                        elif detection_result.suggested_processor == "ocr":
+                            processor = PNGOCRProcessor(config)
+                        elif detection_result.suggested_processor == "text":
+                            processor = AgenticTextProcessor(config) if use_agentic else TextProcessor(config)
+                        elif detection_result.suggested_processor == "csv":
+                            processor = AgenticCSVProcessor(config) if use_agentic else CSVProcessor(config)
+                        elif detection_result.suggested_processor == "dicom":
+                            processor = DICOMProcessor(config, save_intermediate=False)
+                        elif detection_result.suggested_processor == "pdf_ocr":
+                            processor = PDFOCRProcessor(config)
+
+                # Fallback to extension-based detection
+                if processor is None or not processor.can_process(input_path):
+                    if use_agentic:
+                        processor_classes = [
+                            DICOMProcessor, PDFOCRProcessor, PNGProcessor, PNGOCRProcessor,
+                            AgenticTextProcessor, AgenticCSVProcessor
+                        ]
+                    else:
+                        processor_classes = [
+                            DICOMProcessor, PDFOCRProcessor, PNGProcessor, PNGOCRProcessor,
+                            TextProcessor, CSVProcessor
+                        ]
+
+                    for proc_class in processor_classes:
+                        if proc_class == DICOMProcessor:
+                            test_processor = proc_class(config, save_intermediate=False)
+                        else:
+                            test_processor = proc_class(config)
+
+                        if test_processor.can_process(input_path):
+                            processor = test_processor
+                            break
+
+                if processor is None:
+                    file_results.append({
+                        "original_path": rel_path,
+                        "status": "error",
+                        "error": "No suitable processor found"
+                    })
+                    files_failed += 1
+                    continue
+
+                # Process the file
+                processor.anonymize(input_path, output_path)
+
+                if output_path.exists():
+                    file_results.append({
+                        "original_path": rel_path,
+                        "anonymized_filename": output_filename,
+                        "status": "success"
+                    })
+                    files_processed += 1
+                else:
+                    file_results.append({
+                        "original_path": rel_path,
+                        "status": "error",
+                        "error": "Output file not generated"
+                    })
+                    files_failed += 1
+
+            except Exception as e:
+                file_results.append({
+                    "original_path": rel_path,
+                    "status": "error",
+                    "error": str(e)
+                })
+                files_failed += 1
+
+        # Create ZIP archive of all output files
+        zip_filename = f"anonymized_{job_id[:8]}.zip"
+        zip_path = job_dir / zip_filename
+
+        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            for root, dirs, files_in_dir in os.walk(output_dir):
+                for file in files_in_dir:
+                    file_path = Path(root) / file
+                    arcname = file_path.relative_to(output_dir)
+                    zipf.write(file_path, arcname)
+
+        # Mark progress as completed
+        job_progress[job_id] = {
+            "status": "completed",
+            "current": total_files,
+            "total": total_files,
+            "current_file": ""
+        }
+
+        return {
+            "status": "success",
+            "job_id": job_id,
+            "message": f"Processed {files_processed} files ({files_failed} failed)",
+            "files_processed": files_processed,
+            "files_failed": files_failed,
+            "file_results": file_results,
+            "download_url": f"/api/download-zip/{job_id}/{zip_filename}",
+            "is_batch": True
+        }
+
+    except Exception as e:
+        # Mark progress as error
+        if job_id in job_progress:
+            job_progress[job_id] = {
+                "status": "error",
+                "current": 0,
+                "total": total_files,
+                "error": str(e)
+            }
+        shutil.rmtree(job_dir, ignore_errors=True)
+        raise HTTPException(status_code=500, detail=f"Processing error: {str(e)}")
+
+
+@app.get("/api/download-zip/{job_id}/{filename}")
+async def download_zip(job_id: str, filename: str):
+    """Download a ZIP archive of anonymized files."""
+    file_path = TEMP_DIR / job_id / filename
+
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="ZIP file not found")
+
+    return FileResponse(
+        path=file_path,
+        filename=filename,
+        media_type="application/zip"
+    )
 
 
 @app.get("/api/download/{job_id}/{filename}")

@@ -7,11 +7,11 @@ from pathlib import Path
 from typing import Optional
 import base64
 
-from langchain_openai import AzureChatOpenAI
 from langchain_core.messages import HumanMessage
 from pydantic import BaseModel, Field
 
 from .config import AnonymizerConfig
+from .llm_factory import create_chat_llm
 
 
 class DataType(str, Enum):
@@ -41,13 +41,14 @@ class FileTypeDetector:
         self.config = config
 
         # Initialize LLM for file type detection
-        self.llm = AzureChatOpenAI(
-            azure_deployment=config.azure_deployment_name,
-            azure_endpoint=config.azure_endpoint,
-            api_key=config.azure_api_key,
-            api_version=config.azure_api_version,
+        # reasoning_effort=None disables reasoning and allows temperature setting
+        self.llm = create_chat_llm(
+            config=config,
             temperature=0.0,  # Use deterministic classification
-        ).with_structured_output(FileTypeResult)
+            structured_output=FileTypeResult,
+            use_vision_model=True,  # File type detection may need vision capability
+            reasoning_effort=None,  # Disable reasoning for simple classification task
+        )
 
     def detect_file_type(self, file_path: Path) -> FileTypeResult:
         """

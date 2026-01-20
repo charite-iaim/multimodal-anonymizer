@@ -28,11 +28,13 @@ class ProcessingResult:
     success: bool
     error: Optional[str] = None
     processing_time: float = 0.0
+    retries_attempted: int = 0
+    is_retryable_error: bool = False
 
 
 def _process_file_worker(job_data: Dict[str, Any]) -> ProcessingResult:
     """
-    Worker function to process a single file.
+    Worker function to process a single file with retry logic.
     This runs in a separate process.
 
     Args:
@@ -43,13 +45,30 @@ def _process_file_worker(job_data: Dict[str, Any]) -> ProcessingResult:
     """
     from anonymizer import AnonymizerConfig
     from anonymizer.filename_anonymizer import FilenameAnonymizer
+    from anonymizer.retry_utils import (
+        RetryConfig, retry_with_backoff, is_retryable_error as check_retryable
+    )
     import traceback
 
     start_time = time.time()
+    retries_attempted = 0
+    max_retries = job_data.get('max_retries', 3)
 
-    try:
+    # Configure retry for this worker
+    retry_config = RetryConfig(
+        max_retries=max_retries,
+        initial_delay=2.0,
+        max_delay=120.0,
+        exponential_base=2.0,
+        jitter=True,
+    )
+
+    input_path = Path(job_data['input_path'])
+
+    def process_with_retry():
+        nonlocal retries_attempted
+        
         # Extract job data
-        input_path = Path(job_data['input_path'])
         output_dir = Path(job_data['output_dir'])
         config_dict = job_data['config']
         use_ocr = job_data['use_ocr']
@@ -60,7 +79,7 @@ def _process_file_worker(job_data: Dict[str, Any]) -> ProcessingResult:
         anonymize_paths = job_data['anonymize_paths']
         anonymized_filename = job_data.get('anonymized_filename')
         folder_path = job_data.get('folder_path', '')
-        time_offset_days = job_data.get('time_offset_days')  # Patient-specific time offset
+        time_offset_days = job_data.get('time_offset_days')
 
         # Recreate config from dict
         config = AnonymizerConfig(
@@ -78,13 +97,7 @@ def _process_file_worker(job_data: Dict[str, Any]) -> ProcessingResult:
             processor = get_processor(input_path, config, use_ocr, use_llm_detection)
 
         if processor is None:
-            return ProcessingResult(
-                input_path=input_path,
-                output_path=None,
-                success=False,
-                error=f"No processor available for: {input_path.name}",
-                processing_time=time.time() - start_time
-            )
+            raise ValueError(f"No processor available for: {input_path.name}")
 
         # Determine output path
         if preserve_structure and anonymized_relative_path:
@@ -92,7 +105,6 @@ def _process_file_worker(job_data: Dict[str, Any]) -> ProcessingResult:
             file_output_dir.mkdir(parents=True, exist_ok=True)
             output_path = file_output_dir / anonymized_filename
         else:
-            # Create separate output folder for this file
             file_stem = input_path.stem
             file_output_dir = output_dir / file_stem
             file_output_dir.mkdir(parents=True, exist_ok=True)
@@ -100,26 +112,58 @@ def _process_file_worker(job_data: Dict[str, Any]) -> ProcessingResult:
 
         # Process the file
         processor.anonymize(input_path, output_path)
+        return output_path
 
+    def on_retry(attempt, error, delay):
+        nonlocal retries_attempted
+        retries_attempted = attempt
+        print(f"    Retry {attempt}/{max_retries} for {input_path.name}: {type(error).__name__} - waiting {delay:.1f}s")
+
+    try:
+        output_path = retry_with_backoff(
+            process_with_retry,
+            config=retry_config,
+            on_retry=on_retry,
+        )
+        
         processing_time = time.time() - start_time
-
         return ProcessingResult(
             input_path=input_path,
             output_path=output_path,
             success=True,
-            processing_time=processing_time
+            processing_time=processing_time,
+            retries_attempted=retries_attempted,
+            is_retryable_error=False,
+        )
+
+    except ValueError as e:
+        # No processor available - not a retryable error
+        processing_time = time.time() - start_time
+        return ProcessingResult(
+            input_path=input_path,
+            output_path=None,
+            success=False,
+            error=str(e),
+            processing_time=processing_time,
+            retries_attempted=retries_attempted,
+            is_retryable_error=False,
         )
 
     except Exception as e:
         processing_time = time.time() - start_time
         error_msg = f"{str(e)}\n{traceback.format_exc()}"
+        
+        # Check if this is a retryable error (for potential later retry)
+        is_retryable = check_retryable(e, retry_config)
 
         return ProcessingResult(
-            input_path=Path(job_data['input_path']),
+            input_path=input_path,
             output_path=None,
             success=False,
             error=error_msg,
-            processing_time=processing_time
+            processing_time=processing_time,
+            retries_attempted=retries_attempted,
+            is_retryable_error=is_retryable,
         )
 
 
@@ -136,7 +180,8 @@ class ParallelFileProcessor:
         use_llm_detection: bool = False,
         preserve_structure: bool = True,
         anonymize_paths: bool = True,
-        processor_module: str = 'anonymize'
+        processor_module: str = 'anonymize',
+        max_retries: int = 3
     ):
         """
         Initialize parallel processor.
@@ -149,6 +194,7 @@ class ParallelFileProcessor:
             preserve_structure: If True, preserve directory structure in output
             anonymize_paths: If True, anonymize file and folder names
             processor_module: Module to import get_processor from ('anonymize' or 'anonymize_agentic')
+            max_retries: Maximum number of retries for failed API calls (default: 3)
         """
         self.config = config
         self.use_ocr = use_ocr
@@ -156,6 +202,7 @@ class ParallelFileProcessor:
         self.preserve_structure = preserve_structure
         self.anonymize_paths = anonymize_paths
         self.processor_module = processor_module
+        self.max_retries = max_retries
 
         # Determine number of workers
         if num_workers is None:
@@ -204,9 +251,13 @@ class ParallelFileProcessor:
                     if result.success:
                         status = "✓"
                         msg = f"Completed: {result.input_path.name}"
+                        if result.retries_attempted > 0:
+                            msg += f" (after {result.retries_attempted} retries)"
                     else:
                         status = "✗"
                         msg = f"Failed: {result.input_path.name}"
+                        if result.retries_attempted > 0:
+                            msg += f" (after {result.retries_attempted} retries)"
                         if result.error:
                             # Show first line of error only
                             error_line = result.error.split('\n')[0]
@@ -224,7 +275,8 @@ class ParallelFileProcessor:
         anonymized_relative_path: Optional[Path] = None,
         anonymized_filename: Optional[str] = None,
         folder_path: str = '',
-        time_offset_days: Optional[int] = None
+        time_offset_days: Optional[int] = None,
+        max_retries: Optional[int] = None
     ) -> Dict[str, Any]:
         """
         Create a job dictionary for parallel processing.
@@ -237,6 +289,7 @@ class ParallelFileProcessor:
             anonymized_filename: Pre-computed anonymized filename
             folder_path: Folder path for uniqueness
             time_offset_days: Patient-specific time offset in days for date shifting
+            max_retries: Maximum retries for this job (uses processor default if not set)
 
         Returns:
             Job dictionary
@@ -260,7 +313,8 @@ class ParallelFileProcessor:
             'anonymized_filename': anonymized_filename,
             'folder_path': folder_path,
             'processor_module': self.processor_module,
-            'time_offset_days': time_offset_days
+            'time_offset_days': time_offset_days,
+            'max_retries': max_retries if max_retries is not None else self.max_retries,
         }
 
 

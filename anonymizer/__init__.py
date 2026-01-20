@@ -14,6 +14,7 @@ from .processors.agentic_text_processor import AgenticTextProcessor
 from .processors.agentic_csv_processor import AgenticCSVProcessor
 from .file_type_detector import FileTypeDetector, DataType, FileTypeResult
 from .processing_tracker import ProcessingTracker
+from .retry_utils import RetryConfig, retry_with_backoff, with_retry
 
 __all__ = [
     "AnonymizerConfig",
@@ -30,4 +31,7 @@ __all__ = [
     "DataType",
     "FileTypeResult",
     "ProcessingTracker",
+    "RetryConfig",
+    "retry_with_backoff",
+    "with_retry",
 ]

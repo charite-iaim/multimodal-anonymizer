@@ -419,7 +419,7 @@ def _process_directory_parallel(
     if anonymize_paths:
         filename_anonymizer = FilenameAnonymizer(config, output_dir=output_dir)
 
-        # Pre-anonymize all folder names
+        # Pre-anonymize all folder names (skip already anonymized ones)
         print("Anonymizing folder names...")
         unique_folders = set()
         for file_path in files_to_process:
@@ -428,14 +428,28 @@ def _process_directory_parallel(
             for part in relative_path.parent.parts:
                 unique_folders.add(part)
 
+        already_anonymized_folders = 0
+        newly_anonymized_folders = 0
         for folder_name in sorted(unique_folders):
-            result = filename_anonymizer.anonymize_filename(folder_name, is_directory=True)
-            folder_mapping[folder_name] = result.anonymized_filename
-            filename_anonymizer.add_folder_mapping(
-                original_foldername=folder_name,
-                anonymized_foldername=result.anonymized_filename,
-                phi_detections=result.phi_detections
-            )
+            # Check if folder was already anonymized
+            existing_mapping = filename_anonymizer.get_existing_folder_mapping(folder_name)
+            if existing_mapping:
+                folder_mapping[folder_name] = existing_mapping
+                already_anonymized_folders += 1
+            else:
+                result = filename_anonymizer.anonymize_filename(folder_name, is_directory=True)
+                folder_mapping[folder_name] = result.anonymized_filename
+                filename_anonymizer.add_folder_mapping(
+                    original_foldername=folder_name,
+                    anonymized_foldername=result.anonymized_filename,
+                    phi_detections=result.phi_detections
+                )
+                newly_anonymized_folders += 1
+
+        if already_anonymized_folders > 0:
+            print(f"  Skipped {already_anonymized_folders} already anonymized folders")
+        if newly_anonymized_folders > 0:
+            print(f"  Anonymized {newly_anonymized_folders} new folders")
 
     # Generate patient-specific time offsets
     # Each top-level folder (patient folder) gets a unique random time offset
@@ -464,12 +478,20 @@ def _process_directory_parallel(
         use_llm_detection=use_llm_detection,
         preserve_structure=preserve_structure,
         anonymize_paths=anonymize_paths,
-        processor_module='anonymize_agentic'
+        processor_module='anonymize_agentic',
+        max_retries=3  # Initial retry count per file
     )
 
     # Create jobs for all files
     jobs = []
-    for file_path in files_to_process:
+    job_lookup = {}  # Map file path to job data for retries
+    total_files = len(files_to_process)
+    print(f"Anonymizing {total_files} filenames (this may take a while with LLM-based anonymization)...")
+
+    already_anonymized_files = 0
+    newly_anonymized_files = 0
+
+    for i, file_path in enumerate(files_to_process):
         relative_path = file_path.relative_to(input_dir)
 
         # Build anonymized relative path (all folder parts, not the filename)
@@ -487,21 +509,33 @@ def _process_directory_parallel(
             original_folder_path = str(relative_path.parent) if relative_path.parent != Path('.') else ""
             # Use anonymized folder_path for CSV output location
             anonymized_folder_path = str(anonymized_relative_path) if anonymized_relative_path != Path('.') else ""
-            
-            anonymization_result = filename_anonymizer.anonymize_filename(
-                file_path.name,
-                is_directory=False,
-                folder_path=original_folder_path
-            )
-            anonymized_filename = anonymization_result.anonymized_filename
 
-            # Record file mapping using anonymized folder path for correct output location
-            filename_anonymizer.add_file_mapping(
-                folder_path=anonymized_folder_path,
-                original_filename=file_path.name,
-                anonymized_filename=anonymized_filename,
-                phi_detections=anonymization_result.phi_detections
+            # Check if file was already anonymized
+            existing_file_mapping = filename_anonymizer.get_existing_file_mapping(
+                anonymized_folder_path, file_path.name
             )
+            if existing_file_mapping:
+                anonymized_filename = existing_file_mapping
+                already_anonymized_files += 1
+                print(f"  [{i+1}/{total_files}] Already anonymized: {file_path.name} -> {anonymized_filename}")
+            else:
+                print(f"  [{i+1}/{total_files}] Anonymizing: {file_path.name}", end=" ", flush=True)
+                anonymization_result = filename_anonymizer.anonymize_filename(
+                    file_path.name,
+                    is_directory=False,
+                    folder_path=original_folder_path
+                )
+                anonymized_filename = anonymization_result.anonymized_filename
+                print(f"-> {anonymized_filename}")
+                newly_anonymized_files += 1
+
+                # Record file mapping using anonymized folder path for correct output location
+                filename_anonymizer.add_file_mapping(
+                    folder_path=anonymized_folder_path,
+                    original_filename=file_path.name,
+                    anonymized_filename=anonymized_filename,
+                    phi_detections=anonymization_result.phi_detections
+                )
         else:
             anonymized_filename = f"anonymized_{file_path.name}"
 
@@ -522,13 +556,22 @@ def _process_directory_parallel(
             time_offset_days=time_offset
         )
         jobs.append(job)
+        # Also store job data for potential retry
+        job_lookup[str(file_path)] = job
+
+    # Print filename anonymization summary
+    if anonymize_paths:
+        print(f"\nFilename anonymization summary:")
+        print(f"  Already anonymized: {already_anonymized_files}")
+        print(f"  Newly anonymized: {newly_anonymized_files}")
 
     # Process all files in parallel
     results = parallel_processor.process_files_parallel(jobs, show_progress=True)
 
-    # Update tracker with results
+    # Update tracker with results and collect failed files
     successful = 0
     failed = 0
+    retryable_failed = []
 
     for result in results:
         if result.success:
@@ -538,13 +581,91 @@ def _process_directory_parallel(
         else:
             failed += 1
             if tracker:
-                tracker.mark_file_processed(result.input_path, result.output_path, success=False)
+                tracker.mark_file_processed(
+                    result.input_path, 
+                    result.output_path, 
+                    success=False,
+                    error=result.error,
+                    is_retryable=result.is_retryable_error,
+                    retries_attempted=result.retries_attempted
+                )
+            if result.is_retryable_error:
+                retryable_failed.append(result.input_path)
             print(f"\nError processing {result.input_path.name}:")
             if result.error:
                 # Print first few lines of error
                 error_lines = result.error.split('\n')[:3]
                 for line in error_lines:
                     print(f"  {line}")
+
+    # Retry loop for retryable failures
+    max_global_retries = 3
+    retry_round = 0
+    
+    while retryable_failed and retry_round < max_global_retries:
+        retry_round += 1
+        print(f"\n{'='*60}")
+        print(f"RETRY ROUND {retry_round}/{max_global_retries}: {len(retryable_failed)} files to retry")
+        print(f"{'='*60}")
+        
+        # Wait a bit before retrying to allow rate limits to reset
+        wait_time = 30 * retry_round  # Progressive wait: 30s, 60s, 90s
+        print(f"Waiting {wait_time} seconds before retry...")
+        time.sleep(wait_time)
+        
+        # Create retry jobs with increased max_retries
+        retry_jobs = []
+        for file_path in retryable_failed:
+            job_data = job_lookup.get(str(file_path))
+            if job_data:
+                # Increase max_retries for this retry round
+                job_data['max_retries'] = 5
+                retry_jobs.append(job_data)
+        
+        # Clear failed status from tracker to allow reprocessing
+        for file_path in retryable_failed:
+            if tracker:
+                tracker.clear_file(file_path)
+        
+        # Process retries
+        retry_results = parallel_processor.process_files_parallel(retry_jobs, show_progress=True)
+        
+        # Update counts and tracker
+        new_retryable_failed = []
+        for result in retry_results:
+            if result.success:
+                successful += 1
+                failed -= 1
+                if tracker:
+                    tracker.mark_file_processed(result.input_path, result.output_path, success=True)
+                print(f"  ✓ Successfully processed on retry: {result.input_path.name}")
+            else:
+                if tracker:
+                    tracker.mark_file_processed(
+                        result.input_path, 
+                        result.output_path, 
+                        success=False,
+                        error=result.error,
+                        is_retryable=result.is_retryable_error,
+                        retries_attempted=result.retries_attempted
+                    )
+                if result.is_retryable_error:
+                    new_retryable_failed.append(result.input_path)
+                else:
+                    print(f"  ✗ Non-retryable error for: {result.input_path.name}")
+        
+        retryable_failed = new_retryable_failed
+        
+        if not retryable_failed:
+            print(f"\n✓ All retryable files have been successfully processed!")
+            break
+    
+    if retryable_failed:
+        print(f"\n{'='*60}")
+        print(f"WARNING: {len(retryable_failed)} files still failed after {max_global_retries} retry rounds:")
+        for fp in retryable_failed:
+            print(f"  - {fp.name}")
+        print(f"\nRun the command again to retry these files.")
 
     # Save mappings
     if anonymize_paths and filename_anonymizer:
@@ -564,9 +685,19 @@ def _process_directory_parallel(
     print(f"  Failed: {failed}")
     print(f"  Skipped: {skipped}")
     print(f"  Total processed: {successful + failed}")
-    print(f"  Average time per file: {elapsed_time / len(files_to_process):.2f}s")
+    if len(files_to_process) > 0:
+        print(f"  Average time per file: {elapsed_time / len(files_to_process):.2f}s")
 
-    return {"successful": successful, "failed": failed, "skipped": skipped}
+    # Final verification message
+    if failed == 0:
+        print(f"\n✅ SUCCESS: All {successful} files have been processed successfully!")
+    elif len(retryable_failed) == 0 and failed > 0:
+        print(f"\n⚠️  COMPLETED WITH ERRORS: {successful} succeeded, {failed} failed (non-retryable)")
+    else:
+        print(f"\n⚠️  INCOMPLETE: {successful} succeeded, {len(retryable_failed)} retryable failures remaining")
+        print(f"   Run with --retry-failed to retry failed files")
+
+    return {"successful": successful, "failed": failed, "skipped": skipped, "retryable_remaining": len(retryable_failed)}
 
 
 def process_directory_recursive(
@@ -836,6 +967,22 @@ def main():
         "--workers", "-w", type=int, default=None,
         help="Number of parallel workers (default: CPU count - 1)"
     )
+    parser.add_argument(
+        "--retry-failed", action="store_true",
+        help="Only retry previously failed files from the tracking file (requires --tracking-file)"
+    )
+    parser.add_argument(
+        "--max-retries", type=int, default=3,
+        help="Maximum number of retries per file for transient errors (default: 3)"
+    )
+    parser.add_argument(
+        "--retry-rounds", type=int, default=3,
+        help="Maximum number of global retry rounds for failed files at the end (default: 3)"
+    )
+    parser.add_argument(
+        "--provider", type=str, choices=["azure", "fireworks"], default=None,
+        help="LLM provider to use (azure or fireworks). Overrides LLM_PROVIDER environment variable."
+    )
 
     args = parser.parse_args()
 
@@ -844,11 +991,15 @@ def main():
     # Invert the flag - default is to use parallel processing
     parallel = not args.no_parallel
 
-    # Create config
-    config = AnonymizerConfig(
-        output_dir=args.output,
-        save_debug_files=args.debug,
-    )
+    # Create config with optional provider override
+    config_kwargs = {
+        "output_dir": args.output,
+        "save_debug_files": args.debug,
+    }
+    if args.provider:
+        config_kwargs["llm_provider"] = args.provider
+
+    config = AnonymizerConfig(**config_kwargs)
 
     input_path = Path(args.input)
     output_dir = Path(args.output)
@@ -868,10 +1019,43 @@ def main():
             tracker.save()
             print("Tracking data cleared.\n")
 
+    # Handle --retry-failed mode
+    if args.retry_failed:
+        if not tracker:
+            print("Error: --retry-failed requires --tracking-file to be specified")
+            return
+        
+        failed_files = tracker.get_failed_files()
+        if not failed_files:
+            print("No failed files found in tracking data.")
+            return
+        
+        print(f"\n{'='*60}")
+        print(f"RETRY MODE: Processing {len(failed_files)} previously failed files")
+        print(f"{'='*60}\n")
+        
+        # Clear failed status to allow reprocessing
+        tracker.clear_failed_files()
+        tracker.save()
+        
+        # Show the files to be retried
+        for fp in failed_files[:10]:
+            print(f"  - {fp.name}")
+        if len(failed_files) > 10:
+            print(f"  ... and {len(failed_files) - 10} more")
+        print()
+
     if not input_path.exists():
         print(f"Error: Input path does not exist: {input_path}")
         return
 
+    print(f"LLM Provider: {config.llm_provider}")
+    if config.llm_provider == "azure":
+        print(f"  Model: {config.azure_deployment_name}")
+    else:
+        print(f"  Model: {config.fireworks_model}")
+        print(f"  Vision Model: {config.fireworks_vision_model}")
+    print()
     print("Using AGENTIC/VISION-BASED processors:")
     print("  - AgenticCSVProcessor (tool-calling approach)")
     print("  - AgenticTextProcessor (tool-calling approach)")
