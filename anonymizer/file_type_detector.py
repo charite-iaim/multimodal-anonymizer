@@ -41,13 +41,11 @@ class FileTypeDetector:
         self.config = config
 
         # Initialize LLM for file type detection
-        # reasoning_effort=None disables reasoning and allows temperature setting
         self.llm = create_chat_llm(
             config=config,
             temperature=0.0,  # Use deterministic classification
             structured_output=FileTypeResult,
             use_vision_model=True,  # File type detection may need vision capability
-            reasoning_effort=None,  # Disable reasoning for simple classification task
         )
 
     def detect_file_type(self, file_path: Path) -> FileTypeResult:
