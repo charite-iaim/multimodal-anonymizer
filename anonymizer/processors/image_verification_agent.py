@@ -22,6 +22,7 @@ from langchain_core.messages import HumanMessage
 from ..config import AnonymizerConfig
 from ..llm_factory import create_chat_llm
 from ..models import PIIElement, BoundingBox
+from ..prompt_config import PromptConfig, DEFAULT_PROMPT_CONFIG
 
 
 class RemainingPII(BaseModel):
@@ -71,7 +72,9 @@ class ImageVerificationAgent:
         self,
         config: AnonymizerConfig,
         check_over_redaction: bool = False,
-        similarity_threshold: float = 0.6
+        similarity_threshold: float = 0.6,
+        prompt_config: PromptConfig = None,
+        verification_prompt_getter: callable = None
     ):
         """
         Initialize the verification agent.
@@ -80,19 +83,22 @@ class ImageVerificationAgent:
             config: Anonymizer configuration
             check_over_redaction: If True, also check for over-redaction (requires original image)
             similarity_threshold: Minimum similarity for fuzzy text matching
+            prompt_config: Optional custom prompt configuration
+            verification_prompt_getter: Optional callable that returns the verification prompt.
+                                       If provided, overrides prompt_config.get_image_verification_prompt()
         """
         self.config = config
         self.check_over_redaction = check_over_redaction
         self.similarity_threshold = similarity_threshold
+        self.prompt_config = prompt_config or DEFAULT_PROMPT_CONFIG
+        self._verification_prompt_getter = verification_prompt_getter
 
         # Initialize Vision LLM for verification
-        # reasoning_effort=None disables reasoning and allows temperature setting
         self.vision_llm = create_chat_llm(
             config=config,
             temperature=0,  # Use 0 temperature for consistent verification
             structured_output=VerificationResult,
             use_vision_model=True,
-            reasoning_effort=None,  # Disable reasoning for verification task
         )
 
     def verify_redaction(
@@ -156,30 +162,11 @@ class ImageVerificationAgent:
 
     def _verify_redacted_only(self, redacted_b64: str) -> VerificationResult:
         """Verify redacted image without comparing to original."""
-        prompt = """Carefully analyze this medical image that has been redacted (black rectangles cover sensitive information).
-
-Your task is to verify that ALL Personal Identifiable Information (PII) has been properly redacted.
-
-Look for ANY remaining PII that is still visible and NOT covered by black redaction boxes:
-- Patient names, physician names, any person names
-- Dates of birth, birth dates
-- Patient IDs, medical record numbers (MRN), accession numbers, study IDs
-- Physical addresses, street addresses
-- Hospital names, clinic names, facility names, institution names
-- Phone numbers, fax numbers
-- Email addresses
-- Specific dates (admission dates, study dates, exam dates) that could identify a patient
-
-IMPORTANT:
-- Black rectangles are intentional redactions - ignore them
-- Focus on ANY text that is STILL VISIBLE and contains PII
-- Even partially visible PII should be reported
-- If text is visible but clearly NOT PII (medical terms, measurements), do not report it
-
-Set is_clean to TRUE only if you are confident that NO PII remains visible.
-Set is_clean to FALSE if you find ANY remaining PII that needs additional redaction.
-
-Be thorough - missing even one PII element is a privacy violation."""
+        # Use custom prompt getter if provided, otherwise use prompt_config
+        if self._verification_prompt_getter is not None:
+            prompt = self._verification_prompt_getter()
+        else:
+            prompt = self.prompt_config.get_image_verification_prompt()
 
         message = HumanMessage(
             content=[

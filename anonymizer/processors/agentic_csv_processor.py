@@ -25,6 +25,7 @@ from ..config import AnonymizerConfig
 from ..llm_factory import create_chat_llm
 from ..tools.time_shift_tool import shift_datetime, redact_text, restore_text, redact_column
 from ..retry_utils import retry_with_backoff, RetryConfig, create_retry_callback
+from ..prompt_config import PromptConfig, DEFAULT_PROMPT_CONFIG
 
 
 class DateTimeShift(BaseModel):
@@ -80,7 +81,8 @@ class AgenticCSVProcessor(FileProcessor):
         time_offset_days: Optional[int] = None,
         max_workers: int = 4,
         batch_size_phase2: int = 15,  # Reduced from 30 to improve attention on each row
-        batch_size_phase3: int = 15   # Reduced from 25 to improve verification quality
+        batch_size_phase3: int = 15,  # Reduced from 25 to improve verification quality
+        prompt_config: Optional[PromptConfig] = None
     ):
         """
         Initialize agentic CSV processor.
@@ -91,8 +93,12 @@ class AgenticCSVProcessor(FileProcessor):
             max_workers: Maximum number of parallel workers for batch processing.
             batch_size_phase2: Number of rows per batch in Phase 2 (PII anonymization).
             batch_size_phase3: Number of rows per batch in Phase 3 (verification).
+            prompt_config: Custom prompt configuration. If None, uses default prompts.
         """
         super().__init__(config)
+
+        # Prompt configuration
+        self.prompt_config = prompt_config or DEFAULT_PROMPT_CONFIG
 
         # Parallelization settings
         self.max_workers = max_workers
@@ -477,37 +483,11 @@ class AgenticCSVProcessor(FileProcessor):
         # Format sample data for LLM
         sample_preview = self._format_csv_for_llm(sample_rows, headers, 0)
 
-        prompt = f"""You are a PII detection agent. Analyze this CSV structure and identify columns that contain Personal Identifiable Information (PII) that should be ENTIRELY redacted.
-
-CSV Column Headers: {', '.join(headers)}
-
-Sample Data (first {sample_size} rows):
-{sample_preview}
-
-Your task: Identify columns where ALL values should be redacted because the column contains ONLY identifiers or PII.
-
-Common PII columns to look for:
-- subject_id, patient_id: Patient identifiers
-- hadm_id: Hospital admission ID
-- stay_id: ICU/hospital stay identifier
-- note_id: Clinical note identifier
-- caregiver_id, provider_id: Healthcare provider identifiers
-- order_id: Order identifiers
-- Any column with "id" suffix that links to individuals
-- Columns that only contain names, SSN, phone numbers, addresses, email
-
-DO NOT mark as PII columns:
-- Columns with mixed content that are NOT PURE IDENTIFIERS
-- Date/time columns (already handled by time shifting)
-- Medical codes (ICD, CPT, etc.)
-- Generic categorical columns (admission_type, discharge_location, etc.)
-- Numeric measurements (lab values, vitals, etc.)
-
-For EACH column that should be entirely redacted, call:
-  redact_column(column_name="exact_column_name", reason="brief reason")
-
-If no columns need full redaction, just respond with "No columns identified for full redaction."
-"""
+        # Use configurable prompt
+        prompt = self.prompt_config.get_column_detection_prompt(
+            columns=', '.join(headers),
+            sample_data=sample_preview
+        )
 
         messages = [HumanMessage(content=prompt)]
         columns_to_redact: List[str] = []
@@ -623,65 +603,13 @@ If no columns need full redaction, just respond with "No columns identified for 
         csv_preview = self._format_csv_for_llm(batch_rows, active_headers, start_idx)
 
         # Build info about skipped columns
-        skipped_cols_info = ""
-        if already_redacted_columns:
-            skipped_cols_info = f"\n\nNOTE: The following columns have ALREADY been fully redacted and are not shown: {', '.join(already_redacted_columns)}"
+        skipped_cols_str = ', '.join(already_redacted_columns) if already_redacted_columns else ""
 
-        prompt = f"""You are a PII anonymization agent. Analyze this CSV data and redact ALL Personal Identifiable Information (PII).{skipped_cols_info}
-
-CRITICAL: You MUST scan the ENTIRE content of each cell, even if it's very long. Do NOT skip any PIIs!
-
-IMPORTANT: Dates and times have ALREADY been anonymized (shifted). Do NOT redact dates!
-
-CSV Data (rows {start_idx} to {end_idx-1}):
-{csv_preview}
-
-You have TWO tools available:
-
-1. redact_text - For individual PII values:
-   redact_text(text_to_redact="exact PII text", row_index=N, column_name="column")
-
-2. redact_column - For entire columns containing PII (more efficient):
-   redact_column(column_name="column_name", reason="why this column is PII")
-   Use this when you notice a column contains identifiers in ALL rows (e.g., subject_id, hadm_id, note_id)
-
-PII categories to redact (BE THOROUGH - check EVERY occurrence):
-- name: Patient names, physician names, doctor names, family member names, caregiver names, any other personal names
-- address: Physical addresses, street addresses, facility names, location names (e.g. hospital names)
-- id: Patient IDs, medical record numbers, unit numbers, order ids, note ids, subject ids and any other numeric identifiers
-- phone: Phone numbers
-- fax: Fax numbers
-- email: Email addresses
-- ids: Any other identifiers that can link to an individual or organization (provider IDs, account numbers, caregiver IDs, etc.)
-- other: Any other specific information that can identify an individual
-
-EFFICIENCY TIP: If you notice a column like "subject_id" or "hadm_id" contains identifiers in every row,
-use redact_column ONCE instead of calling redact_text for each row!
-
-DO NOT redact:
-- Dates and times (already shifted)
-- Medical terminology, diagnoses, procedures, medications
-- Generic locations like "EMERGENCY ROOM", "HOME", "ICU"
-- Sequence numbers, lab codes, medical codes
-
-Redaction examples:
-- "Emily Carter" → "************" (12 asterisks)
-- "2140-09-28" → "**********" (10 asterisks)
-- "note_id: 12364" → "note_id: *****" (5 asterisks) 
-- "617-555-3942" → "************" (12 asterisks)
-- "discharge_location: DIRECT EMER." → "discharge_location: DIRECT EMER." (no change, as "DIRECT EMER." is not PHI)
-- "admission_location: CLINIC REFERRAL" → "admission_location: CLINIC REFERRAL" (no change, as "CLINIC REFERRAL" is not PHI)
-- "poe_seq: 5" → "poe_seq: 5" (no change, as "5" is not PHI)
-
-IMPORTANT:
-- Call redact_text for EACH piece of PII you find
-- Use the EXACT text as it appears (preserve spacing)
-- Use absolute row indices (0-based)
-- Redact the specific PII text, not the entire cell
-
-Example: If you see "Name: John Smith" in row 0, column "text":
-  → call redact_text(text_to_redact="John Smith", row_index=0, column_name="text")
-"""
+        # Use configurable prompt
+        prompt = self.prompt_config.get_csv_anonymization_prompt(
+            csv_data=f"CSV Data (rows {start_idx} to {end_idx-1}):\n{csv_preview}",
+            skipped_columns=skipped_cols_str
+        )
 
         messages = [HumanMessage(content=prompt)]
         batch_redactions = 0
@@ -895,52 +823,11 @@ Example: If you see "Name: John Smith" in row 0, column "text":
             start_idx
         )
 
-        prompt = f"""You are a verification agent for medical data anonymization.
-Compare the ORIGINAL and ANONYMIZED data below and identify any issues.
-
-CRITICAL: You MUST check the ENTIRE content carefully, especially in long text fields!
-Do NOT stop at the first few lines - scan ALL the way to the end of each field.
-
-{comparison_data}
-
-Time offset used: {self.time_offset_days} days
-
-You have THREE tools available:
-1. shift_datetime - to fix unshifted dates
-2. redact_text - to redact PII that was missed
-3. restore_text - to fix over-redaction (restore incorrectly redacted content)
-
-Your tasks (BE THOROUGH - check EVERY line of long text fields):
-
-1. CHECK FOR UNSHIFTED DATES: Look for dates in the ANONYMIZED data that are identical to the ORIGINAL.
-   All dates should be shifted by {self.time_offset_days} days.
-   → Use shift_datetime(datetime_str, offset_days={self.time_offset_days}) to fix
-
-2. CHECK FOR UNREDACTED PII: Look for PII that appears UNCHANGED in the anonymized version:
-   - Patient names, doctor names, staff names (e.g., "Laura Martinez", "Dr. Smith")
-   - Phone numbers (e.g., "555-123-4567")
-   - Fax numbers, email addresses
-   - Specific addresses or facility names that identify location
-   → Use redact_text(text_to_redact, row_index, column_name) to fix
-
-3. CHECK FOR OVER-REDACTION: Look for content that was INCORRECTLY redacted (asterisks where there shouldn't be):
-   - Medical terminology (diabetes, hypertension, pneumonia, etc.)
-   - Medication names (metformin, lisinopril, aspirin, etc.)
-   - Procedure names (colonoscopy, MRI, CT scan, etc.)
-   - Generic locations (EMERGENCY ROOM, ICU, HOME, etc.)
-   - Dates that were redacted instead of shifted
-   → Use restore_text(redacted_text, original_text, row_index, column_name) to fix
-
-   Example: If "diabetes" was redacted to "********", call:
-   restore_text(redacted_text="********", original_text="diabetes", row_index=0, column_name="text")
-
-IMPORTANT:
-- Compare ORIGINAL vs ANONYMIZED to identify issues
-- Only redact actual PII, not medical content
-- Restore any medical terms that were incorrectly redacted
-
-Call the appropriate tool for each issue you find. When done, summarize your findings.
-"""
+        # Use configurable prompt
+        prompt = self.prompt_config.get_csv_verification_prompt(
+            comparison_data=comparison_data,
+            time_offset=self.time_offset_days
+        )
 
         messages = [HumanMessage(content=prompt)]
 

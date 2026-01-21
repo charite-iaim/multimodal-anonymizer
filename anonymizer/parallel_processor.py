@@ -80,6 +80,7 @@ def _process_file_worker(job_data: Dict[str, Any]) -> ProcessingResult:
         anonymized_filename = job_data.get('anonymized_filename')
         folder_path = job_data.get('folder_path', '')
         time_offset_days = job_data.get('time_offset_days')
+        prompt_config_name = job_data.get('prompt_config_name', 'default')
 
         # Recreate config from dict
         config = AnonymizerConfig(
@@ -90,8 +91,9 @@ def _process_file_worker(job_data: Dict[str, Any]) -> ProcessingResult:
         # Import get_processor from the appropriate module
         processor_module = job_data.get('processor_module', 'anonymize')
         if processor_module == 'anonymize_agentic':
-            from anonymize_agentic import get_processor
-            processor = get_processor(input_path, config, use_llm_detection, time_offset_days=time_offset_days)
+            from anonymize_agentic import get_processor, load_prompt_config
+            prompt_config = load_prompt_config(prompt_config_name)
+            processor = get_processor(input_path, config, use_llm_detection, time_offset_days=time_offset_days, prompt_config=prompt_config)
         else:
             from anonymize import get_processor
             processor = get_processor(input_path, config, use_ocr, use_llm_detection)
@@ -276,7 +278,8 @@ class ParallelFileProcessor:
         anonymized_filename: Optional[str] = None,
         folder_path: str = '',
         time_offset_days: Optional[int] = None,
-        max_retries: Optional[int] = None
+        max_retries: Optional[int] = None,
+        prompt_config_name: str = "default"
     ) -> Dict[str, Any]:
         """
         Create a job dictionary for parallel processing.
@@ -290,6 +293,7 @@ class ParallelFileProcessor:
             folder_path: Folder path for uniqueness
             time_offset_days: Patient-specific time offset in days for date shifting
             max_retries: Maximum retries for this job (uses processor default if not set)
+            prompt_config_name: Name of prompt config to use (e.g., "default", "mimic")
 
         Returns:
             Job dictionary
@@ -315,6 +319,7 @@ class ParallelFileProcessor:
             'processor_module': self.processor_module,
             'time_offset_days': time_offset_days,
             'max_retries': max_retries if max_retries is not None else self.max_retries,
+            'prompt_config_name': prompt_config_name,
         }
 
 

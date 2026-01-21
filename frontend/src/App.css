@@ -1,11 +1,11 @@
 .app {
-  min-height: 100vh;
   background: #0353a4;
-  padding: 2rem;
 }
 
 .container {
   margin: 0 auto;
+  max-width: 900px;
+  width: 100%;
 }
 
 .header {

@@ -20,17 +20,20 @@ load_dotenv()
 # Add parent directory to path to import anonymizer package
 sys.path.append(str(Path(__file__).parent.parent.parent))
 
-from anonymizer.file_type_detector import FileTypeDetector, DataType
 from anonymizer.processors.png_processor import PNGProcessor
 from anonymizer.processors.png_ocr_processor import PNGOCRProcessor
+from anonymizer.processors.png_vision_ocr_processor import PNGVisionOCRProcessor
 from anonymizer.processors.csv_processor import CSVProcessor
 from anonymizer.processors.text_processor import TextProcessor
 from anonymizer.processors.dicom_processor import DICOMProcessor
+from anonymizer.processors.dicom_vision_ocr_processor import DICOMVisionOCRProcessor
 from anonymizer.processors.pdf_ocr_processor import PDFOCRProcessor
+from anonymizer.processors.pdf_vision_ocr_processor import PDFVisionOCRProcessor
 from anonymizer.processors.agentic_csv_processor import AgenticCSVProcessor
 from anonymizer.processors.agentic_text_processor import AgenticTextProcessor
 from anonymizer.config import AnonymizerConfig
 from anonymizer.filename_anonymizer import FilenameAnonymizer
+from anonymizer.prompt_config import PromptConfig, DEFAULT_PROMPT_CONFIG, get_prompt_descriptions
 
 app = FastAPI(title="PHI Anonymization API", version="1.0.0")
 
@@ -51,6 +54,9 @@ app.add_middleware(
 
 # Global config instance
 config: Optional[AnonymizerConfig] = None
+
+# Global prompt configuration (customizable via API)
+prompt_config: PromptConfig = DEFAULT_PROMPT_CONFIG
 
 # Temporary directory for processing files
 TEMP_DIR = Path(tempfile.gettempdir()) / "phi_anonymization"
@@ -155,6 +161,96 @@ async def get_config_status():
     }
 
 
+# ==================== Prompt Configuration Endpoints ====================
+
+
+class PromptConfigUpdate(BaseModel):
+    """Request model for updating prompt configuration."""
+    column_detection_prompt: Optional[str] = None
+    csv_anonymization_prompt: Optional[str] = None
+    text_anonymization_prompt: Optional[str] = None
+    csv_verification_prompt: Optional[str] = None
+    text_verification_prompt: Optional[str] = None
+    image_anonymization_prompt: Optional[str] = None
+    image_verification_prompt: Optional[str] = None
+    pdf_anonymization_prompt: Optional[str] = None
+    pdf_verification_prompt: Optional[str] = None
+    additional_instructions: Optional[str] = None
+
+
+@app.get("/api/prompts")
+async def get_prompts():
+    """Get current prompt configuration."""
+    return {
+        "prompts": prompt_config.to_dict(),
+        "descriptions": get_prompt_descriptions()
+    }
+
+
+@app.get("/api/prompts/defaults")
+async def get_default_prompts():
+    """Get default prompt configuration (for reset functionality)."""
+    return {
+        "prompts": DEFAULT_PROMPT_CONFIG.to_dict(),
+        "descriptions": get_prompt_descriptions()
+    }
+
+
+@app.post("/api/prompts")
+async def update_prompts(update: PromptConfigUpdate):
+    """Update prompt configuration."""
+    global prompt_config
+
+    try:
+        # Get current config as dict
+        current = prompt_config.to_dict()
+
+        # Update only provided fields
+        if update.column_detection_prompt is not None:
+            current["column_detection_prompt"] = update.column_detection_prompt
+        if update.csv_anonymization_prompt is not None:
+            current["csv_anonymization_prompt"] = update.csv_anonymization_prompt
+        if update.text_anonymization_prompt is not None:
+            current["text_anonymization_prompt"] = update.text_anonymization_prompt
+        if update.csv_verification_prompt is not None:
+            current["csv_verification_prompt"] = update.csv_verification_prompt
+        if update.text_verification_prompt is not None:
+            current["text_verification_prompt"] = update.text_verification_prompt
+        if update.image_anonymization_prompt is not None:
+            current["image_anonymization_prompt"] = update.image_anonymization_prompt
+        if update.image_verification_prompt is not None:
+            current["image_verification_prompt"] = update.image_verification_prompt
+        if update.pdf_anonymization_prompt is not None:
+            current["pdf_anonymization_prompt"] = update.pdf_anonymization_prompt
+        if update.pdf_verification_prompt is not None:
+            current["pdf_verification_prompt"] = update.pdf_verification_prompt
+        if update.additional_instructions is not None:
+            current["additional_instructions"] = update.additional_instructions
+
+        # Create new config
+        prompt_config = PromptConfig.from_dict(current)
+
+        return {
+            "status": "success",
+            "message": "Prompt configuration updated",
+            "prompts": prompt_config.to_dict()
+        }
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid prompt configuration: {str(e)}")
+
+
+@app.post("/api/prompts/reset")
+async def reset_prompts():
+    """Reset prompts to default values."""
+    global prompt_config
+    prompt_config = PromptConfig()
+    return {
+        "status": "success",
+        "message": "Prompts reset to defaults",
+        "prompts": prompt_config.to_dict()
+    }
+
+
 @app.get("/api/progress/{job_id}")
 async def get_progress(job_id: str):
     """SSE endpoint for real-time progress updates."""
@@ -185,7 +281,6 @@ async def get_progress(job_id: str):
 @app.post("/api/process")
 async def process_file(
     file: UploadFile = File(...),
-    mode: str = Form(default="auto"),  # auto, vision, ocr
     use_agentic: bool = Form(default=False)  # Use agentic processors for CSV/text
 ):
     """
@@ -193,7 +288,6 @@ async def process_file(
 
     Args:
         file: The file to process (PNG, JPG, CSV, TXT, DICOM, PDF)
-        mode: Processing mode - 'auto' (LLM detection)
         use_agentic: If True, use agentic processors (tool-calling) for CSV and text files
     """
     if config is None:
@@ -238,58 +332,30 @@ async def process_file(
             ]
         }
 
-        # Determine processor
+        # Determine processor based on file extension
         processor = None
+        file_extension = input_path.suffix.lower()
 
-        if mode == "auto":
-            # Use LLM-based file type detection
-            detector = FileTypeDetector(config)
-            detection_result = detector.detect_file_type(input_path)
-
-            if detection_result.data_type == DataType.UNKNOWN:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Unsupported file type: {detection_result.reasoning}"
-                )
-
-            # Get processor based on suggestion
-            if detection_result.suggested_processor == "vision":
-                processor = PNGProcessor(config)
-            elif detection_result.suggested_processor == "ocr":
-                processor = PNGOCRProcessor(config)
-            elif detection_result.suggested_processor == "text":
-                processor = AgenticTextProcessor(config) if use_agentic else TextProcessor(config)
-            elif detection_result.suggested_processor == "csv":
-                processor = AgenticCSVProcessor(config) if use_agentic else CSVProcessor(config)
-            elif detection_result.suggested_processor == "dicom":
-                processor = DICOMProcessor(config, save_intermediate=True)
-            elif detection_result.suggested_processor == "pdf_ocr":
-                processor = PDFOCRProcessor(config)
-
-        # If LLM detection didn't work, try extension-based detection
-        if processor is None or not processor.can_process(input_path):
-            # Build processor list - use agentic versions for CSV/text if requested
+        # Map file extensions to processors
+        # When use_agentic is True, use Vision+OCR processors for images/PDFs/DICOMs
+        if file_extension in ['.dcm', '.dicom']:
+            processor = DICOMVisionOCRProcessor(config, save_intermediate=True, prompt_config=prompt_config) if use_agentic else DICOMProcessor(config, save_intermediate=True)
+        elif file_extension == '.pdf':
+            processor = PDFVisionOCRProcessor(config, prompt_config=prompt_config) if use_agentic else PDFOCRProcessor(config, prompt_config=prompt_config)
+        elif file_extension in ['.png', '.jpg', '.jpeg']:
+            processor = PNGVisionOCRProcessor(config, prompt_config=prompt_config) if use_agentic else PNGOCRProcessor(config, prompt_config=prompt_config)
+        elif file_extension in ['.txt', '.hea']:
+            processor = AgenticTextProcessor(config, prompt_config=prompt_config) if use_agentic else TextProcessor(config)
+        elif file_extension == '.csv':
+            processor = AgenticCSVProcessor(config, prompt_config=prompt_config) if use_agentic else CSVProcessor(config)
+        else:
+            # Fallback: try DICOM processor for files without extension (common in MIMIC)
             if use_agentic:
-                processor_classes = [
-                    DICOMProcessor, PDFOCRProcessor, PNGProcessor, PNGOCRProcessor,
-                    AgenticTextProcessor, AgenticCSVProcessor
-                ]
+                test_processor = DICOMVisionOCRProcessor(config, save_intermediate=True, prompt_config=prompt_config)
             else:
-                processor_classes = [
-                    DICOMProcessor, PDFOCRProcessor, PNGProcessor, PNGOCRProcessor,
-                    TextProcessor, CSVProcessor
-                ]
-
-            # Try all processors to find a match
-            for proc_class in processor_classes:
-                if proc_class == DICOMProcessor:
-                    test_processor = proc_class(config, save_intermediate=True)
-                else:
-                    test_processor = proc_class(config)
-
-                if test_processor.can_process(input_path):
-                    processor = test_processor
-                    break
+                test_processor = DICOMProcessor(config, save_intermediate=True)
+            if test_processor.can_process(input_path):
+                processor = test_processor
 
         if processor is None:
             raise HTTPException(
@@ -351,7 +417,6 @@ async def process_file(
 async def process_folder(
     files: List[UploadFile] = File(...),
     paths: List[str] = Form(...),
-    mode: str = Form(default="auto"),
     use_agentic: bool = Form(default=False),
     job_id: Optional[str] = Form(default=None)
 ):
@@ -361,7 +426,6 @@ async def process_folder(
     Args:
         files: List of files to process
         paths: List of relative paths corresponding to each file
-        mode: Processing mode - 'auto' (LLM detection)
         use_agentic: If True, use agentic processors for CSV and text files
         job_id: Optional job ID for progress tracking (generated if not provided)
     """
@@ -435,49 +499,30 @@ async def process_folder(
                 rel_output_dir.mkdir(parents=True, exist_ok=True)
                 output_path = rel_output_dir / output_filename
 
-                # Determine processor
+                # Determine processor based on file extension
                 processor = None
+                file_extension = input_path.suffix.lower()
 
-                if mode == "auto":
-                    detector = FileTypeDetector(config)
-                    detection_result = detector.detect_file_type(input_path)
-
-                    if detection_result.data_type != DataType.UNKNOWN:
-                        if detection_result.suggested_processor == "vision":
-                            processor = PNGProcessor(config)
-                        elif detection_result.suggested_processor == "ocr":
-                            processor = PNGOCRProcessor(config)
-                        elif detection_result.suggested_processor == "text":
-                            processor = AgenticTextProcessor(config) if use_agentic else TextProcessor(config)
-                        elif detection_result.suggested_processor == "csv":
-                            processor = AgenticCSVProcessor(config) if use_agentic else CSVProcessor(config)
-                        elif detection_result.suggested_processor == "dicom":
-                            processor = DICOMProcessor(config, save_intermediate=False)
-                        elif detection_result.suggested_processor == "pdf_ocr":
-                            processor = PDFOCRProcessor(config)
-
-                # Fallback to extension-based detection
-                if processor is None or not processor.can_process(input_path):
+                # Map file extensions to processors
+                # When use_agentic is True, use Vision+OCR processors for images/PDFs/DICOMs
+                if file_extension in ['.dcm', '.dicom']:
+                    processor = DICOMVisionOCRProcessor(config, save_intermediate=False, prompt_config=prompt_config) if use_agentic else DICOMProcessor(config, save_intermediate=False)
+                elif file_extension == '.pdf':
+                    processor = PDFVisionOCRProcessor(config, prompt_config=prompt_config) if use_agentic else PDFOCRProcessor(config, prompt_config=prompt_config)
+                elif file_extension in ['.png', '.jpg', '.jpeg']:
+                    processor = PNGVisionOCRProcessor(config, prompt_config=prompt_config) if use_agentic else PNGOCRProcessor(config, prompt_config=prompt_config)
+                elif file_extension in ['.txt', '.hea']:
+                    processor = AgenticTextProcessor(config, prompt_config=prompt_config) if use_agentic else TextProcessor(config)
+                elif file_extension == '.csv':
+                    processor = AgenticCSVProcessor(config, prompt_config=prompt_config) if use_agentic else CSVProcessor(config)
+                else:
+                    # Fallback: try DICOM processor for files without extension (common in MIMIC)
                     if use_agentic:
-                        processor_classes = [
-                            DICOMProcessor, PDFOCRProcessor, PNGProcessor, PNGOCRProcessor,
-                            AgenticTextProcessor, AgenticCSVProcessor
-                        ]
+                        test_processor = DICOMVisionOCRProcessor(config, save_intermediate=False, prompt_config=prompt_config)
                     else:
-                        processor_classes = [
-                            DICOMProcessor, PDFOCRProcessor, PNGProcessor, PNGOCRProcessor,
-                            TextProcessor, CSVProcessor
-                        ]
-
-                    for proc_class in processor_classes:
-                        if proc_class == DICOMProcessor:
-                            test_processor = proc_class(config, save_intermediate=False)
-                        else:
-                            test_processor = proc_class(config)
-
-                        if test_processor.can_process(input_path):
-                            processor = test_processor
-                            break
+                        test_processor = DICOMProcessor(config, save_intermediate=False)
+                    if test_processor.can_process(input_path):
+                        processor = test_processor
 
                 if processor is None:
                     file_results.append({

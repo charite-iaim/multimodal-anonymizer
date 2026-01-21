@@ -42,6 +42,7 @@ from ..retry_utils import retry_with_backoff, RetryConfig, create_retry_callback
 from ..config import AnonymizerConfig
 from ..llm_factory import create_chat_llm
 from ..models import PIIDetectionResult, PIIElement, BoundingBox
+from ..prompt_config import PromptConfig, DEFAULT_PROMPT_CONFIG
 from .image_verification_agent import ImageVerificationAgent, VerificationResult
 
 
@@ -163,7 +164,10 @@ class PNGVisionOCRProcessor(FileProcessor):
         similarity_threshold: float = 0.6,
         enable_verification: bool = True,
         check_over_redaction: bool = False,
-        max_verification_rounds: int = 2
+        max_verification_rounds: int = 2,
+        prompt_config: PromptConfig = None,
+        anonymization_prompt_getter: callable = None,
+        verification_prompt_getter: callable = None
     ):
         """
         Initialize the Vision+OCR processor.
@@ -174,12 +178,22 @@ class PNGVisionOCRProcessor(FileProcessor):
             enable_verification: If True, run verification agent after initial redaction
             check_over_redaction: If True, also check for over-redaction (needs original image)
             max_verification_rounds: Maximum rounds of verify-and-redact
+            prompt_config: Optional custom prompt configuration
+            anonymization_prompt_getter: Optional callable(ocr_text_list: str) -> str that returns
+                                        the anonymization prompt. If provided, overrides
+                                        prompt_config.get_image_anonymization_prompt()
+            verification_prompt_getter: Optional callable() -> str that returns the verification
+                                       prompt. If provided, overrides
+                                       prompt_config.get_image_verification_prompt()
         """
         super().__init__(config)
         self.similarity_threshold = similarity_threshold
         self.enable_verification = enable_verification
         self.check_over_redaction = check_over_redaction
         self.max_verification_rounds = max_verification_rounds
+        self.prompt_config = prompt_config or DEFAULT_PROMPT_CONFIG
+        self._anonymization_prompt_getter = anonymization_prompt_getter
+        self._verification_prompt_getter = verification_prompt_getter
 
         if not EASYOCR_AVAILABLE:
             raise ImportError(
@@ -220,7 +234,9 @@ class PNGVisionOCRProcessor(FileProcessor):
             self._verification_agent = ImageVerificationAgent(
                 config=config,
                 check_over_redaction=check_over_redaction,
-                similarity_threshold=similarity_threshold
+                similarity_threshold=similarity_threshold,
+                prompt_config=self.prompt_config,
+                verification_prompt_getter=self._verification_prompt_getter
             )
 
     def can_process(self, file_path: Path) -> bool:
@@ -402,34 +418,11 @@ class PNGVisionOCRProcessor(FileProcessor):
         # Create prompt with OCR context
         ocr_text_list = "\n".join([f"- \"{ocr.text}\"" for ocr in ocr_results])
 
-        # Base prompt for PII identification
-        base_prompt = f"""Analyze this medical image and identify ALL text that contains Personal Identifiable Information (PII) that should be redacted for patient privacy.
-
-The following texts were detected in the image by OCR:
-{ocr_text_list}
-
-For EACH piece of PII you identify:
-1. text: Copy the EXACT text as it appears (must match one of the OCR texts above as closely as possible)
-2. type: Classify the PII type
-
-PII categories to identify:
-- name: Patient names, physician/doctor names, any person names
-- date_of_birth: Dates of birth, DOB
-- id_number: Patient IDs, medical record numbers (MRN), accession numbers, study IDs
-- address: Physical addresses, street addresses
-- location: Hospital names, clinic names, facility names, cities, institutions
-- phone: Phone numbers, fax numbers
-- email: Email addresses
-- dates: Specific dates (admission date, study date, exam date, etc.) that could identify a patient
-
-IMPORTANT:
-- Focus on text that could identify a specific patient or person
-- Include ALL identifying information, not just obvious names
-- Medical record numbers, accession numbers, and study IDs are PII
-- Hospital/facility names are PII (location)
-- Dates associated with studies or admissions are PII
-- Generic medical terms and measurements are NOT PII
-"""
+        # Get base prompt from custom getter or config
+        if self._anonymization_prompt_getter is not None:
+            base_prompt = self._anonymization_prompt_getter(ocr_text_list)
+        else:
+            base_prompt = self.prompt_config.get_image_anonymization_prompt(ocr_text_list)
 
         # Prompt with explicit JSON format for fallback
         fallback_prompt = base_prompt + """

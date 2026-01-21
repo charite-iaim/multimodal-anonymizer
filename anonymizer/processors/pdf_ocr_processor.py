@@ -36,6 +36,7 @@ from ..base_processor import FileProcessor
 from ..config import AnonymizerConfig
 from ..llm_factory import create_chat_llm
 from ..models import PIIDetectionResult, PIIElement, BoundingBox
+from ..prompt_config import PromptConfig, DEFAULT_PROMPT_CONFIG
 
 
 class OCRText(BaseModel):
@@ -62,9 +63,10 @@ class PIIClassificationResult(BaseModel):
 class PDFOCRProcessor(FileProcessor):
     """Processor for PDF files using OCR + LLM classification."""
 
-    def __init__(self, config: AnonymizerConfig):
+    def __init__(self, config: AnonymizerConfig, prompt_config: PromptConfig = None):
         """Initialize PDF OCR processor."""
         super().__init__(config)
+        self.prompt_config = prompt_config or DEFAULT_PROMPT_CONFIG
 
         if not PDF2IMAGE_AVAILABLE:
             raise ImportError(
@@ -244,27 +246,8 @@ class PDFOCRProcessor(FileProcessor):
         # Prepare text list for LLM
         text_list = "\n".join([f"{i+1}. {ocr.text}" for i, ocr in enumerate(ocr_texts)])
 
-        prompt = f"""Analyze the following texts extracted from a medical document and identify which ones contain Personal Identifiable Information (PII).
-
-Texts found in the document:
-{text_list}
-
-PII categories to identify:
-- name: Patient names, physician/doctor names
-- date_of_birth: Dates of birth
-- id_number: Patient IDs, medical record numbers, all other potentially identification numbers
-- address: Physical addresses
-- location: Locations, e.g. cities, hospital names
-- phone: Phone numbers
-- email: Email addresses
-- dates: Other specific dates (admission, discharge, study dates, etc.)
-
-For each text that contains PII, provide:
-1. text: The EXACT text as it appears above (must match exactly)
-2. type: The PII category
-
-Only include texts that actually contain PII. If a text is just a medical term or general information, do not include it.
-"""
+        # Get prompt from config
+        prompt = self.prompt_config.get_pdf_anonymization_prompt(text_list)
 
         message = HumanMessage(content=prompt)
 

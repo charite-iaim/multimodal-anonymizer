@@ -23,6 +23,7 @@ from ..base_processor import FileProcessor
 from ..config import AnonymizerConfig
 from .png_vision_ocr_processor import PNGVisionOCRProcessor
 from ..models import PIIDetectionResult
+from ..prompt_config import PromptConfig, DEFAULT_PROMPT_CONFIG
 
 
 class PDFVisionOCRProcessor(FileProcessor):
@@ -36,7 +37,8 @@ class PDFVisionOCRProcessor(FileProcessor):
         dpi: int = 300,
         enable_verification: bool = True,
         check_over_redaction: bool = False,
-        max_verification_rounds: int = 2
+        max_verification_rounds: int = 2,
+        prompt_config: PromptConfig = None
     ):
         """
         Initialize PDF Vision+OCR processor.
@@ -50,6 +52,7 @@ class PDFVisionOCRProcessor(FileProcessor):
             enable_verification: If True, run verification agent after initial redaction
             check_over_redaction: If True, also check for over-redaction
             max_verification_rounds: Maximum rounds of verify-and-redact
+            prompt_config: Optional custom prompt configuration
         """
         super().__init__(config)
 
@@ -65,12 +68,24 @@ class PDFVisionOCRProcessor(FileProcessor):
         self.enable_verification = enable_verification
         self.check_over_redaction = check_over_redaction
         self.max_verification_rounds = max_verification_rounds
+        self.prompt_config = prompt_config or DEFAULT_PROMPT_CONFIG
+
+        # Create PDF-specific prompt getters that use pdf_anonymization_prompt and pdf_verification_prompt
+        def pdf_anonymization_prompt_getter(ocr_text_list: str) -> str:
+            return self.prompt_config.get_pdf_anonymization_prompt(ocr_text_list)
+
+        def pdf_verification_prompt_getter() -> str:
+            return self.prompt_config.get_pdf_verification_prompt()
+
         self.png_processor = PNGVisionOCRProcessor(
             config,
             similarity_threshold=similarity_threshold,
             enable_verification=enable_verification,
             check_over_redaction=check_over_redaction,
-            max_verification_rounds=max_verification_rounds
+            max_verification_rounds=max_verification_rounds,
+            prompt_config=self.prompt_config,
+            anonymization_prompt_getter=pdf_anonymization_prompt_getter,
+            verification_prompt_getter=pdf_verification_prompt_getter
         )
 
     def can_process(self, file_path: Path) -> bool:

@@ -30,6 +30,27 @@ from anonymizer.parallel_processor import (
     ParallelFileProcessor,
     collect_files_for_processing
 )
+from anonymizer.prompt_config import DEFAULT_PROMPT_CONFIG
+
+
+def load_prompt_config(config_name: str = "default"):
+    """
+    Load prompt configuration by name.
+
+    Args:
+        config_name: Name of the prompt config to load.
+                    Options: "default", "mimic"
+
+    Returns:
+        PromptConfig instance
+    """
+    if config_name == "default":
+        return DEFAULT_PROMPT_CONFIG
+    elif config_name == "mimic":
+        from anonymizer.mimic_prompts import MIMIC_PROMPT_CONFIG
+        return MIMIC_PROMPT_CONFIG
+    else:
+        raise ValueError(f"Unknown prompt config: {config_name}. Available: default, mimic")
 
 
 def generate_patient_time_offset() -> int:
@@ -57,7 +78,8 @@ def get_processor(
     file_path: Path,
     config: AnonymizerConfig,
     use_llm_detection: bool = False,
-    time_offset_days: int = None
+    time_offset_days: int = None,
+    prompt_config = None
 ):
     """
     Get appropriate agentic processor for the file type.
@@ -68,6 +90,7 @@ def get_processor(
         use_llm_detection: If True, use multimodal LLM to detect file type and choose processor
         time_offset_days: Optional time offset in days for date shifting. If None, processor
                           will generate its own random offset.
+        prompt_config: Optional PromptConfig instance for customizing prompts
 
     Returns:
         FileProcessor instance or None
@@ -81,23 +104,23 @@ def get_processor(
         if detection_result.data_type == DataType.TEXT:
             # Text data -> use suggested processor
             if detection_result.suggested_processor == "text":
-                processor = AgenticTextProcessor(config, time_offset_days=time_offset_days)
+                processor = AgenticTextProcessor(config, time_offset_days=time_offset_days, prompt_config=prompt_config)
                 if processor.can_process(file_path):
                     print(f"Using Agentic Text processor based on LLM detection")
                     return processor
             elif detection_result.suggested_processor == "csv":
-                processor = AgenticCSVProcessor(config, time_offset_days=time_offset_days)
+                processor = AgenticCSVProcessor(config, time_offset_days=time_offset_days, prompt_config=prompt_config)
                 if processor.can_process(file_path):
                     print(f"Using Agentic CSV processor based on LLM detection")
                     return processor
 
             # Fallback: try both processors
-            text_processor = AgenticTextProcessor(config, time_offset_days=time_offset_days)
+            text_processor = AgenticTextProcessor(config, time_offset_days=time_offset_days, prompt_config=prompt_config)
             if text_processor.can_process(file_path):
                 print(f"Using Agentic Text processor (fallback)")
                 return text_processor
 
-            csv_processor = AgenticCSVProcessor(config, time_offset_days=time_offset_days)
+            csv_processor = AgenticCSVProcessor(config, time_offset_days=time_offset_days, prompt_config=prompt_config)
             if csv_processor.can_process(file_path):
                 print(f"Using Agentic CSV processor (fallback)")
                 return csv_processor
@@ -117,8 +140,8 @@ def get_processor(
         DICOMVisionOCRProcessor(config),
         PNGVisionOCRProcessor(config),
         PDFVisionOCRProcessor(config),
-        AgenticTextProcessor(config, time_offset_days=time_offset_days),
-        AgenticCSVProcessor(config, time_offset_days=time_offset_days),
+        AgenticTextProcessor(config, time_offset_days=time_offset_days, prompt_config=prompt_config),
+        AgenticCSVProcessor(config, time_offset_days=time_offset_days, prompt_config=prompt_config),
     ]
 
     for processor in processors:
@@ -138,7 +161,8 @@ def process_file(
     filename_anonymizer: FilenameAnonymizer = None,
     anonymize_paths: bool = True,
     tracker: ProcessingTracker = None,
-    time_offset_days: int = None
+    time_offset_days: int = None,
+    prompt_config = None
 ) -> bool:
     """
     Process a single file.
@@ -155,6 +179,7 @@ def process_file(
         tracker: Optional ProcessingTracker instance for tracking processed files
         time_offset_days: Patient-specific time offset in days for date shifting.
                           If None, processor will generate its own random offset.
+        prompt_config: Optional PromptConfig instance for customizing prompts
 
     Returns:
         True if successful
@@ -164,7 +189,7 @@ def process_file(
         print(f"Skipping already processed file: {input_path.name}")
         return True
 
-    processor = get_processor(input_path, config, use_llm_detection, time_offset_days=time_offset_days)
+    processor = get_processor(input_path, config, use_llm_detection, time_offset_days=time_offset_days, prompt_config=prompt_config)
 
     if processor is None:
         print(f"No processor available for: {input_path.name}")
@@ -264,7 +289,8 @@ def process_directory(
     anonymize_paths: bool = True,
     tracker: ProcessingTracker = None,
     parallel: bool = True,
-    num_workers: int = None
+    num_workers: int = None,
+    prompt_config = None
 ):
     """
     Process all supported files in a directory.
@@ -315,7 +341,7 @@ def process_directory(
 
             if process_file(file_path, output_dir, config, use_llm_detection,
                           filename_anonymizer=filename_anonymizer, anonymize_paths=anonymize_paths,
-                          tracker=tracker):
+                          tracker=tracker, prompt_config=prompt_config):
                 successful += 1
             else:
                 failed += 1
@@ -345,7 +371,8 @@ def process_directory(
             anonymize_paths=anonymize_paths,
             tracker=tracker,
             parallel=parallel,
-            num_workers=num_workers
+            num_workers=num_workers,
+            prompt_config=prompt_config
         )
 
 
@@ -358,7 +385,8 @@ def _process_directory_parallel(
     skip_hidden: bool = True,
     anonymize_paths: bool = True,
     tracker: ProcessingTracker = None,
-    num_workers: int = None
+    num_workers: int = None,
+    prompt_config = None
 ) -> dict:
     """
     Process directory using parallel processing.
@@ -470,6 +498,14 @@ def _process_directory_parallel(
 
     print(f"Generated time offsets for {len(patient_time_offsets)} patients")
 
+    # Get prompt config name to pass to worker processes
+    prompt_config_name = "default"
+    if prompt_config:
+        # Determine which config is being used
+        from anonymizer.mimic_prompts import MIMIC_PROMPT_CONFIG
+        if prompt_config is MIMIC_PROMPT_CONFIG:
+            prompt_config_name = "mimic"
+
     # Create parallel processor
     parallel_processor = ParallelFileProcessor(
         config=config,
@@ -553,7 +589,8 @@ def _process_directory_parallel(
             anonymized_relative_path=anonymized_relative_path,
             anonymized_filename=anonymized_filename,
             folder_path=str(relative_path.parent) if relative_path.parent != Path('.') else "",
-            time_offset_days=time_offset
+            time_offset_days=time_offset,
+            prompt_config_name=prompt_config_name
         )
         jobs.append(job)
         # Also store job data for potential retry
@@ -715,7 +752,8 @@ def process_directory_recursive(
     _folder_mapping: dict = None,
     _patient_time_offsets: dict = None,
     parallel: bool = True,
-    num_workers: int = None
+    num_workers: int = None,
+    prompt_config = None
 ):
     """
     Recursively process all files in a directory tree, preserving structure.
@@ -767,7 +805,8 @@ def process_directory_recursive(
                 skip_hidden=skip_hidden,
                 anonymize_paths=anonymize_paths,
                 tracker=tracker,
-                num_workers=num_workers
+                num_workers=num_workers,
+                prompt_config=prompt_config
             )
 
         print()
@@ -828,7 +867,8 @@ def process_directory_recursive(
                 filename_anonymizer=_filename_anonymizer,
                 anonymize_paths=anonymize_paths,
                 tracker=tracker,
-                time_offset_days=time_offset
+                time_offset_days=time_offset,
+                prompt_config=prompt_config
             )
 
             if success:
@@ -887,7 +927,8 @@ def process_directory_recursive(
                 _stats=_stats,
                 _filename_anonymizer=_filename_anonymizer,
                 _folder_mapping=_folder_mapping,
-                _patient_time_offsets=_patient_time_offsets
+                _patient_time_offsets=_patient_time_offsets,
+                prompt_config=prompt_config
             )
 
     # Print summary and save mappings only on initial call
@@ -983,6 +1024,10 @@ def main():
         "--provider", type=str, choices=["azure", "fireworks"], default=None,
         help="LLM provider to use (azure or fireworks). Overrides LLM_PROVIDER environment variable."
     )
+    parser.add_argument(
+        "--prompt-config", type=str, choices=["default", "mimic"], default="default",
+        help="Prompt configuration to use. 'default' uses generic prompts, 'mimic' uses MIMIC-IV specific prompts. (default: default)"
+    )
 
     args = parser.parse_args()
 
@@ -1000,6 +1045,9 @@ def main():
         config_kwargs["llm_provider"] = args.provider
 
     config = AnonymizerConfig(**config_kwargs)
+
+    # Load prompt configuration
+    prompt_config = load_prompt_config(args.prompt_config)
 
     input_path = Path(args.input)
     output_dir = Path(args.output)
@@ -1056,6 +1104,8 @@ def main():
         print(f"  Model: {config.fireworks_model}")
         print(f"  Vision Model: {config.fireworks_vision_model}")
     print()
+    print(f"Prompt Configuration: {args.prompt_config}")
+    print()
     print("Using AGENTIC/VISION-BASED processors:")
     print("  - AgenticCSVProcessor (tool-calling approach)")
     print("  - AgenticTextProcessor (tool-calling approach)")
@@ -1104,7 +1154,7 @@ def main():
     if input_path.is_file():
         # For single file, process with automatic filename anonymization
         process_file(input_path, output_dir, config, use_llm_detection,
-                    anonymize_paths=anonymize_paths, tracker=tracker)
+                    anonymize_paths=anonymize_paths, tracker=tracker, prompt_config=prompt_config)
     elif input_path.is_dir():
         process_directory(
             input_path,
@@ -1117,7 +1167,8 @@ def main():
             anonymize_paths=anonymize_paths,
             tracker=tracker,
             parallel=parallel,
-            num_workers=num_workers
+            num_workers=num_workers,
+            prompt_config=prompt_config
         )
     else:
         print(f"Error: Invalid input path: {input_path}")

@@ -1,6 +1,7 @@
 import { useState, useRef } from 'react'
 import './FileUpload.css'
 import { BsUpload, BsFolder } from 'react-icons/bs'
+import PromptSettings from './PromptSettings'
 
 function FileUpload({ backendUrl }) {
   const [file, setFile] = useState(null)
@@ -9,8 +10,8 @@ function FileUpload({ backendUrl }) {
   const [dragActive, setDragActive] = useState(false)
   const [processing, setProcessing] = useState(false)
   const [processingProgress, setProcessingProgress] = useState({ current: 0, total: 0 })
-  const [mode, setMode] = useState('auto')
   const [useAgentic, setUseAgentic] = useState(false)
+  const [promptSettingsOpen, setPromptSettingsOpen] = useState(false)
   const [result, setResult] = useState(null)
   const [error, setError] = useState(null)
   const fileInputRef = useRef(null)
@@ -117,7 +118,6 @@ function FileUpload({ backendUrl }) {
           formData.append('files', f)
           formData.append('paths', relativePath)
         })
-        formData.append('mode', mode)
         formData.append('use_agentic', useAgentic)
         formData.append('job_id', jobId)
 
@@ -139,7 +139,6 @@ function FileUpload({ backendUrl }) {
         // Single file upload
         const formData = new FormData()
         formData.append('file', file)
-        formData.append('mode', mode)
         formData.append('use_agentic', useAgentic)
 
         const response = await fetch(`${backendUrl}/api/process`, {
@@ -247,6 +246,15 @@ function FileUpload({ backendUrl }) {
             : 'Standard mode uses single-pass LLM processing.'}
         </p>
       </div>
+
+      {/* Prompt customization - only show when agentic mode is enabled */}
+      {useAgentic && (
+        <PromptSettings
+          backendUrl={backendUrl}
+          isOpen={promptSettingsOpen}
+          onToggle={() => setPromptSettingsOpen(!promptSettingsOpen)}
+        />
+      )}
 
       <div
         className={`drop-zone ${dragActive ? 'active' : ''} ${file || files.length > 0 ? 'has-file' : ''}`}

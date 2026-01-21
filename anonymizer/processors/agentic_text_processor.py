@@ -22,6 +22,7 @@ from ..config import AnonymizerConfig
 from ..llm_factory import create_chat_llm
 from ..tools.time_shift_tool import shift_datetime, redact_text, restore_text
 from ..retry_utils import retry_with_backoff, RetryConfig, create_retry_callback
+from ..prompt_config import PromptConfig, DEFAULT_PROMPT_CONFIG
 
 
 class DateTimeShift(BaseModel):
@@ -41,15 +42,24 @@ class AgenticTextProcessor(FileProcessor):
     3. Verification Phase: LLM verifies and fixes any issues
     """
 
-    def __init__(self, config: AnonymizerConfig, time_offset_days: Optional[int] = None):
+    def __init__(
+        self,
+        config: AnonymizerConfig,
+        time_offset_days: Optional[int] = None,
+        prompt_config: Optional[PromptConfig] = None
+    ):
         """
         Initialize agentic text processor.
 
         Args:
             config: Configuration object with LLM settings
             time_offset_days: Fixed offset for time shifting. If None, a random offset is generated.
+            prompt_config: Custom prompt configuration. If None, uses default prompts.
         """
         super().__init__(config)
+
+        # Prompt configuration
+        self.prompt_config = prompt_config or DEFAULT_PROMPT_CONFIG
 
         # Generate random offset if not provided (between -365 and +365 days)
         if time_offset_days is None:
@@ -370,51 +380,8 @@ class AgenticTextProcessor(FileProcessor):
         modified_chunk = chunk
         redactions = 0
 
-        prompt = f"""You are a PII anonymization agent. Analyze this medical text and redact ALL Personal Identifiable Information (PII).
-
-CRITICAL: You MUST scan the ENTIRE document, even if it's very long. Do NOT skip any sections!
-If the document has 100+ lines, you MUST check ALL of them for PIIs.
-
-IMPORTANT: Dates and times have ALREADY been anonymized (shifted). Do NOT redact dates!
-
-=== TEXT TO ANALYZE ===
-{chunk}
-=== END OF TEXT ===
-
-You have the redact_text tool available. For EACH piece of PII you find, call:
-  redact_text(text_to_redact="exact PII text")
-
-PII categories to redact:
-- Patient names, physician names, doctor names, staff names
-- Physical addresses, street names, specific facility/hospital names
-- Patient IDs, medical record numbers, unit numbers
-- Phone numbers, fax numbers
-- Email addresses
-
-DO NOT redact:
-- Dates and times (already shifted)
-- Medical terminology, diagnoses, procedures, medications
-- Generic locations like "EMERGENCY ROOM", "HOME", "ICU", "WARD"
-- Lab values, measurements, vital signs
-- Sequence numbers, lab codes, medical codes
-
-IMPORTANT:
-- Call redact_text for EACH piece of PII you find
-- Use the EXACT text as it appears (preserve spacing and punctuation)
-- Redact complete names, not just first or last names
-- Be thorough - check for all PII types
-
-Example calls:
-  redact_text(text_to_redact="John Smith")
-  redact_text(text_to_redact="Dr. Jane Wilson")
-  redact_text(text_to_redact="555-123-4567")
-  redact_text(text_to_redact="123 Main Street")
-
-  Redaction examples:
-    - "<subject_id>: 10005749" → "<subject_id>: ********" (tag and colon preserved)
-    - "45790175.dat 16 200.0(0)/mV 16 0 19 3475 0 I" → "********.dat 16 200.0(0)/mV 16 0 19 3475 0 I" (metadata preserved, ID replaced)
-
-"""
+        # Use configurable prompt
+        prompt = self.prompt_config.get_text_anonymization_prompt(text_data=chunk)
 
         messages = [HumanMessage(content=prompt)]
 
@@ -539,54 +506,12 @@ Example calls:
         modified_chunk = anonymized_chunk
         fixes = 0
 
-        # Show full content for verification - no truncation
-
-        prompt = f"""You are a verification agent for medical data anonymization.
-Compare the ORIGINAL and ANONYMIZED text below and identify any issues.
-
-CRITICAL: You MUST check the ENTIRE document carefully!
-Do NOT stop at the first few lines - scan ALL the way to the end.
-
-=== ORIGINAL TEXT ===
-{original_chunk}
-
-=== ANONYMIZED TEXT ===
-{anonymized_chunk}
-
-Time offset used: {self.time_offset_days} days
-
-You have THREE tools available:
-1. shift_datetime - to fix unshifted dates
-2. redact_text - to redact PII that was missed
-3. restore_text - to fix over-redaction (restore incorrectly redacted content)
-
-Your tasks (BE THOROUGH - check EVERY line of long documents):
-
-1. CHECK FOR UNSHIFTED DATES: Look for dates in ANONYMIZED that are identical to ORIGINAL.
-   All dates should be shifted by {self.time_offset_days} days.
-   → Use shift_datetime(datetime_str, offset_days={self.time_offset_days}) to fix
-
-2. CHECK FOR UNREDACTED PII: Look for PII that appears UNCHANGED:
-   - Patient names, doctor names, staff names
-   - Phone numbers, fax numbers, email addresses
-   - Specific addresses or facility names
-   → Use redact_text(text_to_redact="the PII text") to fix
-
-3. CHECK FOR OVER-REDACTION: Look for asterisks that replaced NON-PII content:
-   - Medical terminology (diabetes, hypertension, pneumonia, etc.)
-   - Medication names (metformin, lisinopril, aspirin, etc.)
-   - Procedure names (colonoscopy, MRI, CT scan, etc.)
-   - Generic locations (EMERGENCY ROOM, ICU, HOME, etc.)
-   → Use restore_text(redacted_text="*****", original_text="original term") to fix
-
-IMPORTANT:
-- Compare ORIGINAL vs ANONYMIZED to identify issues
-- Only redact actual PII, not medical content
-- Restore any medical terms that were incorrectly redacted
-- Check the ENTIRE document, not just the first page
-
-Call the appropriate tool for each issue you find. When done, summarize your findings.
-"""
+        # Use configurable prompt
+        prompt = self.prompt_config.get_text_verification_prompt(
+            original_text=original_chunk,
+            anonymized_text=anonymized_chunk,
+            time_offset=self.time_offset_days
+        )
 
         messages = [HumanMessage(content=prompt)]
 

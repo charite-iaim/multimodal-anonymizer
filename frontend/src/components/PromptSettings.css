@@ -1,0 +1,262 @@
+.prompt-settings-collapsed {
+  background: #f8f9fa;
+  border: 1px solid #e9ecef;
+  border-radius: 8px;
+  padding: 12px 16px;
+  margin-bottom: 20px;
+  cursor: pointer;
+}
+
+.prompt-settings-collapsed:hover {
+  background: #e9ecef;
+  border-color: #dee2e6;
+}
+
+.prompt-settings-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #495057;
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.prompt-settings {
+  background: #f8f9fa;
+  border: 1px solid #e9ecef;
+  border-radius: 8px;
+  margin-bottom: 20px;
+  overflow: hidden;
+}
+
+.prompt-settings-header {
+  padding: 16px;
+  cursor: pointer;
+  border-bottom: 1px solid #e9ecef;
+}
+
+.prompt-settings-header h3 {
+  margin: 0;
+  font-size: 16px;
+  color: #212529;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.prompt-settings-subtitle {
+  margin: 8px 0 0 0;
+  font-size: 13px;
+  color: #6c757d;
+}
+
+.prompt-settings-loading,
+.prompt-settings-error {
+  padding: 20px;
+  text-align: center;
+}
+
+.prompt-settings-error {
+  color: #dc3545;
+}
+
+.prompt-settings-content {
+  padding: 16px;
+}
+
+.prompt-group {
+  margin-bottom: 24px;
+}
+
+.prompt-group:last-of-type {
+  margin-bottom: 0;
+}
+
+.prompt-group-title {
+  margin: 0 0 12px 0;
+  padding: 8px 12px;
+  font-size: 14px;
+  font-weight: 600;
+  color: #495057;
+  background: #e9ecef;
+  border-radius: 6px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.prompt-group-title-collapsible {
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  transition: background 0.2s ease;
+}
+
+.prompt-group-title-collapsible:hover {
+  background: #dee2e6;
+}
+
+.prompt-field {
+  margin-bottom: 16px;
+  background: white;
+  border: 1px solid #e9ecef;
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.prompt-field-highlight {
+  border-color: #0d6efd;
+  border-width: 2px;
+}
+
+.prompt-field-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px 16px;
+  background: #f8f9fa;
+}
+
+.prompt-field-collapsible {
+  cursor: pointer;
+}
+
+.prompt-field-collapsible:hover {
+  background: #e9ecef;
+}
+
+.prompt-field-header label {
+  font-weight: 600;
+  font-size: 14px;
+  color: #212529;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: inherit;
+  margin: 0;
+}
+
+.prompt-reset-single {
+  background: none;
+  border: none;
+  color: #6c757d;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 4px;
+  transition: all 0.2s ease;
+}
+
+.prompt-reset-single:hover {
+  background: #e9ecef;
+  color: #212529;
+}
+
+.prompt-description {
+  margin: 0;
+  padding: 8px 16px;
+  font-size: 12px;
+  color: #6c757d;
+  background: #f8f9fa;
+  border-top: 1px solid #e9ecef;
+}
+
+.prompt-field textarea {
+  width: 100%;
+  border: none;
+  border-top: 1px solid #e9ecef;
+  padding: 12px 16px;
+  font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  resize: vertical;
+  min-height: 80px;
+  box-sizing: border-box;
+}
+
+.prompt-field textarea:focus {
+  outline: none;
+  background: #f8f9ff;
+}
+
+.prompt-settings-actions {
+  display: flex;
+  gap: 12px;
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px solid #e9ecef;
+}
+
+.prompt-save-button {
+  background: #0d6efd;
+  color: white;
+  border: none;
+  padding: 10px 20px;
+  border-radius: 6px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.2s ease;
+}
+
+.prompt-save-button:hover:not(:disabled) {
+  background: #0b5ed7;
+}
+
+.prompt-save-button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.prompt-reset-button {
+  background: white;
+  color: #dc3545;
+  border: 1px solid #dc3545;
+  padding: 10px 20px;
+  border-radius: 6px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.prompt-reset-button:hover:not(:disabled) {
+  background: #dc3545;
+  color: white;
+}
+
+.prompt-reset-button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.prompt-success {
+  margin-top: 12px;
+  padding: 10px 16px;
+  background: #d1e7dd;
+  color: #0f5132;
+  border-radius: 6px;
+  font-size: 14px;
+}
+
+/* Modified indicator styles */
+.prompt-modified-badge {
+  background: #fff3cd;
+  color: #856404;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 10px;
+  margin-left: 8px;
+}
+
+.prompt-modified-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  background: #ffc107;
+  border-radius: 50%;
+  margin-left: 6px;
+}
+
+.prompt-field-modified {
+  border-color: #ffc107;
+  border-left: 3px solid #ffc107;
+}
