@@ -71,14 +71,11 @@ class FilenameAnonymizer:
         # Note: max_tokens needs to be high enough to accommodate reasoning models
         # which use reasoning_tokens within the max_tokens budget (e.g., GLM-4 can use
         # ~1800 reasoning tokens, so we need at least 2500+ for a complete response)
-        # Reasoning is disabled (reasoning_effort=None) for filename anonymization
-        # since it's a simple task that doesn't benefit from extended reasoning.
         self.llm = create_chat_llm(
             config=config,
             temperature=0.0,  # Use deterministic output for consistency
             max_tokens=4096,  # Higher limit to accommodate reasoning models
             structured_output=FilenameAnonymizationResult,
-            reasoning_effort=None,  # Disable reasoning for this simple task
         )
 
         # Store file mappings by folder for CSV export

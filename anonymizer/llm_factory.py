@@ -24,7 +24,6 @@ def create_chat_llm(
     tools: Optional[List[Any]] = None,
     structured_output: Optional[Type[BaseModel]] = None,
     use_vision_model: bool = False,
-    reasoning_effort: Optional[str] = "medium",
 ) -> BaseChatModel:
     """
     Create a chat LLM instance based on the configured provider.
@@ -37,8 +36,6 @@ def create_chat_llm(
         tools: Optional list of tools to bind to the LLM
         structured_output: Optional Pydantic model for structured output
         use_vision_model: If True, use vision-capable model (for Fireworks)
-        reasoning_effort: Reasoning effort for reasoning models ("none", "low", "medium", "high").
-                          Set to None to disable reasoning. Default is "medium".
 
     Returns:
         BaseChatModel instance configured for the selected provider
@@ -53,7 +50,6 @@ def create_chat_llm(
             max_tokens=max_tokens,
             tools=tools,
             structured_output=structured_output,
-            reasoning_effort=reasoning_effort,
         )
     elif config.llm_provider == "fireworks":
         return _create_fireworks_llm(
@@ -96,30 +92,18 @@ def _create_azure_llm(
     max_tokens: int,
     tools: Optional[List[Any]] = None,
     structured_output: Optional[Type[BaseModel]] = None,
-    reasoning_effort: Optional[str] = "medium",
 ) -> BaseChatModel:
     """Create Azure OpenAI LLM instance."""
     from langchain_openai import AzureChatOpenAI
 
-    # Build model kwargs for reasoning effort
-    model_kwargs = {}
-    if reasoning_effort is not None:
-        model_kwargs["reasoning_effort"] = reasoning_effort
-
-    llm_kwargs = {
-        "azure_deployment": config.azure_deployment_name,
-        "azure_endpoint": config.azure_endpoint,
-        "api_key": config.azure_api_key,
-        "api_version": config.azure_api_version,
-        "timeout": timeout,
-        "max_tokens": max_tokens,
-    }
-    # Note: temperature is intentionally not passed to Azure
-
-    if model_kwargs:
-        llm_kwargs["model_kwargs"] = model_kwargs
-
-    llm = AzureChatOpenAI(**llm_kwargs)
+    llm = AzureChatOpenAI(
+        azure_deployment=config.azure_deployment_name,
+        azure_endpoint=config.azure_endpoint,
+        api_key=config.azure_api_key,
+        api_version=config.azure_api_version,
+        timeout=timeout,
+        max_tokens=max_tokens,
+    )
 
     if structured_output is not None:
         return llm.with_structured_output(structured_output)
