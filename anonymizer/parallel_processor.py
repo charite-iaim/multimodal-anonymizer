@@ -10,6 +10,18 @@ from dataclasses import dataclass
 import time
 
 
+# System files that should always be skipped during processing
+IGNORED_FILES = {
+    '.DS_Store',
+    '.ds_store',
+    'Thumbs.db',
+    'thumbs.db',
+    'desktop.ini',
+    '.gitignore',
+    '.gitkeep',
+}
+
+
 @dataclass
 class ProcessingJob:
     """Represents a single file processing job."""
@@ -346,6 +358,9 @@ def collect_files_for_processing(
         pattern = '**/*'
         for item in input_dir.rglob('*'):
             if item.is_file():
+                # Skip system files that should never be processed
+                if item.name in IGNORED_FILES:
+                    continue
                 # Skip hidden files if requested
                 if skip_hidden and any(part.startswith('.') for part in item.parts):
                     continue
@@ -354,6 +369,9 @@ def collect_files_for_processing(
         # Only files in current directory
         for item in input_dir.iterdir():
             if item.is_file():
+                # Skip system files that should never be processed
+                if item.name in IGNORED_FILES:
+                    continue
                 if skip_hidden and item.name.startswith('.'):
                     continue
                 files.append(item)

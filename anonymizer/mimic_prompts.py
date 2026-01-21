@@ -37,26 +37,77 @@ Common PII columns to look for:
 - note_id: Clinical note identifier
 - caregiver_id, provider_id: Healthcare provider identifiers
 - order_id: Order identifiers
+- microevent_id, labevent_id, pharmacy_id, poe_id, emar_id, specimen_id, transfer_id: Various MIMIC event identifiers
 - Any column with "id" suffix that links to individuals
-- Columns that only contain names, SSN, phone numbers, addresses, email
 
 DO NOT mark as PII columns:
 - Columns with mixed content that are NOT PURE IDENTIFIERS
-- Date/time columns (already handled by time shifting)
-- Medical codes (ICD, CPT, etc.)
+- Date/time columns
+- Medical codes (icd_code, CPT, etc.)
 - Generic categorical columns (admission_type, discharge_location, etc.)
 - Numeric measurements (lab values, vitals, etc.)
-
+- Sequence numbers (seq_num, poe_seq, note_seq etc.)
+- med_rn, gsn_rn, gsn, ndc (these are medical codes, not PII)
+- itemid (its a code for eventitem, not PII)
+- discharge_location, admission_type, insurance (these are categorical, not PII)
+- comments, descriptions, notes
+                                         
 For EACH column that should be entirely redacted, call:
   redact_column(column_name="exact_column_name", reason="brief reason")
 
 If no columns need full redaction, just respond with "No columns identified for full redaction."
 """)
 
+    # Phase 2: PII anonymization for text files (.txt, .hea) - MIMIC-specific
+    text_anonymization_prompt: str = field(default="""You are a PII anonymization agent for MIMIC-IV medical data. Analyze this text and redact ALL Personal Identifiable Information (PII).
+
+CRITICAL: You MUST scan the ENTIRE document, even if it's very long. Do NOT skip any sections!
+If the document has 100+ lines, you MUST check ALL of them for PIIs.
+
+IMPORTANT: Dates and times have ALREADY been anonymized (shifted). Do NOT redact dates!
+
+=== TEXT TO ANALYZE ===
+{text_data}
+=== END OF TEXT ===
+
+You have the redact_text tool available. For EACH piece of PII you find, call:
+  redact_text(text_to_redact="exact PII text") e.g. redact_text(text_to_redact="John Doe")
+
+PII categories to redact (MIMIC-IV specific):
+- name: Patient names, physician names, doctor names, staff names, caregiver names
+- id: subject_id, hadm_id, stay_id, note_id, caregiver_id, and any other MIMIC identifiers
+- address: Physical addresses, street names
+- location: Hospital names (Beth Israel Deaconess Medical Center, etc.), specific facility names
+- phone: Phone numbers, fax numbers
+- email: Email addresses
+
+MIMIC-IV ECG Header (.hea) files may contain:
+- Subject IDs in filename references (e.g., "45790175.dat")
+- Record identifiers in the first line
+- Any numeric IDs that could link to patients
+                                           
+Example reductions for .hea files:
+45790175 12 500 5000 04:57:00 16/07/2131 -> ******** 12 500 5000 04:57:00 16/07/2131
+45790175.dat 16 200.0(0)/mV 16 0 19 3475 0 I -> ********.dat 16 200.0(0)/mV 16 0 19 3475 0 I
+# <subject_id>: 10045929 -> # <subject_id>: *********
+
+DO NOT redact:
+- Dates and times (already shifted)
+- Medical terminology, diagnoses, procedures, medications
+- Generic locations like "EMERGENCY ROOM", "HOME", "ICU", "WARD"
+- Lab values, measurements, vital signs
+- ECG technical metadata (sampling rate, gain, ADC resolution, lead names)
+- Sequence numbers, lab codes, medical codes (itemid, icd_code, etc.)
+
+IMPORTANT:
+- Call redact_text for EACH piece of PII you find
+- Use the EXACT text as it appears (preserve spacing and punctuation)
+- Redact complete names, not just first or last names
+- Be thorough - check for all PII types
+""")
+
     # Phase 2: PII anonymization for CSV - MIMIC-specific
     csv_anonymization_prompt: str = field(default="""You are a PII anonymization agent. Analyze this CSV data and redact ALL Personal Identifiable Information (PII).{skipped_columns}
-
-CRITICAL: You MUST scan the ENTIRE content of each cell, even if it's very long. Do NOT skip any PIIs!
 
 IMPORTANT: Dates and times have ALREADY been anonymized (shifted). Do NOT redact dates!
 
@@ -152,6 +203,48 @@ Set is_clean to TRUE only if you are confident that NO PII remains visible.
 Set is_clean to FALSE if you find ANY remaining PII that needs additional redaction.
 
 Be thorough - missing even one PII element is a privacy violation.
+""")
+
+    # Phase 3: Text verification prompt - MIMIC-specific
+    text_verification_prompt: str = field(default="""You are a verification agent for MIMIC-IV medical data anonymization.
+Compare the ORIGINAL and ANONYMIZED text below and identify any issues.
+
+CRITICAL: You MUST check the ENTIRE document carefully!
+Do NOT stop at the first few lines - scan ALL the way to the end.
+
+=== ORIGINAL TEXT ===
+{original_text}
+
+=== ANONYMIZED TEXT ===
+{anonymized_text}
+
+Time offset used: {time_offset} days
+
+You have TWO tools available:
+1. shift_datetime - to fix unshifted dates
+2. redact_text - to redact PII that was missed
+
+Your tasks (BE THOROUGH - check EVERY line):
+
+1. CHECK FOR UNSHIFTED DATES: Look for dates in ANONYMIZED that are identical to ORIGINAL.
+   All dates should be shifted by {time_offset} days.
+   → Use shift_datetime(datetime_str, offset_days={time_offset}) to fix
+
+2. CHECK FOR UNREDACTED PII (MIMIC-IV specific): Look for PII that appears UNCHANGED:
+   - Patient names, doctor names, staff names, caregiver names
+   - MIMIC identifiers: subject_id, hadm_id, stay_id, note_id values
+   - Phone numbers, fax numbers, email addresses
+   - Hospital names (Beth Israel Deaconess Medical Center, etc.)
+   - Physical addresses
+   - ECG record IDs in .hea files (numeric IDs like "45790175")
+   → Use redact_text(text_to_redact="the PII text") to fix
+
+IMPORTANT:
+- Compare ORIGINAL vs ANONYMIZED to identify issues
+- Only redact actual PII, not medical content
+- Check the ENTIRE document, not just the first page
+
+Call the appropriate tool for each issue you find. When done, summarize your findings.
 """)
 
     # PDF anonymization prompt - MIMIC-specific

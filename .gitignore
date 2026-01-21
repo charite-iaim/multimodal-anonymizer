@@ -12,3 +12,4 @@ data/test_output
 node_modules/
 data/
 __pycache__
+results

@@ -97,7 +97,7 @@ class AgenticTextProcessor(FileProcessor):
             config=config,
             timeout=600,
             max_tokens=16000,
-            tools=[shift_datetime, redact_text, restore_text],
+            tools=[shift_datetime, redact_text],
         )
 
     def can_process(self, file_path: Path) -> bool:
@@ -568,22 +568,6 @@ class AgenticTextProcessor(FileProcessor):
 
                         messages.append(ToolMessage(
                             content=f"Text redacted: '{text_to_redact}' -> '{result}'",
-                            tool_call_id=tool_call["id"]
-                        ))
-
-                    elif tool_name == "restore_text":
-                        redacted_text = tool_args.get("redacted_text", "")
-                        original_text = tool_args.get("original_text", "")
-                        result = restore_text.invoke(tool_args)
-
-                        if "[RESTORE_FAILED" not in result:
-                            if redacted_text in modified_chunk:
-                                modified_chunk = modified_chunk.replace(redacted_text, result)
-                                fixes += 1
-                                print(f"    Restored: '{redacted_text}' -> '{result}'")
-
-                        messages.append(ToolMessage(
-                            content=f"Text restored: '{redacted_text}' -> '{result}'",
                             tool_call_id=tool_call["id"]
                         ))
 

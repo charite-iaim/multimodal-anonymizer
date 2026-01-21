@@ -463,10 +463,21 @@ async def process_folder(
     # Initialize filename anonymizer
     filename_anonymizer = FilenameAnonymizer(config)
 
+    # Dictionary to store folder name mappings (original -> anonymized)
+    folder_mapping = {}
+
     try:
         # Save all uploaded files first
         saved_files = []
-        for file, rel_path in zip(files, paths):
+        for idx, (file, rel_path) in enumerate(zip(files, paths)):
+            # Update progress during file saving phase
+            job_progress[job_id] = {
+                "status": "processing",
+                "current": idx + 1,
+                "total": total_files,
+                "current_file": f"Saving: {rel_path}"
+            }
+
             # Create directory structure if needed
             file_input_path = input_dir / rel_path
             file_input_path.parent.mkdir(parents=True, exist_ok=True)
@@ -476,6 +487,28 @@ async def process_folder(
 
             saved_files.append((file_input_path, rel_path))
 
+        # Pre-anonymize all folder names
+        unique_folders = set()
+        for _, rel_path in saved_files:
+            # Get all folder names in the path (excluding the filename)
+            for part in Path(rel_path).parent.parts:
+                unique_folders.add(part)
+
+        # Anonymize each unique folder name
+        for folder_name in sorted(unique_folders):
+            # Check if folder was already anonymized
+            existing_mapping = filename_anonymizer.get_existing_folder_mapping(folder_name)
+            if existing_mapping:
+                folder_mapping[folder_name] = existing_mapping
+            else:
+                folder_result = filename_anonymizer.anonymize_filename(folder_name, is_directory=True)
+                folder_mapping[folder_name] = folder_result.anonymized_filename
+                filename_anonymizer.add_folder_mapping(
+                    original_foldername=folder_name,
+                    anonymized_foldername=folder_result.anonymized_filename,
+                    phi_detections=folder_result.phi_detections
+                )
+
         # Process each file
         for idx, (input_path, rel_path) in enumerate(saved_files):
             # Update progress
@@ -483,9 +516,19 @@ async def process_folder(
                 "status": "processing",
                 "current": idx + 1,
                 "total": total_files,
-                "current_file": rel_path
+                "current_file": f"Processing: {rel_path}"
             }
             try:
+                # Build anonymized relative path by replacing folder names
+                rel_path_obj = Path(rel_path)
+                anonymized_parts = []
+                for part in rel_path_obj.parent.parts:
+                    anonymized_parts.append(folder_mapping.get(part, part))
+                anonymized_rel_dir = Path(*anonymized_parts) if anonymized_parts else Path('.')
+
+                # Use anonymized folder path for CSV storage
+                anonymized_folder_path = str(anonymized_rel_dir) if anonymized_rel_dir != Path('.') else ""
+
                 # Anonymize filename
                 filename_result = filename_anonymizer.anonymize_filename(
                     input_path.name,
@@ -494,10 +537,18 @@ async def process_folder(
                 )
                 output_filename = filename_result.anonymized_filename
 
-                # Preserve directory structure in output
-                rel_output_dir = output_dir / Path(rel_path).parent
+                # Preserve anonymized directory structure in output
+                rel_output_dir = output_dir / anonymized_rel_dir
                 rel_output_dir.mkdir(parents=True, exist_ok=True)
                 output_path = rel_output_dir / output_filename
+
+                # Record file mapping using anonymized folder path
+                filename_anonymizer.add_file_mapping(
+                    folder_path=anonymized_folder_path,
+                    original_filename=input_path.name,
+                    anonymized_filename=output_filename,
+                    phi_detections=filename_result.phi_detections
+                )
 
                 # Determine processor based on file extension
                 processor = None
@@ -558,6 +609,9 @@ async def process_folder(
                     "error": str(e)
                 })
                 files_failed += 1
+
+        # Save filename anonymizer mappings (CSV files) to output directory
+        filename_anonymizer.save_all_mappings(output_dir=output_dir)
 
         # Create ZIP archive of all output files
         zip_filename = f"anonymized_{job_id[:8]}.zip"

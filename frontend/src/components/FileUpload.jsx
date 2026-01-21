@@ -3,6 +3,14 @@ import './FileUpload.css'
 import { BsUpload, BsFolder } from 'react-icons/bs'
 import PromptSettings from './PromptSettings'
 
+// Files to ignore when uploading folders (system files, hidden files, etc.)
+const IGNORED_FILES = ['.DS_Store', 'Thumbs.db', '.gitkeep', '.gitignore']
+const shouldIgnoreFile = (file) => {
+  const fileName = file.name || ''
+  // Ignore files starting with . (hidden files) or in the ignored list
+  return fileName.startsWith('.') || IGNORED_FILES.includes(fileName)
+}
+
 function FileUpload({ backendUrl }) {
   const [file, setFile] = useState(null)
   const [files, setFiles] = useState([])  // For folder uploads
@@ -35,13 +43,18 @@ function FileUpload({ backendUrl }) {
     if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
       if (uploadMode === 'folder' || e.dataTransfer.files.length > 1) {
         // Multiple files dropped - treat as folder upload
-        const fileList = Array.from(e.dataTransfer.files)
-        setFiles(fileList)
-        setFile(null)
-        setUploadMode('folder')
+        const fileList = Array.from(e.dataTransfer.files).filter(f => !shouldIgnoreFile(f))
+        if (fileList.length > 0) {
+          setFiles(fileList)
+          setFile(null)
+          setUploadMode('folder')
+        }
       } else {
-        setFile(e.dataTransfer.files[0])
-        setFiles([])
+        const droppedFile = e.dataTransfer.files[0]
+        if (!shouldIgnoreFile(droppedFile)) {
+          setFile(droppedFile)
+          setFiles([])
+        }
       }
       setResult(null)
       setError(null)
@@ -60,12 +73,14 @@ function FileUpload({ backendUrl }) {
 
   const handleFolderChange = (e) => {
     if (e.target.files && e.target.files.length > 0) {
-      const fileList = Array.from(e.target.files)
-      setFiles(fileList)
-      setFile(null)
-      setUploadMode('folder')
-      setResult(null)
-      setError(null)
+      const fileList = Array.from(e.target.files).filter(f => !shouldIgnoreFile(f))
+      if (fileList.length > 0) {
+        setFiles(fileList)
+        setFile(null)
+        setUploadMode('folder')
+        setResult(null)
+        setError(null)
+      }
     }
   }
 
@@ -368,7 +383,7 @@ function FileUpload({ backendUrl }) {
           disabled={processing}
         >
           {processing
-            ? `Processing${processingProgress.total > 1 ? ` (${processingProgress.current}/${processingProgress.total})` : ''}...`
+            ? `Processing${processingProgress.total > 1 && processingProgress.current > 0 ? ` (${processingProgress.current}/${processingProgress.total})` : ''}...`
             : files.length > 0
               ? `Anonymize ${files.length} Files`
               : 'Anonymize File'}
@@ -469,7 +484,9 @@ function FileUpload({ backendUrl }) {
           {processingProgress.total > 1 && (
             <>
               <p className="processing-progress">
-                Processing file {processingProgress.current} of {processingProgress.total}
+                {processingProgress.current > 0
+                  ? `File ${processingProgress.current} of ${processingProgress.total}`
+                  : `Preparing ${processingProgress.total} files...`}
               </p>
               {processingProgress.currentFile && (
                 <p className="processing-current-file">

@@ -22,7 +22,8 @@ from anonymizer.filename_anonymizer import FilenameAnonymizer
 from anonymizer.processing_tracker import ProcessingTracker
 from anonymizer.parallel_processor import (
     ParallelFileProcessor,
-    collect_files_for_processing
+    collect_files_for_processing,
+    IGNORED_FILES
 )
 
 
@@ -271,6 +272,9 @@ def process_directory(
     if not recursive:
         # Original behavior: process only files in current directory
         files = [f for f in input_dir.iterdir() if f.is_file()]
+
+        # Skip system files that should never be processed
+        files = [f for f in files if f.name not in IGNORED_FILES]
 
         if skip_hidden:
             files = [f for f in files if not f.name.startswith('.')]
@@ -606,6 +610,10 @@ def process_directory_recursive(
         return _stats
 
     for item in items:
+        # Skip system files that should never be processed
+        if item.name in IGNORED_FILES:
+            continue
+
         # Skip hidden files/directories if requested
         if skip_hidden and item.name.startswith('.'):
             continue

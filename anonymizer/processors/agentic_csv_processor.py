@@ -147,7 +147,7 @@ class AgenticCSVProcessor(FileProcessor):
             config=config,
             timeout=600,
             max_tokens=16000,
-            tools=[shift_datetime, redact_text, restore_text],
+            tools=[shift_datetime, redact_text],
         )
 
     def _create_llm_anonymize(self):
@@ -165,7 +165,7 @@ class AgenticCSVProcessor(FileProcessor):
             config=self._config,
             timeout=600,
             max_tokens=16000,
-            tools=[shift_datetime, redact_text, restore_text],
+            tools=[shift_datetime, redact_text],
         )
 
     def _safe_print(self, message: str) -> None:
@@ -913,30 +913,6 @@ class AgenticCSVProcessor(FileProcessor):
                             tool_call_id=tool_call["id"]
                         ))
 
-                    elif tool_name == "restore_text":
-                        redacted_text = tool_args.get("redacted_text", "")
-                        original_text = tool_args.get("original_text", "")
-                        row_idx = tool_args.get("row_index", 0)
-                        col_name = tool_args.get("column_name", "")
-
-                        result = restore_text.invoke(tool_args)
-
-                        if "[RESTORE_FAILED" not in result:
-                            # Convert absolute row index to batch-local index
-                            local_idx = row_idx - start_idx
-                            if 0 <= local_idx < len(modified_batch):
-                                cell_value = str(modified_batch[local_idx].get(col_name, ""))
-                                if redacted_text in cell_value:
-                                    modified_batch[local_idx][col_name] = cell_value.replace(
-                                        redacted_text, result
-                                    )
-                                    batch_fixes += 1
-                                    self._safe_print(f"    Restored: '{redacted_text}' → '{result}'")
-
-                        messages.append(ToolMessage(
-                            content=f"Text restored: '{redacted_text}' → '{result}'",
-                            tool_call_id=tool_call["id"]
-                        ))
 
             except Exception as e:
                 self._safe_print(f"    Verification error in batch {batch_num + 1}: {e}")
