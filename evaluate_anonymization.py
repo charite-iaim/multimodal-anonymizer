@@ -54,11 +54,18 @@ import traceback
 # Optional imports for image processing
 try:
     import cv2
-    import numpy as np
     CV2_AVAILABLE = True
 except ImportError:
     CV2_AVAILABLE = False
     print("Warning: OpenCV not available. Image evaluation will be skipped.")
+
+try:
+    import numpy as np
+    NUMPY_AVAILABLE = True
+except ImportError:
+    NUMPY_AVAILABLE = False
+    np = None  # type: ignore
+    print("Warning: NumPy not available. Some evaluations will be limited.")
 
 try:
     import pydicom
@@ -981,44 +988,124 @@ def evaluate_csv_file(label_path: str, result_path: str) -> CSVEvaluationResult:
 # HEA (Text) Evaluation
 # ============================================================================
 
+def evaluate_hea_line(label_line: str, result_line: str) -> Tuple[int, int, int, int, List[str], List[str]]:
+    """
+    Evaluate a single HEA line by comparing labeled PHI with anonymized output.
+
+    HEA files have a specific structure where PHI is replaced with asterisks (********).
+    This function extracts PHI values from tags and checks if they appear in the result.
+
+    For non-PHI tokens, we use a token-based comparison to detect over-redaction.
+    """
+    tp = 0
+    fn = 0
+    fp = 0
+    tn = 0
+    not_redacted = []
+    over_redacted = []
+
+    # Extract all PHI values from the label line (only PER tags, not DATE)
+    # DATE tags are evaluated separately via evaluate_hea_date_shifts() for time-shift validation
+    phi_values = []
+    for match in re.finditer(r'<PER>(.*?)</PER>', label_line):
+        phi_values.append(match.group(1))
+
+    # Check if each PHI value was properly redacted
+    for phi_value in phi_values:
+        if phi_value in result_line:
+            # PHI still appears in result - not redacted
+            fn += 1
+            not_redacted.append(phi_value)
+        else:
+            # PHI was redacted
+            tp += 1
+
+    # For FP/TN detection, compare non-PHI tokens
+    # Get clean source text (without tags)
+    clean_source = remove_tags(label_line)
+
+    # Tokenize both lines
+    source_tokens = set()
+    for match in re.finditer(r'\b\w+\b', clean_source):
+        token = match.group()
+        # Skip if this token is part of PHI
+        if any(phi_value and token in phi_value for phi_value in phi_values):
+            continue
+        source_tokens.add(token)
+
+    result_tokens = set()
+    for match in re.finditer(r'\b\w+\b', result_line):
+        token = match.group()
+        # Skip common redaction patterns
+        if re.match(r'^\*+$', token):
+            continue
+        result_tokens.add(token)
+
+    # Check which non-PHI tokens are missing (potential over-redaction)
+    for token in source_tokens:
+        # Skip very short tokens (single characters, numbers that might be part of measurements)
+        if len(token) <= 1:
+            continue
+
+        # Skip common numeric values that might change due to formatting
+        if token.isdigit() and len(token) <= 2:
+            continue
+
+        if token in result_tokens:
+            # Token correctly preserved
+            tn += 1
+        else:
+            # Token was removed/redacted - potential false positive
+            # However, only count it as FP if it's not a substring of PHI
+            is_part_of_phi = any(phi_value and token in phi_value for phi_value in phi_values)
+            if not is_part_of_phi:
+                fp += 1
+                over_redacted.append(token)
+            else:
+                # It's part of PHI, so it's correct to remove it
+                tn += 1
+
+    return tp, fn, fp, tn, not_redacted, over_redacted
+
+
 def evaluate_hea_file(label_path: str, result_path: str) -> HEAEvaluationResult:
     """
     Evaluate a single HEA text file by comparing labeled PHI with anonymized output.
-    
+
     HEA files are ECG header files containing PHI marked with <PER> tags.
     The evaluation compares line by line to check if PHI was properly redacted.
     Tracks TP, FN, FP, and TN for comprehensive metric calculation.
     """
     filename = os.path.basename(label_path)
     result = HEAEvaluationResult(filename=filename)
-    
+
     if not os.path.exists(label_path):
         print(f"  Warning: Label file not found: {label_path}")
         return result
-    
+
     if not os.path.exists(result_path):
         print(f"  Warning: Result file not found: {result_path}")
         return result
-    
+
     # Read both files
     with open(label_path, 'r', encoding='utf-8') as f:
         label_content = f.read()
-    
+
     with open(result_path, 'r', encoding='utf-8') as f:
         result_content = f.read()
-    
+
     # Split into lines for line-by-line comparison
     label_lines = label_content.split('\n')
     result_lines = result_content.split('\n')
-    
+
     # Compare line by line - evaluate all lines for FP/TN tracking
     for i, label_line in enumerate(label_lines):
         # Get corresponding result line (if exists)
         result_line = result_lines[i] if i < len(result_lines) else ''
-        
-        # Use the same position-based evaluation as CSV fields
-        tp, fn, fp, tn, not_redacted, over_redacted = evaluate_csv_field(label_line, result_line)
-        
+
+        # Use specialized HEA line evaluation
+        tp, fn, fp, tn, not_redacted, over_redacted = evaluate_hea_line(label_line, result_line)
+
         result.total_phi += tp + fn
         result.true_positives += tp
         result.false_negatives += fn
@@ -1026,7 +1113,7 @@ def evaluate_hea_file(label_path: str, result_path: str) -> HEAEvaluationResult:
         result.true_negatives += tn
         result.phi_not_redacted.extend(not_redacted)
         result.over_redacted.extend(over_redacted)
-    
+
     return result
 
 
@@ -1673,29 +1760,35 @@ def evaluate_patient(labels_dir: str, results_dir: str,
         
         # ---- HEA File Evaluation (ECG modality only) ----
         if modality == 'ecg':
-            # Find and evaluate .hea files
-            hea_files_evaluated = False
+            # Find and evaluate .hea and .txt files (same evaluation logic)
+            text_files_evaluated = False
             for label_file in os.listdir(label_ann_dir):
-                if not label_file.endswith('.hea'):
+                if not (label_file.endswith('.hea') or label_file.endswith('.txt')):
                     continue
                 
-                if not hea_files_evaluated:
+                if not text_files_evaluated:
                     print(f"\n📝 Evaluating HEA files...")
-                    hea_files_evaluated = True
-                
+                    text_files_evaluated = True
+
                 label_path = os.path.join(label_ann_dir, label_file)
-                
-                # Find corresponding anonymized .hea file
+                file_ext = os.path.splitext(label_file)[1]  # .hea or .txt
+
+                # Find corresponding anonymized file
                 anonymized_filename = file_map.get(label_file, '')
                 result_path = os.path.join(result_modality_dir, anonymized_filename) if anonymized_filename else ''
-                
-                # If no mapping found, try to find any .hea file in results
+
+                # If no mapping found, try to find matching file with same extension in results
                 if not os.path.exists(result_path):
+                    label_basename = os.path.splitext(label_file)[0]  # e.g., "47695563" from "47695563.hea"
                     for f in os.listdir(result_modality_dir):
-                        if f.endswith('.hea'):
-                            result_path = os.path.join(result_modality_dir, f)
-                            anonymized_filename = f
-                            break
+                        if f.endswith(file_ext):
+                            # Prefer exact basename match, otherwise take any file with same extension
+                            f_basename = os.path.splitext(f)[0]
+                            if label_basename in f_basename or not result_path:
+                                result_path = os.path.join(result_modality_dir, f)
+                                anonymized_filename = f
+                                if label_basename in f_basename:
+                                    break  # Exact match found, stop searching
                 
                 if not os.path.exists(result_path):
                     print(f"  Warning: Result file not found for {label_file}")
@@ -1718,33 +1811,89 @@ def evaluate_patient(labels_dir: str, results_dir: str,
                     date_status = "✓" if hea_date_result.incorrectly_redacted == 0 and hea_date_result.not_shifted == 0 else "✗"
                     print(f"    {date_status} Dates: {hea_date_result.correctly_shifted}/{hea_date_result.total_dates} shifted "
                           f"({hea_date_result.incorrectly_redacted} redacted, {hea_date_result.not_shifted} unchanged)")
-        
-        # Evaluate filename anonymization using PHI from label annotations
-        # Build a mapping of original filename -> expected PHI from annotations
-        label_phi_by_filename: Dict[str, List[str]] = {}
-        for ann in annotations:
-            if ann.filename not in label_phi_by_filename:
-                label_phi_by_filename[ann.filename] = []
 
-        # Also extract PHI from filename_with_phi_tags if available in the annotation file
-        if os.path.exists(ann_file):
-            with open(ann_file, 'r', encoding='utf-8') as f:
-                reader = csv.DictReader(f)
-                for row in reader:
-                    filename = row.get('filename', '')
-                    annotated_fn = row.get('filename_with_phi_tags', '')
-                    if filename and annotated_fn:
-                        phi_values = extract_phi_from_annotated_filename(annotated_fn)
-                        if filename not in label_phi_by_filename:
-                            label_phi_by_filename[filename] = []
-                        # Add unique PHI values
-                        for phi in phi_values:
-                            if phi not in label_phi_by_filename[filename]:
-                                label_phi_by_filename[filename].append(phi)
+        # ---- Filename Evaluation for this modality ----
+        # Evaluate all files in the modality's filename_anonymization.csv
+        for mapping in result_mappings:
+            fn_result = FilenameEvaluationResult(
+                original=mapping.original,
+                anonymized=mapping.anonymized,
+                expected_phi=mapping.phi_values
+            )
+
+            # Check if PHI leaked in anonymized filename
+            for phi in mapping.phi_values:
+                # Normalize for comparison (handle underscores, case)
+                phi_normalized = phi.lower().replace('_', ' ').replace('-', ' ')
+                anonymized_normalized = mapping.anonymized.lower().replace('_', ' ').replace('-', ' ')
+                if phi_normalized in anonymized_normalized:
+                    fn_result.phi_in_filename.append(phi)
+                    fn_result.is_anonymized = False
+
+            result.filename_results.append(fn_result)
+
+    # ---- TXT File Evaluation (discharge notes in patient root directory) ----
+    # Look for .txt files directly in the label patient directory (not in annotations_* subdirs)
+    txt_files_in_label = [f for f in os.listdir(label_base)
+                          if f.endswith('.txt') and os.path.isfile(os.path.join(label_base, f))]
+
+    if txt_files_in_label:
+        print(f"\n📝 Evaluating TXT files...")
+
+        # Load filename mapping from result directory
+        result_mapping_file = os.path.join(result_base, "filename_anonymization.csv")
+        result_mappings = load_filename_mapping(result_mapping_file) if os.path.exists(result_mapping_file) else []
+        file_map = {m.original: m.anonymized for m in result_mappings}
+
+        for label_file in txt_files_in_label:
+            label_path = os.path.join(label_base, label_file)
+
+            # Find corresponding anonymized file
+            anonymized_filename = file_map.get(label_file, '')
+            result_path = os.path.join(result_base, anonymized_filename) if anonymized_filename else ''
+
+            # If no mapping found, try to find matching .txt file in results
+            if not result_path or not os.path.exists(result_path):
+                for f in os.listdir(result_base):
+                    if f.endswith('.txt') and os.path.isfile(os.path.join(result_base, f)):
+                        result_path = os.path.join(result_base, f)
+                        anonymized_filename = f
+                        break
+
+            if not os.path.exists(result_path):
+                print(f"  Warning: Result file not found for {label_file}")
+                continue
+
+            # Evaluate using the same logic as HEA files
+            txt_result = evaluate_hea_file(label_path, result_path)
+            result.hea_results.append(txt_result)
+
+            # Also evaluate date shifts
+            txt_date_result = evaluate_hea_date_shifts(label_path, result_path)
+            if txt_date_result.total_dates > 0:
+                result.hea_date_results.append(txt_date_result)
+
+            status = "✓" if txt_result.false_negatives == 0 else "✗"
+            print(f"  {status} {label_file}: {txt_result.true_positives}/{txt_result.total_phi} PHI redacted "
+                  f"(recall: {txt_result.recall:.2%})")
+
+            # Print date shift status if there are dates
+            if txt_date_result.total_dates > 0:
+                date_status = "✓" if txt_date_result.incorrectly_redacted == 0 and txt_date_result.not_shifted == 0 else "✗"
+                print(f"    {date_status} Dates: {txt_date_result.correctly_shifted}/{txt_date_result.total_dates} shifted "
+                      f"({txt_date_result.incorrectly_redacted} redacted, {txt_date_result.not_shifted} unchanged)")
+
+        # ---- TXT Filename Evaluation ----
+        # Load expected PHI from label annotations (txt_filename_annotations.csv)
+        txt_label_mapping_file = os.path.join(label_base, "txt_filename_annotations.csv")
+        label_phi_by_filename = load_label_filename_annotations(txt_label_mapping_file)
 
         for mapping in result_mappings:
-            # Use PHI from labels if available, otherwise fall back to result mapping
-            expected_phi = label_phi_by_filename.get(mapping.original, mapping.phi_values)
+            if not mapping.original.endswith('.txt'):
+                continue
+
+            # Get expected PHI from label annotations
+            expected_phi = label_phi_by_filename.get(mapping.original, [])
             fn_result = FilenameEvaluationResult(
                 original=mapping.original,
                 anonymized=mapping.anonymized,
@@ -1759,10 +1908,9 @@ def evaluate_patient(labels_dir: str, results_dir: str,
 
             # Check for fallback anonymization: PHI existed but only _anonymized was added
             if expected_phi and fn_result.is_anonymized:
-                # Get base names without extension
-                ext = os.path.splitext(mapping.original)[1]
-                base_anonymized = mapping.anonymized.replace('_anonymized', '').replace(ext, '')
-                base_original = mapping.original.replace(ext, '')
+                # If original filename appears unchanged (just with _anonymized suffix), it's a fallback
+                base_anonymized = mapping.anonymized.replace('_anonymized', '').replace('.txt', '')
+                base_original = mapping.original.replace('.txt', '')
                 if base_anonymized == base_original:
                     fn_result.is_anonymized = False
                     fn_result.phi_in_filename = expected_phi  # All PHI leaked
@@ -2093,7 +2241,7 @@ def print_summary(overall: OverallEvaluationResult):
     else:
         print(f"   ✓ All PDF PHI regions properly redacted!")
 
-    print(f"\n📝 HEA EVALUATION (ECG Headers):")
+    print(f"\n📝 HEA/TXT EVALUATION (ECG Headers & Text Files):")
     print(f"   Total PHI instances:      {overall.hea_total_phi}")
     print(f"   Correctly redacted (TP):  {overall.hea_true_positives}")
     print(f"   Not redacted (FN):        {overall.hea_false_negatives}")
@@ -2109,9 +2257,9 @@ def print_summary(overall: OverallEvaluationResult):
     print(f"   └─ False-Positive-Rate:   {overall.hea_macro_fpr:.2%}")
 
     if overall.hea_false_negatives > 0:
-        print(f"   ⚠️  WARNING: {overall.hea_false_negatives} PHI instances in HEA files were NOT properly redacted!")
+        print(f"   ⚠️  WARNING: {overall.hea_false_negatives} PHI instances in HEA/TXT files were NOT properly redacted!")
     else:
-        print(f"   ✓ All HEA file PHI successfully redacted!")
+        print(f"   ✓ All HEA/TXT file PHI successfully redacted!")
 
     print(f"\n📛 FILENAME EVALUATION:")
     print(f"   Total files:              {overall.filename_total}")
@@ -2139,9 +2287,9 @@ def print_summary(overall: OverallEvaluationResult):
     if overall.date_incorrectly_redacted == 0 and overall.date_not_shifted == 0 and overall.date_total > 0:
         print(f"   ✓ All dates successfully time-shifted!")
 
-    # Combined macro-averaged metrics (CSV + HEA only)
+    # Combined macro-averaged metrics (CSV + HEA/TXT only)
     print(f"\n{'─'*80}")
-    print(f"📈 COMBINED MACRO-AVERAGED METRICS (CSV + HEA only):")
+    print(f"📈 COMBINED MACRO-AVERAGED METRICS (CSV + HEA/TXT only):")
     print(f"   ├─ Sensitivity:           {overall.combined_macro_sensitivity:.2%}")
     print(f"   ├─ Specificity:           {overall.combined_macro_specificity:.2%}")
     print(f"   ├─ Accuracy:              {overall.combined_macro_accuracy:.2%}")
@@ -2151,25 +2299,25 @@ def print_summary(overall: OverallEvaluationResult):
 
     # Universal metrics (ALL document types)
     print(f"\n{'─'*80}")
-    print(f"🌐 UNIVERSAL METRICS (CSV + HEA + Images + PDFs):")
+    print(f"🌐 UNIVERSAL METRICS (CSV + HEA/TXT + Images + PDFs):")
     print(f"   Documents included:       {overall.universal_n_documents}")
     print(f"   ├─ Sensitivity*:          {overall.universal_macro_sensitivity:.2%}")
     print(f"   ├─ Specificity†:          {overall.universal_macro_specificity:.2%}")
     print(f"   ├─ Accuracy†:             {overall.universal_macro_accuracy:.2%}")
     print(f"   └─ Precision†:            {overall.universal_macro_precision:.2%}")
     print(f"   (* Image/PDF coverage treated as sensitivity)")
-    print(f"   († Only from CSV/HEA documents)")
+    print(f"   († Only from CSV/HEA/TXT documents)")
 
     # Universal metrics WITH date shift
     print(f"\n{'─'*80}")
-    print(f"🌐📅 UNIVERSAL METRICS WITH DATE SHIFT (CSV + HEA + Images + PDFs + Dates):")
+    print(f"🌐📅 UNIVERSAL METRICS WITH DATE SHIFT (CSV + HEA/TXT + Images + PDFs + Dates):")
     print(f"   Documents/evaluations:    {overall.universal_with_dates_n_documents}")
     print(f"   ├─ Sensitivity*:          {overall.universal_with_dates_macro_sensitivity:.2%}")
     print(f"   ├─ Specificity†:          {overall.universal_with_dates_macro_specificity:.2%}")
     print(f"   ├─ Accuracy‡:             {overall.universal_with_dates_macro_accuracy:.2%}")
     print(f"   └─ Precision†:            {overall.universal_with_dates_macro_precision:.2%}")
     print(f"   (* Image/PDF coverage treated as sensitivity)")
-    print(f"   († Only from CSV/HEA documents)")
+    print(f"   († Only from CSV/HEA/TXT documents)")
     print(f"   (‡ Includes date shift rate as accuracy component)")
 
     # Overall assessment
@@ -2229,7 +2377,7 @@ def save_results(overall: OverallEvaluationResult, output_dir: str):
             'mean_iou': overall.pdf_mean_iou,
             'mean_coverage': overall.pdf_mean_coverage
         },
-        'hea_metrics': {
+        'hea_txt_metrics': {
             'total_phi': overall.hea_total_phi,
             'true_positives': overall.hea_true_positives,
             'false_negatives': overall.hea_false_negatives,
@@ -2268,7 +2416,7 @@ def save_results(overall: OverallEvaluationResult, output_dir: str):
             'false_positive_rate': overall.combined_macro_fpr
         },
         'universal_metrics': {
-            'description': 'Macro-averaged across ALL document types (CSV, HEA, Images, PDFs). Image/PDF coverage is treated as sensitivity.',
+            'description': 'Macro-averaged across ALL document types (CSV, HEA/TXT, Images, PDFs). Image/PDF coverage is treated as sensitivity.',
             'n_documents': overall.universal_n_documents,
             'sensitivity': overall.universal_macro_sensitivity,
             'specificity': overall.universal_macro_specificity,
@@ -2343,6 +2491,9 @@ def save_results(overall: OverallEvaluationResult, output_dir: str):
 
             for fn_result in patient.filename_results:
                 writer.writerow([patient.original_folder, 'filename', fn_result.original, 'is_anonymized', fn_result.is_anonymized])
+                writer.writerow([patient.original_folder, 'filename', fn_result.original, 'anonymized_filename', fn_result.anonymized])
+                writer.writerow([patient.original_folder, 'filename', fn_result.original, 'expected_phi', ','.join(fn_result.expected_phi) if fn_result.expected_phi else ''])
+                writer.writerow([patient.original_folder, 'filename', fn_result.original, 'phi_in_filename', ','.join(fn_result.phi_in_filename) if fn_result.phi_in_filename else ''])
 
             # Date shift results from CSV files
             for date_result in patient.csv_date_results:

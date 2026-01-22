@@ -18,7 +18,6 @@ function FileUpload({ backendUrl }) {
   const [dragActive, setDragActive] = useState(false)
   const [processing, setProcessing] = useState(false)
   const [processingProgress, setProcessingProgress] = useState({ current: 0, total: 0 })
-  const [useAgentic, setUseAgentic] = useState(false)
   const [promptSettingsOpen, setPromptSettingsOpen] = useState(false)
   const [result, setResult] = useState(null)
   const [error, setError] = useState(null)
@@ -133,7 +132,6 @@ function FileUpload({ backendUrl }) {
           formData.append('files', f)
           formData.append('paths', relativePath)
         })
-        formData.append('use_agentic', useAgentic)
         formData.append('job_id', jobId)
 
         const response = await fetch(`${backendUrl}/api/process-folder`, {
@@ -154,7 +152,6 @@ function FileUpload({ backendUrl }) {
         // Single file upload
         const formData = new FormData()
         formData.append('file', file)
-        formData.append('use_agentic', useAgentic)
 
         const response = await fetch(`${backendUrl}/api/process`, {
           method: 'POST',
@@ -238,38 +235,12 @@ function FileUpload({ backendUrl }) {
   return (
     <div className="file-upload">
 
-      <div className="mode-selector">
-        <label className="toggle-label">
-          <span className="toggle-text">Processing Mode</span>
-          <div className="toggle-container">
-            <span className={`toggle-option ${!useAgentic ? 'active' : ''}`}>Standard</span>
-            <label className="toggle-switch">
-              <input
-                type="checkbox"
-                checked={useAgentic}
-                onChange={(e) => setUseAgentic(e.target.checked)}
-                disabled={processing}
-              />
-              <span className="toggle-slider"></span>
-            </label>
-            <span className={`toggle-option ${useAgentic ? 'active' : ''}`}>Agentic</span>
-          </div>
-        </label>
-        <p className="mode-description">
-          {useAgentic
-            ? 'Agentic mode uses multi-phase tool-calling for higher accuracy.'
-            : 'Standard mode uses single-pass LLM processing.'}
-        </p>
-      </div>
-
-      {/* Prompt customization - only show when agentic mode is enabled */}
-      {useAgentic && (
-        <PromptSettings
-          backendUrl={backendUrl}
-          isOpen={promptSettingsOpen}
-          onToggle={() => setPromptSettingsOpen(!promptSettingsOpen)}
-        />
-      )}
+      {/* Prompt customization */}
+      <PromptSettings
+        backendUrl={backendUrl}
+        isOpen={promptSettingsOpen}
+        onToggle={() => setPromptSettingsOpen(!promptSettingsOpen)}
+      />
 
       <div
         className={`drop-zone ${dragActive ? 'active' : ''} ${file || files.length > 0 ? 'has-file' : ''}`}

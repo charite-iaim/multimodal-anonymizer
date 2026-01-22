@@ -20,14 +20,8 @@ load_dotenv()
 # Add parent directory to path to import anonymizer package
 sys.path.append(str(Path(__file__).parent.parent.parent))
 
-from anonymizer.processors.png_processor import PNGProcessor
-from anonymizer.processors.png_ocr_processor import PNGOCRProcessor
 from anonymizer.processors.png_vision_ocr_processor import PNGVisionOCRProcessor
-from anonymizer.processors.csv_processor import CSVProcessor
-from anonymizer.processors.text_processor import TextProcessor
-from anonymizer.processors.dicom_processor import DICOMProcessor
 from anonymizer.processors.dicom_vision_ocr_processor import DICOMVisionOCRProcessor
-from anonymizer.processors.pdf_ocr_processor import PDFOCRProcessor
 from anonymizer.processors.pdf_vision_ocr_processor import PDFVisionOCRProcessor
 from anonymizer.processors.agentic_csv_processor import AgenticCSVProcessor
 from anonymizer.processors.agentic_text_processor import AgenticTextProcessor
@@ -280,15 +274,13 @@ async def get_progress(job_id: str):
 
 @app.post("/api/process")
 async def process_file(
-    file: UploadFile = File(...),
-    use_agentic: bool = Form(default=False)  # Use agentic processors for CSV/text
+    file: UploadFile = File(...)
 ):
     """
-    Process an uploaded file for PHI anonymization.
+    Process an uploaded file for PHI anonymization using agentic processors.
 
     Args:
         file: The file to process (PNG, JPG, CSV, TXT, DICOM, PDF)
-        use_agentic: If True, use agentic processors (tool-calling) for CSV and text files
     """
     if config is None:
         raise HTTPException(
@@ -332,28 +324,23 @@ async def process_file(
             ]
         }
 
-        # Determine processor based on file extension
+        # Determine processor based on file extension (always use agentic/vision processors)
         processor = None
         file_extension = input_path.suffix.lower()
 
-        # Map file extensions to processors
-        # When use_agentic is True, use Vision+OCR processors for images/PDFs/DICOMs
         if file_extension in ['.dcm', '.dicom']:
-            processor = DICOMVisionOCRProcessor(config, save_intermediate=True, prompt_config=prompt_config) if use_agentic else DICOMProcessor(config, save_intermediate=True)
+            processor = DICOMVisionOCRProcessor(config, save_intermediate=True, prompt_config=prompt_config)
         elif file_extension == '.pdf':
-            processor = PDFVisionOCRProcessor(config, prompt_config=prompt_config) if use_agentic else PDFOCRProcessor(config, prompt_config=prompt_config)
+            processor = PDFVisionOCRProcessor(config, prompt_config=prompt_config)
         elif file_extension in ['.png', '.jpg', '.jpeg']:
-            processor = PNGVisionOCRProcessor(config, prompt_config=prompt_config) if use_agentic else PNGOCRProcessor(config, prompt_config=prompt_config)
+            processor = PNGVisionOCRProcessor(config, prompt_config=prompt_config)
         elif file_extension in ['.txt', '.hea']:
-            processor = AgenticTextProcessor(config, prompt_config=prompt_config) if use_agentic else TextProcessor(config)
+            processor = AgenticTextProcessor(config, prompt_config=prompt_config)
         elif file_extension == '.csv':
-            processor = AgenticCSVProcessor(config, prompt_config=prompt_config) if use_agentic else CSVProcessor(config)
+            processor = AgenticCSVProcessor(config, prompt_config=prompt_config)
         else:
             # Fallback: try DICOM processor for files without extension (common in MIMIC)
-            if use_agentic:
-                test_processor = DICOMVisionOCRProcessor(config, save_intermediate=True, prompt_config=prompt_config)
-            else:
-                test_processor = DICOMProcessor(config, save_intermediate=True)
+            test_processor = DICOMVisionOCRProcessor(config, save_intermediate=True, prompt_config=prompt_config)
             if test_processor.can_process(input_path):
                 processor = test_processor
 
@@ -377,17 +364,16 @@ async def process_file(
 
         # Check if there's a debug video for multi-frame DICOMs
         video_url = None
-        if isinstance(processor, DICOMProcessor):
-            intermediate_dir = output_dir / "intermediate"
-            if intermediate_dir.exists():
-                # Look for MP4 files
-                video_files = list(intermediate_dir.glob("*.mp4"))
-                if video_files:
-                    video_file = video_files[0]
-                    # Copy video to output dir for easier access
-                    video_output = output_dir / video_file.name
-                    shutil.copy2(video_file, video_output)
-                    video_url = f"/api/download/{job_id}/{video_output.name}"
+        intermediate_dir = output_dir / "intermediate"
+        if intermediate_dir.exists():
+            # Look for MP4 files
+            video_files = list(intermediate_dir.glob("*.mp4"))
+            if video_files:
+                video_file = video_files[0]
+                # Copy video to output dir for easier access
+                video_output = output_dir / video_file.name
+                shutil.copy2(video_file, video_output)
+                video_url = f"/api/download/{job_id}/{video_output.name}"
 
         response_data = {
             "status": "success",
@@ -417,16 +403,14 @@ async def process_file(
 async def process_folder(
     files: List[UploadFile] = File(...),
     paths: List[str] = Form(...),
-    use_agentic: bool = Form(default=False),
     job_id: Optional[str] = Form(default=None)
 ):
     """
-    Process multiple uploaded files (folder) for PHI anonymization.
+    Process multiple uploaded files (folder) for PHI anonymization using agentic processors.
 
     Args:
         files: List of files to process
         paths: List of relative paths corresponding to each file
-        use_agentic: If True, use agentic processors for CSV and text files
         job_id: Optional job ID for progress tracking (generated if not provided)
     """
     if config is None:
@@ -550,28 +534,23 @@ async def process_folder(
                     phi_detections=filename_result.phi_detections
                 )
 
-                # Determine processor based on file extension
+                # Determine processor based on file extension (always use agentic/vision processors)
                 processor = None
                 file_extension = input_path.suffix.lower()
 
-                # Map file extensions to processors
-                # When use_agentic is True, use Vision+OCR processors for images/PDFs/DICOMs
                 if file_extension in ['.dcm', '.dicom']:
-                    processor = DICOMVisionOCRProcessor(config, save_intermediate=False, prompt_config=prompt_config) if use_agentic else DICOMProcessor(config, save_intermediate=False)
+                    processor = DICOMVisionOCRProcessor(config, save_intermediate=False, prompt_config=prompt_config)
                 elif file_extension == '.pdf':
-                    processor = PDFVisionOCRProcessor(config, prompt_config=prompt_config) if use_agentic else PDFOCRProcessor(config, prompt_config=prompt_config)
+                    processor = PDFVisionOCRProcessor(config, prompt_config=prompt_config)
                 elif file_extension in ['.png', '.jpg', '.jpeg']:
-                    processor = PNGVisionOCRProcessor(config, prompt_config=prompt_config) if use_agentic else PNGOCRProcessor(config, prompt_config=prompt_config)
+                    processor = PNGVisionOCRProcessor(config, prompt_config=prompt_config)
                 elif file_extension in ['.txt', '.hea']:
-                    processor = AgenticTextProcessor(config, prompt_config=prompt_config) if use_agentic else TextProcessor(config)
+                    processor = AgenticTextProcessor(config, prompt_config=prompt_config)
                 elif file_extension == '.csv':
-                    processor = AgenticCSVProcessor(config, prompt_config=prompt_config) if use_agentic else CSVProcessor(config)
+                    processor = AgenticCSVProcessor(config, prompt_config=prompt_config)
                 else:
                     # Fallback: try DICOM processor for files without extension (common in MIMIC)
-                    if use_agentic:
-                        test_processor = DICOMVisionOCRProcessor(config, save_intermediate=False, prompt_config=prompt_config)
-                    else:
-                        test_processor = DICOMProcessor(config, save_intermediate=False)
+                    test_processor = DICOMVisionOCRProcessor(config, save_intermediate=False, prompt_config=prompt_config)
                     if test_processor.can_process(input_path):
                         processor = test_processor
 

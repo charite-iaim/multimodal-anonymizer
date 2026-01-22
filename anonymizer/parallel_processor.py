@@ -79,11 +79,10 @@ def _process_file_worker(job_data: Dict[str, Any]) -> ProcessingResult:
 
     def process_with_retry():
         nonlocal retries_attempted
-        
+
         # Extract job data
         output_dir = Path(job_data['output_dir'])
         config_dict = job_data['config']
-        use_ocr = job_data['use_ocr']
         use_llm_detection = job_data['use_llm_detection']
         preserve_structure = job_data['preserve_structure']
         relative_path = Path(job_data['relative_path']) if job_data['relative_path'] else None
@@ -100,15 +99,10 @@ def _process_file_worker(job_data: Dict[str, Any]) -> ProcessingResult:
             save_debug_files=config_dict['save_debug_files']
         )
 
-        # Import get_processor from the appropriate module
-        processor_module = job_data.get('processor_module', 'anonymize')
-        if processor_module == 'anonymize_agentic':
-            from anonymize_agentic import get_processor, load_prompt_config
-            prompt_config = load_prompt_config(prompt_config_name)
-            processor = get_processor(input_path, config, use_llm_detection, time_offset_days=time_offset_days, prompt_config=prompt_config)
-        else:
-            from anonymize import get_processor
-            processor = get_processor(input_path, config, use_ocr, use_llm_detection)
+        # Import get_processor from anonymize module
+        from anonymize import get_processor, load_prompt_config
+        prompt_config = load_prompt_config(prompt_config_name)
+        processor = get_processor(input_path, config, use_llm_detection, time_offset_days=time_offset_days, prompt_config=prompt_config)
 
         if processor is None:
             raise ValueError(f"No processor available for: {input_path.name}")
@@ -139,7 +133,7 @@ def _process_file_worker(job_data: Dict[str, Any]) -> ProcessingResult:
             config=retry_config,
             on_retry=on_retry,
         )
-        
+
         processing_time = time.time() - start_time
         return ProcessingResult(
             input_path=input_path,
@@ -166,7 +160,7 @@ def _process_file_worker(job_data: Dict[str, Any]) -> ProcessingResult:
     except Exception as e:
         processing_time = time.time() - start_time
         error_msg = f"{str(e)}\n{traceback.format_exc()}"
-        
+
         # Check if this is a retryable error (for potential later retry)
         is_retryable = check_retryable(e, retry_config)
 
@@ -190,11 +184,9 @@ class ParallelFileProcessor:
         self,
         config: Any,
         num_workers: Optional[int] = None,
-        use_ocr: bool = False,
         use_llm_detection: bool = False,
         preserve_structure: bool = True,
         anonymize_paths: bool = True,
-        processor_module: str = 'anonymize',
         max_retries: int = 3
     ):
         """
@@ -203,19 +195,15 @@ class ParallelFileProcessor:
         Args:
             config: AnonymizerConfig instance
             num_workers: Number of worker processes (default: CPU count - 1)
-            use_ocr: If True, use OCR-based processor
             use_llm_detection: If True, use multimodal LLM to detect file type
             preserve_structure: If True, preserve directory structure in output
             anonymize_paths: If True, anonymize file and folder names
-            processor_module: Module to import get_processor from ('anonymize' or 'anonymize_agentic')
             max_retries: Maximum number of retries for failed API calls (default: 3)
         """
         self.config = config
-        self.use_ocr = use_ocr
         self.use_llm_detection = use_llm_detection
         self.preserve_structure = preserve_structure
         self.anonymize_paths = anonymize_paths
-        self.processor_module = processor_module
         self.max_retries = max_retries
 
         # Determine number of workers
@@ -320,7 +308,6 @@ class ParallelFileProcessor:
             'input_path': str(input_path),
             'output_dir': str(output_dir),
             'config': config_dict,
-            'use_ocr': self.use_ocr,
             'use_llm_detection': self.use_llm_detection,
             'preserve_structure': self.preserve_structure,
             'relative_path': str(relative_path) if relative_path else None,
@@ -328,7 +315,6 @@ class ParallelFileProcessor:
             'anonymize_paths': self.anonymize_paths,
             'anonymized_filename': anonymized_filename,
             'folder_path': folder_path,
-            'processor_module': self.processor_module,
             'time_offset_days': time_offset_days,
             'max_retries': max_retries if max_retries is not None else self.max_retries,
             'prompt_config_name': prompt_config_name,
