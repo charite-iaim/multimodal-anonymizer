@@ -5,6 +5,10 @@ langchain-fireworks>=0.1.0
 langchain-core>=0.1.0
 pydantic>=2.0.0
 
+# Backend server
+fastapi>=0.104.0
+uvicorn>=0.24.0
+
 # Environment configuration
 python-dotenv>=1.0.0
 
@@ -18,11 +22,27 @@ easyocr>=1.7.0
 # PDF processing
 pdf2image>=1.16.0
 
+# DOCX processing
+python-docx>=1.1.0
+
+# Excel processing
+openpyxl>=3.1.0
+
 # OpenAI-compatible API (for Fireworks)
 openai>=1.0.0
+
+# Audio processing (for voice anonymization - fully local)
+openai-whisper>=20231117  # Local Whisper model for speech-to-text
+pyttsx3>=2.90  # Local TTS using system speech synthesis (Python 3.13 compatible)
+pydub>=0.25.0  # Audio format conversion (requires ffmpeg)
 
 # Optional: For evaluation script
 opencv-python>=4.8.0
 numpy>=1.24.0
 pandas>=2.0.0
 matplotlib>=3.7.0
+
+python-multipart>=0.0.6
+
+pydub>=0.25.0
+audioop-lts

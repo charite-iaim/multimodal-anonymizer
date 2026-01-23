@@ -1,10 +1,10 @@
 """
-Agentic text file processor using LLM with tool-calling for anonymization.
+Agentic DOCX file processor using LLM with tool-calling for anonymization.
 
-This processor uses a three-step agentic approach (same as CSV processor):
-1. Phase 1: Regex-based date extraction + shift_datetime tool
-2. Phase 2: LLM identifies and redacts PII using redact_text tool
-3. Phase 3: Verification agent checks and fixes any issues
+This processor handles Microsoft Word (.docx) files by:
+1. Extracting text content from the DOCX file
+2. Using the same three-phase agentic approach as the text processor
+3. Writing the anonymized content back to a new DOCX file while preserving formatting
 """
 
 import json
@@ -14,13 +14,15 @@ from datetime import datetime
 from typing import List, Dict, Optional, Set, Tuple
 import random
 
+from docx import Document
+from docx.shared import Inches, Pt
 from langchain_core.messages import HumanMessage, ToolMessage
 from pydantic import BaseModel, Field
 
 from ..base_processor import FileProcessor
 from ..config import AnonymizerConfig
 from ..llm_factory import create_chat_llm
-from ..tools.time_shift_tool import shift_datetime, redact_text, restore_text
+from ..tools.time_shift_tool import shift_datetime, redact_text
 from ..retry_utils import retry_with_backoff, RetryConfig, create_retry_callback
 from ..prompt_config import PromptConfig, DEFAULT_PROMPT_CONFIG
 
@@ -32,11 +34,11 @@ class DateTimeShift(BaseModel):
     context: str = Field(description="Brief context where this date was found")
 
 
-class AgenticTextProcessor(FileProcessor):
+class AgenticDocxProcessor(FileProcessor):
     """
-    Agentic processor for text files using LLM with tool-calling.
+    Agentic processor for DOCX files using LLM with tool-calling.
 
-    This processor implements a three-phase approach (matching CSV processor):
+    This processor implements a three-phase approach (matching text processor):
     1. Time-Shift Phase: Regex extraction + shift_datetime tool for all dates
     2. Anonymization Phase: LLM uses redact_text tool for PII
     3. Verification Phase: LLM verifies and fixes any issues
@@ -49,7 +51,7 @@ class AgenticTextProcessor(FileProcessor):
         prompt_config: Optional[PromptConfig] = None
     ):
         """
-        Initialize agentic text processor.
+        Initialize agentic DOCX processor.
 
         Args:
             config: Configuration object with LLM settings
@@ -76,7 +78,7 @@ class AgenticTextProcessor(FileProcessor):
             jitter=True,
         )
 
-        # Initialize LLM with tools for phase 1 (time shifting - only needed if LLM finds additional dates)
+        # Initialize LLM with tools for phase 1 (time shifting)
         self.llm_with_tools = create_chat_llm(
             config=config,
             timeout=600,
@@ -101,90 +103,110 @@ class AgenticTextProcessor(FileProcessor):
         )
 
     def can_process(self, file_path: Path) -> bool:
-        """Check if file is a text file (.txt or .hea ECG header)."""
-        return file_path.suffix.lower() in [".txt", ".hea"]
+        """Check if file is a DOCX file."""
+        return file_path.suffix.lower() == ".docx"
 
     def extract_content(self, file_path: Path) -> str:
-        """Extract text content as string."""
-        with open(file_path, 'r', encoding='utf-8') as f:
-            return f.read()
+        """Extract text content from DOCX file."""
+        doc = Document(file_path)
+
+        # Extract text from all paragraphs
+        paragraphs = []
+        for para in doc.paragraphs:
+            if para.text.strip():
+                paragraphs.append(para.text)
+
+        # Also extract text from tables
+        for table in doc.tables:
+            for row in table.rows:
+                row_text = []
+                for cell in row.cells:
+                    if cell.text.strip():
+                        row_text.append(cell.text.strip())
+                if row_text:
+                    paragraphs.append(" | ".join(row_text))
+
+        return "\n\n".join(paragraphs)
 
     def anonymize(self, input_path: Path, output_path: Path, verify: bool = True) -> None:
         """
-        Anonymize text file using agentic LLM approach.
+        Anonymize DOCX file using agentic LLM approach.
 
         Steps:
-        1. Read text file
-        2. Phase 1: Extract and shift all dates/times using regex
-        3. Phase 2: Use LLM with redact_text tool to anonymize PII
-        4. Phase 3: Verification agent checks and fixes any issues
-        5. Save anonymized text
+        1. Read DOCX file and extract text
+        2. Phase 1: Extract and shift all dates/times using regex (collect replacements)
+        3. Phase 2: Use LLM with redact_text tool to anonymize PII (collect replacements)
+        4. Phase 3: Verification agent checks and fixes any issues (collect replacements)
+        5. Apply all collected replacements directly to DOCX and save
 
         Args:
-            input_path: Path to input text file
-            output_path: Path to save anonymized text file
+            input_path: Path to input DOCX file
+            output_path: Path to save anonymized DOCX file
             verify: Whether to run the verification phase (default: True)
         """
         # Convert to Path if string
         input_path = Path(input_path) if isinstance(input_path, str) else input_path
         output_path = Path(output_path) if isinstance(output_path, str) else output_path
 
-        print(f"Processing (Agentic): {input_path.name}")
+        print(f"Processing DOCX (Agentic): {input_path.name}")
         print(f"Time offset: {self.time_offset_days} days")
 
-        # Step 1: Read text file
+        # Step 1: Read DOCX file
+        doc = Document(input_path)
         content = self.extract_content(input_path)
-        original_content = content  # Keep original for verification
-        print(f"Read {len(content)} characters")
+        original_content = content
+        print(f"Read {len(content)} characters from DOCX")
 
         if not content.strip():
-            print("Empty text file, saving as-is")
+            print("Empty DOCX file, saving as-is")
             output_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(output_path, 'w', encoding='utf-8') as f:
-                f.write(content)
+            doc.save(output_path)
             return
+
+        # Collect ALL replacements from all phases
+        all_replacements: Dict[str, str] = {}
 
         # Step 2: Phase 1 - Time shifting with regex extraction
         print("\n=== Phase 1: Time Shifting ===")
-        shifted_content, dates_shifted = self._phase1_shift_times(content)
+        shifted_content, dates_shifted, date_replacements = self._phase1_shift_times(content)
+        all_replacements.update(date_replacements)
         print(f"Shifted {len(dates_shifted)} date/time values")
 
         # Step 3: Phase 2 - Anonymize other PII (agentic with redact_text tool)
         print("\n=== Phase 2: PII Anonymization ===")
-        anonymized_content, pii_redactions = self._phase2_anonymize_pii(shifted_content)
+        anonymized_content, pii_redactions, pii_replacements = self._phase2_anonymize_pii(shifted_content)
+        all_replacements.update(pii_replacements)
         print(f"Applied {pii_redactions} PII redactions")
 
         # Step 4: Phase 3 - Verification (optional but recommended)
-        # Use iterative verification to catch all remaining PIIs
         if verify:
             print("\n=== Phase 3: Iterative Verification ===")
-            max_iterations = 3  # Maximum number of verification passes
+            max_iterations = 3
             total_fixes = 0
-            
+
             for iteration in range(max_iterations):
                 print(f"\n  Verification pass {iteration + 1}/{max_iterations}...")
-                anonymized_content, fixes_applied = self._phase3_verify_and_fix(
+                anonymized_content, fixes_applied, verify_replacements = self._phase3_verify_and_fix(
                     original_content, anonymized_content
                 )
+                all_replacements.update(verify_replacements)
                 total_fixes += fixes_applied
                 print(f"  Pass {iteration + 1}: Applied {fixes_applied} fixes.")
-                
-                # Stop if no more fixes were needed
+
                 if fixes_applied == 0:
                     print(f"  No more issues found. Verification complete after {iteration + 1} pass(es).")
                     break
             else:
-                # All iterations completed but still finding issues
                 print(f"  Warning: Completed {max_iterations} passes with {total_fixes} total fixes.")
                 print(f"  Consider reviewing the output manually for any remaining PIIs.")
-            
+
             print(f"\nVerification summary: Applied {total_fixes} total fixes across all passes.")
 
-        # Step 5: Save anonymized text
+        # Step 5: Apply all collected replacements directly to DOCX
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(output_path, 'w', encoding='utf-8') as f:
-            f.write(anonymized_content)
-        print(f"Saved anonymized text to: {output_path}")
+        self._apply_replacements_to_docx(doc, all_replacements, output_path)
+        print(f"Saved anonymized DOCX to: {output_path}")
+        print(f"Total replacements applied: {len(all_replacements)}")
 
         # Step 6: Save JSON with details (if debug mode)
         if self.config.save_debug_files:
@@ -198,26 +220,83 @@ class AgenticTextProcessor(FileProcessor):
             )
             print(f"Saved anonymization details to: {json_output_path}")
 
-    def _extract_dates_with_regex(self, text: str) -> List[str]:
+    def _apply_replacements_to_docx(
+        self,
+        doc: Document,
+        replacements: Dict[str, str],
+        output_path: Path
+    ) -> None:
         """
-        Extract all date/time patterns from text using regex.
+        Apply collected replacements directly to the DOCX document.
 
-        Returns a list of unique date strings found.
+        This uses the explicit replacement map collected during processing,
+        avoiding any diff-based guessing.
         """
+        # Sort replacements by length (longest first) to avoid partial replacements
+        sorted_replacements = sorted(replacements.items(), key=lambda x: len(x[0]), reverse=True)
+
+        # Apply replacements to paragraphs
+        for para in doc.paragraphs:
+            if para.text:
+                new_text = para.text
+                for original, replacement in sorted_replacements:
+                    if original in new_text:
+                        new_text = new_text.replace(original, replacement)
+
+                if new_text != para.text:
+                    self._replace_paragraph_text(para, new_text)
+
+        # Apply replacements to tables
+        for table in doc.tables:
+            for row in table.rows:
+                for cell in row.cells:
+                    for para in cell.paragraphs:
+                        if para.text:
+                            new_text = para.text
+                            for original, replacement in sorted_replacements:
+                                if original in new_text:
+                                    new_text = new_text.replace(original, replacement)
+
+                            if new_text != para.text:
+                                self._replace_paragraph_text(para, new_text)
+
+        doc.save(output_path)
+
+    def _replace_paragraph_text(self, paragraph, new_text: str) -> None:
+        """
+        Replace the text in a paragraph while trying to preserve formatting.
+
+        This is a simplified approach that clears all runs and adds new text.
+        For more complex formatting preservation, additional logic would be needed.
+        """
+        # If there's only one run or no runs, simple replacement
+        if len(paragraph.runs) <= 1:
+            if paragraph.runs:
+                paragraph.runs[0].text = new_text
+            else:
+                paragraph.add_run(new_text)
+            return
+
+        # For multiple runs, try to preserve the first run's formatting
+        # and put all text there
+        first_run = paragraph.runs[0]
+
+        # Clear all runs except the first
+        for run in paragraph.runs[1:]:
+            run.text = ""
+
+        # Set the new text on the first run
+        first_run.text = new_text
+
+    def _extract_dates_with_regex(self, text: str) -> List[str]:
+        """Extract all date/time patterns from text using regex."""
         patterns = [
-            # ISO format with time: 2140-09-25 07:15:00 or 2140-09-25T07:15:00
             r'\b(\d{4}-\d{2}-\d{2}[T\s]\d{2}:\d{2}:\d{2})\b',
-            # Date with AM/PM time: 2140-09-25 07:15PM or 2140-09-25 07:15 PM
             r'\b(\d{4}-\d{2}-\d{2}\s+\d{1,2}:\d{2}\s*[AaPp][Mm])\b',
-            # ISO date only: 2140-09-25
             r'\b(\d{4}-\d{2}-\d{2})\b',
-            # European format: 25.09.2140
             r'\b(\d{2}\.\d{2}\.\d{4})\b',
-            # US format with slashes: 09/25/2140
             r'\b(\d{2}/\d{2}/\d{4})\b',
-            # Month name formats: September 25, 2140 or Sep 25, 2140
             r'\b((?:January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2},?\s+\d{4})\b',
-            # Date with month name: 25 September 2140
             r'\b(\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{4})\b',
         ]
 
@@ -227,43 +306,31 @@ class AgenticTextProcessor(FileProcessor):
             matches = re.findall(pattern, text, re.IGNORECASE)
             found_dates.update(matches)
 
-        # Sort by length descending to process longer (more specific) dates first
         return sorted(list(found_dates), key=len, reverse=True)
 
-    def _phase1_shift_times(self, content: str) -> Tuple[str, List[DateTimeShift]]:
-        """
-        Phase 1: Find and shift all dates/times using regex extraction.
-
-        Uses regex patterns to reliably extract all dates, then shifts them
-        using the shift_datetime tool.
-
-        Args:
-            content: Original text content
+    def _phase1_shift_times(self, content: str) -> Tuple[str, List[DateTimeShift], Dict[str, str]]:
+        """Phase 1: Find and shift all dates/times using regex extraction.
 
         Returns:
-            Tuple of (content with shifted dates, list of shifts made)
+            Tuple of (modified content, list of shifts, dict of replacements)
         """
         modified_content = content
         all_shifts: List[DateTimeShift] = []
+        replacements: Dict[str, str] = {}
 
-        # Extract all dates using regex
         print("  Extracting dates using pattern matching...")
         found_dates = self._extract_dates_with_regex(content)
         print(f"  Found {len(found_dates)} unique date patterns to process")
 
         if not found_dates:
-            return modified_content, all_shifts
+            return modified_content, all_shifts, replacements
 
-        # Track shifted values to avoid calling the tool multiple times for the same date
         shifted_cache: Dict[str, str] = {}
 
-        # Process each unique date
         for date_str in found_dates:
-            # Check cache first
             if date_str in shifted_cache:
                 shifted_value = shifted_cache[date_str]
             else:
-                # Call shift_datetime tool
                 try:
                     result = shift_datetime.invoke({
                         "datetime_str": date_str,
@@ -272,7 +339,7 @@ class AgenticTextProcessor(FileProcessor):
 
                     if "[SHIFT_FAILED]" in result:
                         print(f"    Skip (invalid): {date_str}")
-                        shifted_cache[date_str] = date_str  # Keep original
+                        shifted_cache[date_str] = date_str
                         continue
 
                     shifted_value = result
@@ -281,15 +348,14 @@ class AgenticTextProcessor(FileProcessor):
 
                 except Exception as e:
                     print(f"    Error shifting {date_str}: {e}")
-                    shifted_cache[date_str] = date_str  # Keep original
+                    shifted_cache[date_str] = date_str
                     continue
 
-            # Apply shift to all occurrences if value changed
             if shifted_value != date_str:
-                # Count occurrences
                 count = modified_content.count(date_str)
                 if count > 0:
                     modified_content = modified_content.replace(date_str, shifted_value)
+                    replacements[date_str] = shifted_value
 
                     all_shifts.append(DateTimeShift(
                         original_value=date_str,
@@ -298,70 +364,52 @@ class AgenticTextProcessor(FileProcessor):
                     ))
 
         print(f"  Applied {len(all_shifts)} unique date shifts")
-        return modified_content, all_shifts
+        return modified_content, all_shifts, replacements
 
-    def _phase2_anonymize_pii(self, content: str) -> Tuple[str, int]:
-        """
-        Phase 2: Anonymize all PII using agentic tool-calling with redact_text.
-
-        The LLM identifies PII and calls the redact_text tool for each item found.
-        Redactions are applied in real-time as the tools are called.
-
-        Args:
-            content: Text content (with dates already shifted)
+    def _phase2_anonymize_pii(self, content: str) -> Tuple[str, int, Dict[str, str]]:
+        """Phase 2: Anonymize all PII using agentic tool-calling with redact_text.
 
         Returns:
-            Tuple of (anonymized content, number of redactions applied)
+            Tuple of (modified content, number of redactions, dict of replacements)
         """
         modified_content = content
         total_redactions = 0
+        all_replacements: Dict[str, str] = {}
 
-        # For very long texts, process in chunks
         max_chunk_size = 8000
 
         if len(content) <= max_chunk_size:
-            # Process entire content at once
-            modified_content, total_redactions = self._anonymize_chunk(content, 0)
+            modified_content, total_redactions, all_replacements = self._anonymize_chunk_with_replacements(content, 0)
         else:
-            # Process in chunks with overlap to avoid missing PII at boundaries
-            # Collect all redactions from chunks and apply them to the full content
             chunks = self._split_into_chunks(content, max_chunk_size)
             print(f"  Processing {len(chunks)} chunks...")
 
-            # Collect all redactions (original -> redacted mappings)
-            all_redactions: Dict[str, str] = {}
-
             for chunk_num, (chunk_start, chunk_text) in enumerate(chunks):
                 print(f"  Chunk {chunk_num + 1}/{len(chunks)} (chars {chunk_start}-{chunk_start + len(chunk_text)})")
-
-                # Find PII in this chunk and collect replacements
                 _, chunk_redactions, chunk_replacements = self._anonymize_chunk_with_replacements(chunk_text, chunk_start)
                 total_redactions += chunk_redactions
-                all_redactions.update(chunk_replacements)
+                all_replacements.update(chunk_replacements)
 
             # Apply all collected redactions to the full content
-            for original, redacted in all_redactions.items():
+            for original, redacted in all_replacements.items():
                 modified_content = modified_content.replace(original, redacted)
 
-        return modified_content, total_redactions
+        return modified_content, total_redactions, all_replacements
 
     def _split_into_chunks(self, content: str, max_size: int) -> List[Tuple[int, str]]:
         """Split content into overlapping chunks for processing."""
         chunks = []
-        overlap = 500  # Characters of overlap between chunks
+        overlap = 500
 
         start = 0
         while start < len(content):
             end = min(start + max_size, len(content))
 
-            # Try to break at a paragraph or sentence boundary
             if end < len(content):
-                # Look for paragraph break
                 para_break = content.rfind('\n\n', start + max_size - 500, end)
                 if para_break > start:
                     end = para_break
                 else:
-                    # Look for sentence break
                     sent_break = content.rfind('. ', start + max_size - 200, end)
                     if sent_break > start:
                         end = sent_break + 1
@@ -371,37 +419,20 @@ class AgenticTextProcessor(FileProcessor):
 
         return chunks
 
-    def _anonymize_chunk(self, chunk: str, chunk_start: int) -> Tuple[str, int]:
-        """Anonymize a chunk of text using LLM with redact_text tool."""
-        modified_chunk, redactions, _ = self._anonymize_chunk_with_replacements(chunk, chunk_start)
-        return modified_chunk, redactions
-
     def _anonymize_chunk_with_replacements(self, chunk: str, chunk_start: int) -> Tuple[str, int, Dict[str, str]]:
-        """
-        Anonymize a chunk of text using LLM with redact_text tool, returning replacements.
-
-        Args:
-            chunk: Text chunk to anonymize
-            chunk_start: Starting position of chunk in original text
-
-        Returns:
-            Tuple of (anonymized chunk, number of redactions, dict of original->redacted mappings)
-        """
+        """Anonymize a chunk of text using LLM with redact_text tool, returning replacements."""
         modified_chunk = chunk
         redactions = 0
         replacements: Dict[str, str] = {}
 
-        # Use configurable prompt
         prompt = self.prompt_config.get_text_anonymization_prompt(text_data=chunk)
 
         messages = [HumanMessage(content=prompt)]
 
-        # Agentic loop
         max_iterations = 50
         iteration = 0
 
         def invoke_llm_with_retry(msgs):
-            """Invoke LLM with retry logic."""
             return retry_with_backoff(
                 lambda: self.llm_anonymize.invoke(msgs),
                 config=self.retry_config,
@@ -425,11 +456,9 @@ class AgenticTextProcessor(FileProcessor):
                     if tool_name == "redact_text":
                         text_to_redact = tool_args.get("text_to_redact", "")
 
-                        # Get the redacted version (asterisks)
                         result = redact_text.invoke(tool_args)
 
                         if "[REDACT_FAILED" not in result and text_to_redact:
-                            # Apply to the chunk
                             if text_to_redact in modified_chunk:
                                 modified_chunk = modified_chunk.replace(text_to_redact, result)
                                 replacements[text_to_redact] = result
@@ -452,39 +481,26 @@ class AgenticTextProcessor(FileProcessor):
         self,
         original_content: str,
         anonymized_content: str
-    ) -> Tuple[str, int]:
-        """
-        Phase 3: Verification agent checks the anonymized output and fixes any issues.
-
-        The agent compares original and anonymized data to identify:
-        1. Unshifted dates (dates that appear in both original and anonymized)
-        2. Unredacted PII (names, IDs, etc. that weren't anonymized)
-        3. Over-redaction (non-PII that was incorrectly redacted)
-        4. Unshifted years (e.g. "2024" or "2024-2026" that should be shifted)
-
-        Args:
-            original_content: Original text content (before anonymization)
-            anonymized_content: Anonymized text content
+    ) -> Tuple[str, int, Dict[str, str]]:
+        """Phase 3: Verification agent checks the anonymized output and fixes any issues.
 
         Returns:
-            Tuple of (fixed content, number of fixes applied)
+            Tuple of (modified content, number of fixes, dict of replacements)
         """
         modified_content = anonymized_content
         total_fixes = 0
+        all_replacements: Dict[str, str] = {}
 
-        # For very long texts, process in chunks
         max_chunk_size = 4000
 
         if len(original_content) <= max_chunk_size:
-            modified_content, total_fixes = self._verify_chunk(
+            modified_content, total_fixes, all_replacements = self._verify_chunk(
                 original_content, anonymized_content, 0
             )
         else:
-            # Process in chunks
             orig_chunks = self._split_into_chunks(original_content, max_chunk_size)
             anon_chunks = self._split_into_chunks(anonymized_content, max_chunk_size)
 
-            # Use minimum number of chunks
             num_chunks = min(len(orig_chunks), len(anon_chunks))
             print(f"  Verifying {num_chunks} chunks...")
 
@@ -493,32 +509,31 @@ class AgenticTextProcessor(FileProcessor):
                 _, anon_chunk = anon_chunks[chunk_num]
 
                 print(f"  Verifying chunk {chunk_num + 1}/{num_chunks}")
-                _, chunk_fixes = self._verify_chunk(orig_chunk, anon_chunk, chunk_num)
+                _, chunk_fixes, chunk_replacements = self._verify_chunk(orig_chunk, anon_chunk, chunk_num)
                 total_fixes += chunk_fixes
+                all_replacements.update(chunk_replacements)
 
-        return modified_content, total_fixes
+            # Apply all collected fixes to the full content
+            for original, replacement in all_replacements.items():
+                modified_content = modified_content.replace(original, replacement)
+
+        return modified_content, total_fixes, all_replacements
 
     def _verify_chunk(
         self,
         original_chunk: str,
         anonymized_chunk: str,
         chunk_num: int
-    ) -> Tuple[str, int]:
-        """
-        Verify and fix a chunk of text.
-
-        Args:
-            original_chunk: Original text chunk
-            anonymized_chunk: Anonymized text chunk
-            chunk_num: Chunk number for logging
+    ) -> Tuple[str, int, Dict[str, str]]:
+        """Verify and fix a chunk of text.
 
         Returns:
-            Tuple of (fixed chunk, number of fixes)
+            Tuple of (modified chunk, number of fixes, dict of replacements)
         """
         modified_chunk = anonymized_chunk
         fixes = 0
+        replacements: Dict[str, str] = {}
 
-        # Use configurable prompt
         prompt = self.prompt_config.get_text_verification_prompt(
             original_text=original_chunk,
             anonymized_text=anonymized_chunk,
@@ -527,12 +542,10 @@ class AgenticTextProcessor(FileProcessor):
 
         messages = [HumanMessage(content=prompt)]
 
-        # Agentic loop for verification
         max_iterations = 30
         iteration = 0
 
         def invoke_verify_with_retry(msgs):
-            """Invoke verification LLM with retry logic."""
             return retry_with_backoff(
                 lambda: self.llm_verify.invoke(msgs),
                 config=self.retry_config,
@@ -560,6 +573,7 @@ class AgenticTextProcessor(FileProcessor):
                         if "[SHIFT_FAILED]" not in result:
                             if original_date in modified_chunk:
                                 modified_chunk = modified_chunk.replace(original_date, result)
+                                replacements[original_date] = result
                                 fixes += 1
                                 print(f"    Fixed date: {original_date} -> {result}")
 
@@ -575,6 +589,7 @@ class AgenticTextProcessor(FileProcessor):
                         if "[REDACT_FAILED" not in result:
                             if text_to_redact in modified_chunk:
                                 modified_chunk = modified_chunk.replace(text_to_redact, result)
+                                replacements[text_to_redact] = result
                                 fixes += 1
                                 print(f"    Fixed PII: '{text_to_redact}' -> '{result}'")
 
@@ -587,7 +602,7 @@ class AgenticTextProcessor(FileProcessor):
                 print(f"    Verification error: {e}")
                 break
 
-        return modified_chunk, fixes
+        return modified_chunk, fixes, replacements
 
     def _save_json_output(
         self,
@@ -603,7 +618,7 @@ class AgenticTextProcessor(FileProcessor):
                 "input_file": str(input_path.name),
                 "output_file": str(output_path.name),
                 "timestamp": datetime.now().isoformat(),
-                "processing_method": "agentic_text_anonymization",
+                "processing_method": "agentic_docx_anonymization",
                 "time_offset_days": self.time_offset_days,
                 "total_dates_shifted": len(dates_shifted),
                 "total_pii_redactions": pii_redactions_count

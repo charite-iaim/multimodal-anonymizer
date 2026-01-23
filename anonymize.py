@@ -4,10 +4,14 @@ Main script for anonymizing files using LLM-based processors.
 
 Processors:
 - AgenticCSVProcessor for CSV files (tool-calling approach)
+- AgenticExcelProcessor for Excel files (tool-calling approach)
 - AgenticTextProcessor for text files (tool-calling approach)
+- AgenticDocxProcessor for Word documents (tool-calling approach)
+- AgenticAudioProcessor for audio files .wav/.mp3 (Whisper + LLM + TTS)
 - DICOMVisionOCRProcessor for DICOM images (Vision LLM + OCR)
 - PDFVisionOCRProcessor for PDF files (Vision LLM + OCR)
 - PNGVisionOCRProcessor for PNG/JPG images (Vision LLM + OCR)
+- VideoVisionOCRProcessor for video files like MP4 (Vision LLM + OCR, first-frame detection)
 """
 
 import argparse
@@ -20,10 +24,14 @@ from anonymizer import (
     DataType,
 )
 from anonymizer.processors.agentic_csv_processor import AgenticCSVProcessor
+from anonymizer.processors.agentic_excel_processor import AgenticExcelProcessor
 from anonymizer.processors.agentic_text_processor import AgenticTextProcessor
+from anonymizer.processors.agentic_docx_processor import AgenticDocxProcessor
+from anonymizer.processors.agentic_audio_processor import AgenticAudioProcessor
 from anonymizer.processors.dicom_vision_ocr_processor import DICOMVisionOCRProcessor
 from anonymizer.processors.pdf_vision_ocr_processor import PDFVisionOCRProcessor
 from anonymizer.processors.png_vision_ocr_processor import PNGVisionOCRProcessor
+from anonymizer.processors.video_vision_ocr_processor import VideoVisionOCRProcessor
 from anonymizer.filename_anonymizer import FilenameAnonymizer
 from anonymizer.processing_tracker import ProcessingTracker
 from anonymizer.parallel_processor import (
@@ -139,10 +147,14 @@ def get_processor(
     # Original extension-based processor selection with agentic processors
     processors = [
         DICOMVisionOCRProcessor(config),
+        VideoVisionOCRProcessor(config),
         PNGVisionOCRProcessor(config),
         PDFVisionOCRProcessor(config),
         AgenticTextProcessor(config, time_offset_days=time_offset_days, prompt_config=prompt_config),
         AgenticCSVProcessor(config, time_offset_days=time_offset_days, prompt_config=prompt_config),
+        AgenticExcelProcessor(config, time_offset_days=time_offset_days, prompt_config=prompt_config),
+        AgenticDocxProcessor(config, time_offset_days=time_offset_days, prompt_config=prompt_config),
+        AgenticAudioProcessor(config, time_offset_days=time_offset_days, prompt_config=prompt_config),
     ]
 
     for processor in processors:
@@ -1114,7 +1126,9 @@ def main():
     print()
     print("Using AGENTIC/VISION-BASED processors:")
     print("  - AgenticCSVProcessor (tool-calling approach)")
+    print("  - AgenticExcelProcessor (tool-calling approach)")
     print("  - AgenticTextProcessor (tool-calling approach)")
+    print("  - AgenticDocxProcessor (tool-calling approach)")
     print("  - DICOMVisionOCRProcessor (Vision LLM + OCR)")
     print("  - PDFVisionOCRProcessor (Vision LLM + OCR)")
     print("  - PNGVisionOCRProcessor (Vision LLM + OCR)")

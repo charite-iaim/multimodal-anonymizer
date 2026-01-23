@@ -13,6 +13,10 @@ from PIL import Image
 from datetime import datetime
 from typing import List
 
+# Increase PIL's max image pixels limit to handle high-DPI PDF conversions
+# Default limit is ~178M pixels which can be exceeded by large PDFs at 300 DPI
+Image.MAX_IMAGE_PIXELS = 300000000  # 300 million pixels
+
 try:
     from pdf2image import convert_from_path
     PDF2IMAGE_AVAILABLE = True
@@ -38,7 +42,8 @@ class PDFVisionOCRProcessor(FileProcessor):
         enable_verification: bool = True,
         check_over_redaction: bool = False,
         max_verification_rounds: int = 2,
-        prompt_config: PromptConfig = None
+        prompt_config: PromptConfig = None,
+        enable_face_detection: bool = True
     ):
         """
         Initialize PDF Vision+OCR processor.
@@ -53,6 +58,7 @@ class PDFVisionOCRProcessor(FileProcessor):
             check_over_redaction: If True, also check for over-redaction
             max_verification_rounds: Maximum rounds of verify-and-redact
             prompt_config: Optional custom prompt configuration
+            enable_face_detection: If True, enables face detection to redact visible faces
         """
         super().__init__(config)
 
@@ -69,6 +75,7 @@ class PDFVisionOCRProcessor(FileProcessor):
         self.check_over_redaction = check_over_redaction
         self.max_verification_rounds = max_verification_rounds
         self.prompt_config = prompt_config or DEFAULT_PROMPT_CONFIG
+        self.enable_face_detection = enable_face_detection
 
         # Create PDF-specific prompt getters that use pdf_anonymization_prompt and pdf_verification_prompt
         def pdf_anonymization_prompt_getter(ocr_text_list: str) -> str:
@@ -85,7 +92,8 @@ class PDFVisionOCRProcessor(FileProcessor):
             max_verification_rounds=max_verification_rounds,
             prompt_config=self.prompt_config,
             anonymization_prompt_getter=pdf_anonymization_prompt_getter,
-            verification_prompt_getter=pdf_verification_prompt_getter
+            verification_prompt_getter=pdf_verification_prompt_getter,
+            enable_face_detection=enable_face_detection
         )
 
     def can_process(self, file_path: Path) -> bool:

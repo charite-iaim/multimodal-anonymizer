@@ -1,5 +1,6 @@
 .venv
 .env
+.venv311
 anonymizer/__pycache__/
 anonymizer/processors/__pycache__/
 data/output

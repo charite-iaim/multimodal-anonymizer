@@ -21,6 +21,10 @@ from datetime import datetime
 from typing import List, Optional
 from difflib import SequenceMatcher
 
+# Increase PIL's max image pixels limit to handle large images
+# Default limit is ~178M pixels which can be exceeded by high-resolution images
+Image.MAX_IMAGE_PIXELS = 300000000  # 300 million pixels
+
 try:
     import easyocr
     EASYOCR_AVAILABLE = True
@@ -156,6 +160,7 @@ class PNGVisionOCRProcessor(FileProcessor):
     2. OCR provides precise bounding boxes for all text
     3. Smart matching connects LLM-identified PII to OCR bounding boxes
     4. Optional: Verification agent checks for remaining PII after redaction
+    5. Optional: Face detection to redact visible faces in images
     """
 
     def __init__(
@@ -167,7 +172,8 @@ class PNGVisionOCRProcessor(FileProcessor):
         max_verification_rounds: int = 2,
         prompt_config: PromptConfig = None,
         anonymization_prompt_getter: callable = None,
-        verification_prompt_getter: callable = None
+        verification_prompt_getter: callable = None,
+        enable_face_detection: bool = True
     ):
         """
         Initialize the Vision+OCR processor.
@@ -185,6 +191,7 @@ class PNGVisionOCRProcessor(FileProcessor):
             verification_prompt_getter: Optional callable() -> str that returns the verification
                                        prompt. If provided, overrides
                                        prompt_config.get_image_verification_prompt()
+            enable_face_detection: If True, enables face detection to redact visible faces
         """
         super().__init__(config)
         self.similarity_threshold = similarity_threshold
@@ -194,6 +201,7 @@ class PNGVisionOCRProcessor(FileProcessor):
         self.prompt_config = prompt_config or DEFAULT_PROMPT_CONFIG
         self._anonymization_prompt_getter = anonymization_prompt_getter
         self._verification_prompt_getter = verification_prompt_getter
+        self.enable_face_detection = enable_face_detection
 
         if not EASYOCR_AVAILABLE:
             raise ImportError(
@@ -236,7 +244,8 @@ class PNGVisionOCRProcessor(FileProcessor):
                 check_over_redaction=check_over_redaction,
                 similarity_threshold=similarity_threshold,
                 prompt_config=self.prompt_config,
-                verification_prompt_getter=self._verification_prompt_getter
+                verification_prompt_getter=self._verification_prompt_getter,
+                enable_face_detection=enable_face_detection
             )
 
     def can_process(self, file_path: Path) -> bool:
@@ -276,25 +285,26 @@ class PNGVisionOCRProcessor(FileProcessor):
         ocr_results = self._extract_text_with_ocr(input_path)
         print(f"Found {len(ocr_results)} text regions via OCR")
 
+        pii_elements = []
+        pii_texts = []
+
         if not ocr_results:
-            print("No text found in image, saving original")
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            image.save(output_path)
-            return
+            print("No text found in image - will check for faces")
+            # Don't return early - continue to verification for face detection
+        else:
+            # Step 2: Send image to Vision LLM to identify PII
+            print("Sending image to Vision LLM for PII identification...")
+            pii_texts = self._identify_pii_with_vision(image, ocr_results)
+            print(f"Vision LLM identified {len(pii_texts)} PII elements")
 
-        # Step 2: Send image to Vision LLM to identify PII
-        print("Sending image to Vision LLM for PII identification...")
-        pii_texts = self._identify_pii_with_vision(image, ocr_results)
-        print(f"Vision LLM identified {len(pii_texts)} PII elements")
+            # Step 3: Match LLM-identified PII to OCR bounding boxes
+            print("Matching PII texts to OCR bounding boxes...")
+            pii_elements = self._match_pii_to_ocr(pii_texts, ocr_results)
+            print(f"Successfully matched {len(pii_elements)} PII elements to bounding boxes")
 
-        # Step 3: Match LLM-identified PII to OCR bounding boxes
-        print("Matching PII texts to OCR bounding boxes...")
-        pii_elements = self._match_pii_to_ocr(pii_texts, ocr_results)
-        print(f"Successfully matched {len(pii_elements)} PII elements to bounding boxes")
-
-        # Step 4: Apply redactions
-        if pii_elements:
-            image = self._apply_redactions(image.copy(), pii_elements)
+            # Step 4: Apply redactions
+            if pii_elements:
+                image = self._apply_redactions(image.copy(), pii_elements)
 
         # Step 5: Verification (if enabled)
         verification_result = None
@@ -671,6 +681,10 @@ RESPOND ONLY WITH A JSON OBJECT in the following format (no other text):
         """
         Run verification agent to check for remaining PII and apply additional redactions.
 
+        This includes:
+        1. Face detection phase (if enabled) - detects and redacts any visible faces
+        2. PII verification rounds - checks for remaining PII text and applies redactions
+
         Args:
             redacted_image: Image after initial redaction
             original_image: Original image (optional, for over-redaction check)
@@ -682,6 +696,22 @@ RESPOND ONLY WITH A JSON OBJECT in the following format (no other text):
         all_additional_elements = []
         final_result = None
 
+        # Phase 1: Face Detection (if enabled)
+        if self.enable_face_detection and self._verification_agent.enable_face_detection:
+            print("\n  --- Face Detection Phase ---")
+            current_image, face_bboxes = self._verification_agent.detect_and_redact_faces(current_image)
+            if face_bboxes:
+                # Add face detections as PIIElements
+                for i, bbox in enumerate(face_bboxes):
+                    from ..models import PIIElement
+                    face_element = PIIElement(
+                        type="face",
+                        text=f"face_{i+1}",
+                        bbox=bbox
+                    )
+                    all_additional_elements.append(face_element)
+
+        # Phase 2: PII Verification Rounds
         for round_num in range(self.max_verification_rounds):
             print(f"\n  --- Verification Round {round_num + 1}/{self.max_verification_rounds} ---")
 

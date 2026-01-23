@@ -1,4 +1,4 @@
-from fastapi import FastAPI, File, UploadFile, HTTPException, Form
+from fastapi import FastAPI, File, UploadFile, HTTPException, Form, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
@@ -13,6 +13,7 @@ import zipfile
 import asyncio
 import json
 from dotenv import load_dotenv
+import traceback
 
 # Load environment variables
 load_dotenv()
@@ -23,13 +24,45 @@ sys.path.append(str(Path(__file__).parent.parent.parent))
 from anonymizer.processors.png_vision_ocr_processor import PNGVisionOCRProcessor
 from anonymizer.processors.dicom_vision_ocr_processor import DICOMVisionOCRProcessor
 from anonymizer.processors.pdf_vision_ocr_processor import PDFVisionOCRProcessor
+from anonymizer.processors.video_vision_ocr_processor import VideoVisionOCRProcessor
 from anonymizer.processors.agentic_csv_processor import AgenticCSVProcessor
+from anonymizer.processors.agentic_excel_processor import AgenticExcelProcessor
 from anonymizer.processors.agentic_text_processor import AgenticTextProcessor
+from anonymizer.processors.agentic_docx_processor import AgenticDocxProcessor
+from anonymizer.processors.agentic_audio_processor import AgenticAudioProcessor
+from anonymizer.processors.mede_processor import (
+    MedeProcessor,
+    is_mede_available,
+    get_mede_status,
+    CT_MRI_EXTENSIONS,
+    EXTENDED_3D_IMAGE_SUFFIX,
+    is_extended_3d_image_folder,
+    find_3d_image_folders_in_path,
+)
 from anonymizer.config import AnonymizerConfig
 from anonymizer.filename_anonymizer import FilenameAnonymizer
 from anonymizer.prompt_config import PromptConfig, DEFAULT_PROMPT_CONFIG, get_prompt_descriptions
 
 app = FastAPI(title="PHI Anonymization API", version="1.0.0")
+
+# Global exception handler to log errors
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    print(f"[ERROR] Unhandled exception: {exc}")
+    print(f"[ERROR] Traceback: {traceback.format_exc()}")
+    raise exc
+
+# Middleware to log all incoming requests
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    print(f"[REQUEST] {request.method} {request.url.path}")
+    try:
+        response = await call_next(request)
+        return response
+    except Exception as e:
+        print(f"[ERROR] Request failed: {e}")
+        print(f"[ERROR] Traceback: {traceback.format_exc()}")
+        raise
 
 # Configure CORS for local development and potential deployment
 app.add_middleware(
@@ -44,6 +77,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"],  # Expose all headers for SSE
 )
 
 # Global config instance
@@ -51,6 +85,9 @@ config: Optional[AnonymizerConfig] = None
 
 # Global prompt configuration (customizable via API)
 prompt_config: PromptConfig = DEFAULT_PROMPT_CONFIG
+
+# Video processing mode: False = first-frame-only (default), True = all-frames
+video_process_all_frames: bool = False
 
 # Temporary directory for processing files
 TEMP_DIR = Path(tempfile.gettempdir()) / "phi_anonymization"
@@ -79,6 +116,15 @@ async def root():
         "version": "1.0.0",
         "status": "running",
         "config_loaded": config is not None
+    }
+
+
+@app.get("/api/test-mede")
+async def test_mede():
+    """Test endpoint to check mede availability."""
+    return {
+        "mede_available": is_mede_available(),
+        "mede_status": get_mede_status()
     }
 
 
@@ -152,6 +198,68 @@ async def get_config_status():
     return {
         "configured": config is not None,
         "model_name": config.model_name if config else None
+    }
+
+
+# ==================== Feature Availability Endpoints ====================
+
+
+@app.get("/api/features")
+async def get_features():
+    """
+    Get available features and their status.
+
+    Some features require additional setup (e.g., CT/MRI processing requires
+    a separate Python 3.11 environment with mede installed).
+    """
+    mede_status = get_mede_status()
+
+    return {
+        "ct_mri_processing": {
+            "available": mede_status["available"],
+            "name": "CT/MRI Processing",
+            "description": "Anonymize CT and MRI medical images (NIfTI, NRRD, MetaImage formats)",
+            "supported_extensions": mede_status["supported_extensions"],
+            "setup_required": not mede_status["available"],
+            "setup_instructions": mede_status["setup_instructions"] if not mede_status["available"] else None,
+            "details": mede_status if not mede_status["available"] else None,
+            "folder_convention": {
+                "suffix": EXTENDED_3D_IMAGE_SUFFIX,
+                "description": "Name folders with suffix '_extended_3d_image' to process DICOM slices as 3D volumes",
+                "example": "patient001_ct_extended_3d_image/"
+            }
+        },
+        # Standard features (always available)
+        "dicom_processing": {
+            "available": True,
+            "name": "DICOM Processing",
+            "description": "Anonymize DICOM medical images",
+            "supported_extensions": [".dcm", ".dicom"],
+        },
+        "image_processing": {
+            "available": True,
+            "name": "Image Processing",
+            "description": "Anonymize PNG and JPEG images",
+            "supported_extensions": [".png", ".jpg", ".jpeg"],
+        },
+        "document_processing": {
+            "available": True,
+            "name": "Document Processing",
+            "description": "Anonymize PDF, Word, Excel, and text documents",
+            "supported_extensions": [".pdf", ".docx", ".xlsx", ".xls", ".txt", ".hea", ".csv"],
+        },
+        "video_processing": {
+            "available": True,
+            "name": "Video Processing",
+            "description": "Anonymize video files",
+            "supported_extensions": [".mp4", ".avi", ".mov", ".mkv"],
+        },
+        "audio_processing": {
+            "available": True,
+            "name": "Audio Processing",
+            "description": "Anonymize audio files",
+            "supported_extensions": [".wav", ".mp3"],
+        },
     }
 
 
@@ -245,6 +353,29 @@ async def reset_prompts():
     }
 
 
+@app.get("/api/video-settings")
+async def get_video_settings():
+    """Get current video processing settings."""
+    return {
+        "process_all_frames": video_process_all_frames
+    }
+
+
+class VideoSettingsUpdate(BaseModel):
+    process_all_frames: bool = Field(..., description="If true, process every frame. If false, detect on first frame only.")
+
+
+@app.post("/api/video-settings")
+async def update_video_settings(update: VideoSettingsUpdate):
+    """Update video processing settings."""
+    global video_process_all_frames
+    video_process_all_frames = update.process_all_frames
+    return {
+        "status": "success",
+        "process_all_frames": video_process_all_frames
+    }
+
+
 @app.get("/api/progress/{job_id}")
 async def get_progress(job_id: str):
     """SSE endpoint for real-time progress updates."""
@@ -330,6 +461,8 @@ async def process_file(
 
         if file_extension in ['.dcm', '.dicom']:
             processor = DICOMVisionOCRProcessor(config, save_intermediate=True, prompt_config=prompt_config)
+        elif file_extension in ['.mp4', '.avi', '.mov', '.mkv']:
+            processor = VideoVisionOCRProcessor(config, save_intermediate=True, prompt_config=prompt_config, process_all_frames=video_process_all_frames)
         elif file_extension == '.pdf':
             processor = PDFVisionOCRProcessor(config, prompt_config=prompt_config)
         elif file_extension in ['.png', '.jpg', '.jpeg']:
@@ -338,6 +471,20 @@ async def process_file(
             processor = AgenticTextProcessor(config, prompt_config=prompt_config)
         elif file_extension == '.csv':
             processor = AgenticCSVProcessor(config, prompt_config=prompt_config)
+        elif file_extension in ['.xlsx', '.xls']:
+            processor = AgenticExcelProcessor(config, prompt_config=prompt_config)
+        elif file_extension == '.docx':
+            processor = AgenticDocxProcessor(config, prompt_config=prompt_config)
+        elif file_extension in ['.wav', '.mp3']:
+            processor = AgenticAudioProcessor(config, prompt_config=prompt_config)
+        elif file_extension in CT_MRI_EXTENSIONS or input_path.name.lower().endswith('.nii.gz'):
+            # CT/MRI file - check if mede is available
+            if not is_mede_available():
+                raise HTTPException(
+                    status_code=400,
+                    detail="CT/MRI processing requires additional setup. See docs/MEDE_SETUP.md for instructions."
+                )
+            processor = MedeProcessor(config)
         else:
             # Fallback: try DICOM processor for files without extension (common in MIMIC)
             test_processor = DICOMVisionOCRProcessor(config, save_intermediate=True, prompt_config=prompt_config)
@@ -413,6 +560,9 @@ async def process_folder(
         paths: List of relative paths corresponding to each file
         job_id: Optional job ID for progress tracking (generated if not provided)
     """
+    print(f"[DEBUG] process_folder called with {len(files)} files")
+    print(f"[DEBUG] paths: {paths[:5]}{'...' if len(paths) > 5 else ''}")
+    
     if config is None:
         raise HTTPException(
             status_code=400,
@@ -493,12 +643,110 @@ async def process_folder(
                     phi_detections=folder_result.phi_detections
                 )
 
-        # Process each file
-        for idx, (input_path, rel_path) in enumerate(saved_files):
+        # Identify 3D DICOM folders (folders ending with _extended_3d_image)
+        # and group files by their parent 3D folder
+        extended_3d_folders = {}  # folder_path -> list of (input_path, rel_path)
+        regular_files = []  # files not in _extended_3d_image folders
+        
+        print(f"[DEBUG] Processing {len(saved_files)} saved files")
+        
+        for input_path, rel_path in saved_files:
+            # Check if any parent folder is an extended 3D image folder
+            path_parts = Path(rel_path).parts
+            found_3d_folder = None
+            
+            print(f"[DEBUG] Checking file: {rel_path}, parts: {path_parts}")
+            
+            for i, part in enumerate(path_parts[:-1]):  # Exclude filename
+                if is_extended_3d_image_folder(part):
+                    # Get the full relative path up to and including the 3D folder
+                    found_3d_folder = str(Path(*path_parts[:i+1]))
+                    print(f"[DEBUG] Found 3D folder: {found_3d_folder}")
+                    break
+            
+            if found_3d_folder:
+                if found_3d_folder not in extended_3d_folders:
+                    extended_3d_folders[found_3d_folder] = []
+                extended_3d_folders[found_3d_folder].append((input_path, rel_path))
+            else:
+                regular_files.append((input_path, rel_path))
+        
+        print(f"[DEBUG] Found {len(extended_3d_folders)} 3D folders, {len(regular_files)} regular files")
+
+        # Process 3D DICOM folders first (as whole folders with mede)
+        processed_3d_folders = set()
+        print(f"[DEBUG] Processing {len(extended_3d_folders)} 3D folders")
+        
+        for folder_rel_path, folder_files in extended_3d_folders.items():
+            print(f"[DEBUG] Processing 3D folder: {folder_rel_path} with {len(folder_files)} files")
+            
             # Update progress
             job_progress[job_id] = {
                 "status": "processing",
-                "current": idx + 1,
+                "current": files_processed + files_failed + 1,
+                "total": total_files,
+                "current_file": f"Processing 3D volume: {folder_rel_path}"
+            }
+            
+            try:
+                # Check if mede is available
+                mede_available = is_mede_available()
+                print(f"[DEBUG] mede available: {mede_available}")
+                
+                if not mede_available:
+                    print(f"[DEBUG] mede not available, marking {len(folder_files)} files as error")
+                    for _, rel_path in folder_files:
+                        file_results.append({
+                            "original_path": rel_path,
+                            "status": "error",
+                            "error": "3D DICOM processing requires mede setup. See docs/MEDE_SETUP.md"
+                        })
+                        files_failed += 1
+                    continue
+                
+                # Get the input folder path
+                input_folder = input_dir / folder_rel_path
+                
+                # Build anonymized folder path
+                folder_path_obj = Path(folder_rel_path)
+                anonymized_folder_parts = []
+                for part in folder_path_obj.parts:
+                    anonymized_folder_parts.append(folder_mapping.get(part, part))
+                anonymized_folder_rel = str(Path(*anonymized_folder_parts)) if anonymized_folder_parts else folder_rel_path
+                
+                output_folder = output_dir / anonymized_folder_rel
+                
+                # Process the entire folder as a 3D volume
+                processor = MedeProcessor(config)
+                processor.anonymize(input_folder, output_folder)
+                
+                # Mark all files in the folder as processed
+                for _, rel_path in folder_files:
+                    file_results.append({
+                        "original_path": rel_path,
+                        "anonymized_filename": f"(3D volume: {anonymized_folder_rel})",
+                        "status": "success"
+                    })
+                    files_processed += 1
+                
+                processed_3d_folders.add(folder_rel_path)
+                
+            except Exception as e:
+                for _, rel_path in folder_files:
+                    file_results.append({
+                        "original_path": rel_path,
+                        "status": "error",
+                        "error": str(e)
+                    })
+                    files_failed += 1
+
+        # Process regular files (not in 3D folders)
+        for idx, (input_path, rel_path) in enumerate(regular_files):
+            # Update progress (account for already processed 3D folder files)
+            current_progress = files_processed + files_failed + idx + 1
+            job_progress[job_id] = {
+                "status": "processing",
+                "current": current_progress,
                 "total": total_files,
                 "current_file": f"Processing: {rel_path}"
             }
@@ -540,6 +788,8 @@ async def process_folder(
 
                 if file_extension in ['.dcm', '.dicom']:
                     processor = DICOMVisionOCRProcessor(config, save_intermediate=False, prompt_config=prompt_config)
+                elif file_extension in ['.mp4', '.avi', '.mov', '.mkv']:
+                    processor = VideoVisionOCRProcessor(config, save_intermediate=False, prompt_config=prompt_config, process_all_frames=video_process_all_frames)
                 elif file_extension == '.pdf':
                     processor = PDFVisionOCRProcessor(config, prompt_config=prompt_config)
                 elif file_extension in ['.png', '.jpg', '.jpeg']:
@@ -548,6 +798,23 @@ async def process_folder(
                     processor = AgenticTextProcessor(config, prompt_config=prompt_config)
                 elif file_extension == '.csv':
                     processor = AgenticCSVProcessor(config, prompt_config=prompt_config)
+                elif file_extension in ['.xlsx', '.xls']:
+                    processor = AgenticExcelProcessor(config, prompt_config=prompt_config)
+                elif file_extension == '.docx':
+                    processor = AgenticDocxProcessor(config, prompt_config=prompt_config)
+                elif file_extension in ['.wav', '.mp3']:
+                    processor = AgenticAudioProcessor(config, prompt_config=prompt_config)
+                elif file_extension in CT_MRI_EXTENSIONS or input_path.name.lower().endswith('.nii.gz'):
+                    # CT/MRI file - check if mede is available
+                    if not is_mede_available():
+                        file_results.append({
+                            "original_path": rel_path,
+                            "status": "error",
+                            "error": "CT/MRI processing requires additional setup. See docs/MEDE_SETUP.md"
+                        })
+                        files_failed += 1
+                        continue
+                    processor = MedeProcessor(config)
                 else:
                     # Fallback: try DICOM processor for files without extension (common in MIMIC)
                     test_processor = DICOMVisionOCRProcessor(config, save_intermediate=False, prompt_config=prompt_config)

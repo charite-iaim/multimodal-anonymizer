@@ -11,6 +11,15 @@ from .time_shift_tool import (
     restore_text,
 )
 
+from .face_detection_tool import (
+    detect_faces,
+    detect_faces_from_pil,
+    detect_faces_from_base64,
+    redact_faces_in_pil_image,
+    get_face_bounding_boxes,
+    DetectedFace,
+)
+
 __all__ = [
     "shift_datetime",
     "shift_datetime_value",
@@ -18,4 +27,11 @@ __all__ = [
     "redact_text",
     "redact_text_value",
     "restore_text",
+    # Face detection tools
+    "detect_faces",
+    "detect_faces_from_pil",
+    "detect_faces_from_base64",
+    "redact_faces_in_pil_image",
+    "get_face_bounding_boxes",
+    "DetectedFace",
 ]

@@ -16,6 +16,9 @@ import pydicom
 from pydicom.pixel_data_handlers.util import apply_voi_lut
 import cv2
 
+# Increase PIL's max image pixels limit to handle large medical images
+Image.MAX_IMAGE_PIXELS = 300000000  # 300 million pixels
+
 from ..base_processor import FileProcessor
 from ..config import AnonymizerConfig
 from ..prompt_config import PromptConfig, DEFAULT_PROMPT_CONFIG
