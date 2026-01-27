@@ -35,6 +35,7 @@ function FileUpload({ backendUrl }) {
   const [promptSettingsOpen, setPromptSettingsOpen] = useState(false)
   const [videoSettingsOpen, setVideoSettingsOpen] = useState(false)
   const [processAllFrames, setProcessAllFrames] = useState(false)
+  const [saveMappingFiles, setSaveMappingFiles] = useState(true)
   const [result, setResult] = useState(null)
   const [error, setError] = useState(null)
   const [features, setFeatures] = useState(null)  // Feature availability
@@ -78,6 +79,21 @@ function FileUpload({ backendUrl }) {
     fetchVideoSettings()
   }, [backendUrl])
 
+  useEffect(() => {
+    const fetchMappingFilesSettings = async () => {
+      try {
+        const response = await fetch(`${backendUrl}/api/mapping-files-settings`)
+        if (response.ok) {
+          const data = await response.json()
+          setSaveMappingFiles(data.save_mapping_files)
+        }
+      } catch (err) {
+        console.error('Failed to fetch mapping files settings:', err)
+      }
+    }
+    fetchMappingFilesSettings()
+  }, [backendUrl])
+
   // Update video settings when changed
   const handleVideoSettingChange = async (newValue) => {
     setProcessAllFrames(newValue)
@@ -92,6 +108,20 @@ function FileUpload({ backendUrl }) {
     }
   }
 
+  // Update mapping files settings when changed
+  const handleMappingFilesSettingChange = async (newValue) => {
+    setSaveMappingFiles(newValue)
+    try {
+      await fetch(`${backendUrl}/api/mapping-files-settings`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ save_mapping_files: newValue })
+      })
+    } catch (err) {
+      console.error('Failed to update mapping files settings:', err)
+    }
+  }
+
   const handleDrag = (e) => {
     e.preventDefault()
     e.stopPropagation()
@@ -102,14 +132,70 @@ function FileUpload({ backendUrl }) {
     }
   }
 
-  const handleDrop = (e) => {
+  const handleDrop = async (e) => {
     e.preventDefault()
     e.stopPropagation()
     setDragActive(false)
 
-    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+    const items = e.dataTransfer.items
+    if (!items || items.length === 0) return
+
+    // Check if any dropped item is a directory
+    const entries = []
+    for (let i = 0; i < items.length; i++) {
+      const entry = items[i].webkitGetAsEntry?.() || items[i].getAsEntry?.()
+      if (entry) entries.push(entry)
+    }
+
+    const hasDirectory = entries.some(entry => entry.isDirectory)
+
+    if (hasDirectory) {
+      // Recursively read all files from dropped directories (and include loose files)
+      const allFiles = []
+
+      const readEntry = (entry, path) => {
+        return new Promise((resolve) => {
+          if (entry.isFile) {
+            entry.file((file) => {
+              if (!shouldIgnoreFile(file)) {
+                // Attach relative path so the backend can reconstruct folder structure
+                // webkitRelativePath is read-only on File, so use a custom property
+                file._relativePath = path + file.name
+                allFiles.push(file)
+              }
+              resolve()
+            }, () => resolve())
+          } else if (entry.isDirectory) {
+            const reader = entry.createReader()
+            const readBatch = () => {
+              reader.readEntries(async (dirEntries) => {
+                if (dirEntries.length === 0) {
+                  resolve()
+                  return
+                }
+                await Promise.all(
+                  dirEntries.map(child => readEntry(child, path + entry.name + '/'))
+                )
+                // readEntries may not return all entries at once, keep reading
+                readBatch()
+              }, () => resolve())
+            }
+            readBatch()
+          } else {
+            resolve()
+          }
+        })
+      }
+
+      await Promise.all(entries.map(entry => readEntry(entry, '')))
+
+      if (allFiles.length > 0) {
+        setFiles(allFiles)
+        setFile(null)
+        setUploadMode('folder')
+      }
+    } else if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
       if (uploadMode === 'folder' || e.dataTransfer.files.length > 1) {
-        // Multiple files dropped - treat as folder upload
         const fileList = Array.from(e.dataTransfer.files).filter(f => !shouldIgnoreFile(f))
         if (fileList.length > 0) {
           setFiles(fileList)
@@ -123,9 +209,9 @@ function FileUpload({ backendUrl }) {
           setFiles([])
         }
       }
-      setResult(null)
-      setError(null)
     }
+    setResult(null)
+    setError(null)
   }
 
   const handleFileChange = (e) => {
@@ -165,6 +251,17 @@ function FileUpload({ backendUrl }) {
       return
     }
 
+    // Cleanup previous processed files from server if they exist
+    if (result?.job_id) {
+      try {
+        await fetch(`${backendUrl}/api/cleanup/${result.job_id}`, {
+          method: 'DELETE'
+        })
+      } catch (err) {
+        console.error('Failed to cleanup previous files:', err)
+      }
+    }
+
     setProcessing(true)
     setError(null)
     setResult(null)
@@ -196,7 +293,7 @@ function FileUpload({ backendUrl }) {
         const formData = new FormData()
         files.forEach((f) => {
           // Preserve relative path if available
-          const relativePath = f.webkitRelativePath || f.name
+          const relativePath = f.webkitRelativePath || f._relativePath || f.name
           formData.append('files', f)
           formData.append('paths', relativePath)
         })
@@ -258,11 +355,6 @@ function FileUpload({ backendUrl }) {
       a.click()
       window.URL.revokeObjectURL(url)
       document.body.removeChild(a)
-
-      // Cleanup after successful download
-      await fetch(`${backendUrl}/api/cleanup/${result.job_id}`, {
-        method: 'DELETE'
-      })
     } catch (err) {
       setError('Failed to download file: ' + err.message)
     }
@@ -284,6 +376,17 @@ function FileUpload({ backendUrl }) {
       // On error, reload to be safe
       window.location.reload()
       return
+    }
+
+    // Cleanup processed files from server if they exist
+    if (result?.job_id) {
+      try {
+        await fetch(`${backendUrl}/api/cleanup/${result.job_id}`, {
+          method: 'DELETE'
+        })
+      } catch (err) {
+        console.error('Failed to cleanup files:', err)
+      }
     }
 
     // Config is still valid, just reset the file upload state
@@ -356,6 +459,33 @@ function FileUpload({ backendUrl }) {
         </div>
       )}
 
+      {/* Mapping files settings - show when folder is selected */}
+      {files.length > 0 && (
+        <div className="video-settings">
+          <div className="video-settings-header">
+            <BsFolder className="video-icon" />
+            <span className="video-settings-title">Mapping Files Settings</span>
+          </div>
+          <div className="video-settings-content">
+            <label className="video-checkbox-label">
+              <input
+                type="checkbox"
+                className="video-checkbox"
+                checked={saveMappingFiles}
+                onChange={(e) => handleMappingFilesSettingChange(e.target.checked)}
+                disabled={processing}
+              />
+              <div className="video-checkbox-info">
+                <span className="video-checkbox-text">Save mapping CSV files</span>
+                <span className="video-checkbox-description">
+                  Create filename_anonymization.csv and folder_anonymization.csv files that map original names to anonymized names.
+                </span>
+              </div>
+            </label>
+          </div>
+        </div>
+      )}
+
       <div
         className={`drop-zone ${dragActive ? 'active' : ''} ${file || files.length > 0 ? 'has-file' : ''}`}
         onDragEnter={handleDrag}
@@ -403,7 +533,7 @@ function FileUpload({ backendUrl }) {
               <div className="file-icon"><BsFolder /></div>
               <div className="file-details">
                 <p className="file-name">
-                  {files[0].webkitRelativePath ? files[0].webkitRelativePath.split('/')[0] : 'Selected Files'}
+                  {(files[0].webkitRelativePath || files[0]._relativePath) ? (files[0].webkitRelativePath || files[0]._relativePath).split('/')[0] : 'Selected Files'}
                 </p>
                 <p className="file-size">
                   {files.length} files ({(files.reduce((sum, f) => sum + f.size, 0) / 1024).toFixed(2)} KB total)
@@ -420,7 +550,7 @@ function FileUpload({ backendUrl }) {
             <div className="folder-file-list">
               {files.slice(0, 10).map((f, idx) => (
                 <div key={idx} className="folder-file-item">
-                  <span className="folder-file-name">{f.webkitRelativePath || f.name}</span>
+                  <span className="folder-file-name">{f.webkitRelativePath || f._relativePath || f.name}</span>
                   <span className="folder-file-size">{(f.size / 1024).toFixed(1)} KB</span>
                 </div>
               ))}
@@ -489,14 +619,31 @@ function FileUpload({ backendUrl }) {
 
       {result && (
         <div className="result-section">
-          <div className="success-message">
+          <div className={`success-message ${result.warnings?.length ? 'has-warnings' : ''}`}>
             {result.files_processed
-              ? `${result.files_processed} files processed successfully!`
-              : 'File processed successfully!'}
+              ? `${result.files_processed} files processed${result.file_results?.some(r => r.status === 'warning') ? ' (some with warnings)' : ' successfully'}!`
+              : result.warnings?.length
+                ? 'File processed with warnings'
+                : 'File processed successfully!'}
             {result.files_failed > 0 && (
               <span className="warning-text"> ({result.files_failed} failed)</span>
             )}
           </div>
+
+          {/* Show warnings for single file processing */}
+          {result.warnings && result.warnings.length > 0 && (
+            <div className="verification-warnings">
+              <div className="verification-warning-header">
+                <BsExclamationTriangle className="warning-icon" />
+                <span>Processing Warnings</span>
+              </div>
+              <ul className="verification-warning-list">
+                {result.warnings.map((warning, idx) => (
+                  <li key={idx}>{warning}</li>
+                ))}
+              </ul>
+            </div>
+          )}
 
           {/* Single file result */}
           {result.filename_mapping && result.filename_mapping.phi_segments && result.filename_mapping.phi_segments.length > 0 && (
@@ -534,12 +681,18 @@ function FileUpload({ backendUrl }) {
               <h3>Processed Files</h3>
               <div className="batch-file-list">
                 {result.file_results.slice(0, 20).map((fileResult, idx) => (
-                  <div key={idx} className={`batch-file-item ${fileResult.status === 'error' ? 'error' : ''}`}>
+                  <div key={idx} className={`batch-file-item ${fileResult.status === 'error' ? 'error' : ''} ${fileResult.status === 'warning' ? 'warning' : ''}`}>
                     <span className="batch-file-original">{fileResult.original_path}</span>
                     <span className="batch-file-arrow">→</span>
                     <span className="batch-file-anonymized">
                       {fileResult.status === 'error' ? fileResult.error : fileResult.anonymized_filename}
                     </span>
+                    {fileResult.warnings && fileResult.warnings.length > 0 && (
+                      <div className="batch-file-warnings">
+                        <BsExclamationTriangle className="warning-icon-small" />
+                        <span>{fileResult.warnings[0]}</span>
+                      </div>
+                    )}
                   </div>
                 ))}
                 {result.file_results.length > 20 && (

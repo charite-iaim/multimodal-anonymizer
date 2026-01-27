@@ -5,6 +5,7 @@ import { BsChevronDown, BsChevronUp, BsArrowCounterclockwise } from 'react-icons
 function PromptSettings({ backendUrl, isOpen, onToggle }) {
   const [prompts, setPrompts] = useState(null)
   const [descriptions, setDescriptions] = useState({})
+  const [templateVariables, setTemplateVariables] = useState({})
   const [defaults, setDefaults] = useState(null)
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
@@ -24,6 +25,7 @@ function PromptSettings({ backendUrl, isOpen, onToggle }) {
     image_verification_prompt: 'Verification',
     pdf_anonymization_prompt: 'PII Anonymization',
     pdf_verification_prompt: 'Verification',
+    dicom_metadata_anonymization_prompt: 'DICOM Metadata',
     additional_instructions: 'Additional Instructions'
   }
 
@@ -31,14 +33,14 @@ function PromptSettings({ backendUrl, isOpen, onToggle }) {
   const promptGroups = {
     csv: ['column_detection_prompt', 'csv_anonymization_prompt', 'csv_verification_prompt'],
     text: ['text_anonymization_prompt', 'text_verification_prompt'],
-    image: ['image_anonymization_prompt', 'image_verification_prompt'],
+    image: ['image_anonymization_prompt', 'image_verification_prompt', 'dicom_metadata_anonymization_prompt'],
     pdf: ['pdf_anonymization_prompt', 'pdf_verification_prompt']
   }
 
   const groupLabels = {
-    csv: 'CSV Files',
+    csv: 'Tabular Files',
     text: 'Text Files',
-    image: 'Images (PNG, JPG, DICOM)',
+    image: 'Images',
     pdf: 'PDF Files'
   }
 
@@ -57,6 +59,7 @@ function PromptSettings({ backendUrl, isOpen, onToggle }) {
       const data = await response.json()
       setPrompts(data.prompts)
       setDescriptions(data.descriptions)
+      if (data.template_variables) setTemplateVariables(data.template_variables)
       setError(null)
     } catch (err) {
       setError('Failed to load prompt settings: ' + err.message)
@@ -195,7 +198,7 @@ function PromptSettings({ backendUrl, isOpen, onToggle }) {
           <BsChevronUp /> Customize Prompts
         </h3>
         <p className="prompt-settings-subtitle">
-          Modify the prompts used by the agentic processors to adapt anonymization behavior
+          Customize how the AI detects and redacts personal information. Each prompt controls a specific step of the anonymization process.
         </p>
       </div>
 
@@ -280,6 +283,19 @@ function PromptSettings({ backendUrl, isOpen, onToggle }) {
                       {expandedPrompt === key && (
                         <>
                           <p className="prompt-description">{descriptions[key]}</p>
+                          {templateVariables[key] && templateVariables[key].length > 0 && (
+                            <div className="prompt-variables-info">
+                              <span className="prompt-variables-label">Required placeholders (do not remove):</span>
+                              <span className="prompt-variables-list">
+                                {templateVariables[key].map((v) => (
+                                  <code key={v} className={
+                                    'prompt-variable-tag' +
+                                    (value && !value.includes(v) ? ' prompt-variable-missing' : '')
+                                  }>{v}</code>
+                                ))}
+                              </span>
+                            </div>
+                          )}
                           <textarea
                             value={value || ''}
                             onChange={(e) => handlePromptChange(key, e.target.value)}

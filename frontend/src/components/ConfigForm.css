@@ -11,7 +11,7 @@
   display: block;
   font-weight: 600;
   margin-bottom: 1rem;
-  color: #333;
+  color: var(--color-text-primary);
   text-align: center;
 }
 
@@ -25,25 +25,25 @@
   flex: 1;
   max-width: 200px;
   padding: 1rem 2rem;
-  background: #f8f9fa;
-  border: 2px solid #ddd;
+  background: var(--color-surface-alt);
+  border: 2px solid var(--color-input-border);
   border-radius: 8px;
   font-size: 1rem;
   font-weight: 600;
   cursor: pointer;
   transition: all 0.3s;
-  color: #666;
+  color: var(--color-text-secondary);
 }
 
 .mode-button:hover:not(:disabled) {
-  background: #e9ecef;
-  border-color: #3498db;
+  background: var(--color-surface-hover);
+  border-color: var(--color-primary);
 }
 
 .mode-button.active {
-  background: #3498db;
-  border-color: #3498db;
-  color: white;
+  background: var(--color-primary);
+  border-color: var(--color-primary);
+  color: var(--color-text-on-primary);
 }
 
 .mode-button:disabled {
@@ -53,35 +53,35 @@
 
 .dev-mode-section,
 .custom-mode-section {
-  background: #ffffff;
+  background: var(--color-surface);
   padding: 2rem;
   border-radius: 8px;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+  box-shadow: var(--shadow-sm);
 }
 
 .info-box {
-  background: #f0f8ff;
-  border: 1px solid #b8daf4;
+  background: var(--color-info-bg);
+  border: 1px solid var(--color-info-border);
   border-radius: 6px;
-  padding: 1.5rem;
+  padding: 1rem;
   margin-bottom: 2rem;
 }
 
 .info-box h3 {
   margin: 0 0 0.75rem 0;
-  color: #2c5aa0;
+  color: var(--color-info-heading);
   font-size: 1.1rem;
 }
 
 .info-box p {
   margin: 0 0 0.75rem 0;
-  color: #555;
+  color: var(--color-info-text);
   line-height: 1.6;
 }
 
 .info-box ul {
   margin: 0.5rem 0 0 1.5rem;
-  color: #555;
+  color: var(--color-info-text);
 }
 
 .info-box li {
@@ -98,18 +98,18 @@
   display: block;
   margin-bottom: 0.5rem;
   font-weight: 600;
-  color: #333;
+  color: var(--color-text-primary);
 }
 
 .required {
-  color: #e74c3c;
+  color: var(--color-danger);
   margin-left: 0.25rem;
 }
 
 .form-group input {
   width: 100%;
   padding: 0.75rem;
-  border: 1px solid #ddd;
+  border: 1px solid var(--color-input-border);
   border-radius: 4px;
   font-size: 1rem;
   transition: border-color 0.3s;
@@ -117,29 +117,29 @@
 
 .form-group input:focus {
   outline: none;
-  border-color: #3498db;
-  box-shadow: 0 0 0 3px rgba(52, 152, 219, 0.1);
+  border-color: var(--color-primary);
+  box-shadow: 0 0 0 3px var(--color-primary-focus-ring);
 }
 
 .form-group small {
   display: block;
   margin-top: 0.25rem;
-  color: #666;
+  color: var(--color-text-secondary);
   font-size: 0.875rem;
 }
 
 .error-message {
   padding: 1rem;
-  background: #fee;
-  border: 1px solid #fcc;
+  background: var(--color-error-bg);
+  border: 1px solid var(--color-error-border);
   border-radius: 4px;
-  color: #c33;
+  color: var(--color-error-text);
   margin-bottom: 1rem;
 }
 
 .success-message {
   padding: 1rem;
-  background: #efe;
+  background: var(--color-success-light-bg);
   border: 1px solid #cfc;
   border-radius: 4px;
   color: #3c3;
@@ -149,8 +149,8 @@
 .submit-button {
   width: 100%;
   padding: 1rem;
-  background: #3498db;
-  color: white;
+  background: var(--color-primary);
+  color: var(--color-text-on-primary);
   border: none;
   border-radius: 4px;
   font-size: 1rem;
@@ -160,10 +160,10 @@
 }
 
 .submit-button:hover:not(:disabled) {
-  background: #2980b9;
+  background: var(--color-primary-hover);
 }
 
 .submit-button:disabled {
-  background: #95a5a6;
+  background: var(--color-secondary);
   cursor: not-allowed;
 }

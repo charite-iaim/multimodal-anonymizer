@@ -1,22 +1,31 @@
 .app {
-  background: #0353a4;
+  background: var(--color-page-bg);
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 1.5rem 2rem;
+  box-sizing: border-box;
 }
 
 .container {
   margin: 0 auto;
   max-width: 900px;
   width: 100%;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
 }
 
 .header {
   text-align: center;
-  color: white;
-  margin-bottom: 3rem;
+  color: var(--color-text-on-primary);
+  margin-bottom: 1.5rem;
 }
 
 .header h1 {
-  font-size: 2.5rem;
-  margin-bottom: 0.5rem;
+  font-size: 2rem;
+  margin-bottom: 0.25rem;
   font-weight: 700;
 }
 
@@ -26,54 +35,54 @@
 }
 
 .backend-url-section {
-  background: white;
-  padding: 1rem 1.5rem;
+  background: var(--color-surface);
+  padding: 0.75rem 1.25rem;
   border-radius: 8px;
-  margin-bottom: 2rem;
+  margin-bottom: 1.25rem;
   display: flex;
   align-items: center;
   gap: 1rem;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+  box-shadow: var(--shadow-sm);
 }
 
 .backend-url-section label {
   font-weight: 600;
-  color: #333;
+  color: var(--color-text-primary);
   white-space: nowrap;
 }
 
 .backend-url-section input {
   flex: 1;
   padding: 0.5rem;
-  border: 1px solid #ddd;
+  border: 1px solid var(--color-input-border);
   border-radius: 4px;
   font-size: 0.9rem;
-  color: #333;
-  background-color: #cad6f1;
+  color: var(--color-text-primary);
+  background-color: var(--color-input-bg);
 }
 
 .backend-url-section input:focus {
   outline: none;
-  border-color: #3498db;
+  border-color: var(--color-primary);
 }
 
 .config-section,
 .upload-section {
-  background: white;
-  padding: 2rem;
+  background: var(--color-surface);
+  padding: 1.5rem;
   border-radius: 8px;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.1);
+  box-shadow: var(--shadow-md);
 }
 
 .config-section h2 {
   margin-top: 0;
-  color: #333;
+  color: var(--color-text-primary);
   text-align: center;
 }
 
 .info-text {
   text-align: center;
-  color: #666;
+  color: var(--color-text-secondary);
   margin-bottom: 2rem;
 }
 
@@ -81,8 +90,8 @@
   display: block;
   margin: 2rem auto 0;
   padding: 0.75rem 1.5rem;
-  background: #95a5a6;
-  color: white;
+  background: var(--color-secondary);
+  color: var(--color-text-on-primary);
   border: none;
   border-radius: 4px;
   cursor: pointer;
@@ -91,20 +100,22 @@
 }
 
 .reconfigure-button:hover {
-  background: #7f8c8d;
+  background: var(--color-secondary-hover);
 }
 
 .footer {
   text-align: center;
-  color: white;
-  margin-top: 3rem;
+  color: var(--color-text-on-primary);
+  margin-top: auto;
+  padding-top: 1.5rem;
   opacity: 0.8;
-  font-size: 0.9rem;
+  font-size: 0.85rem;
+  flex-shrink: 0;
 }
 
 .loading {
   text-align: center;
-  color: white;
+  color: var(--color-text-on-primary);
   font-size: 1.25rem;
   padding: 3rem;
 }
@@ -112,6 +123,7 @@
 @media (max-width: 768px) {
   .app {
     padding: 1rem;
+    min-height: 100vh;
   }
 
   .header h1 {

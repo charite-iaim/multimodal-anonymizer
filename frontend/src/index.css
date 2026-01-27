@@ -3,7 +3,6 @@
   line-height: 1.5;
   font-weight: 400;
 
-  /* color-scheme: light dark; */
   color: rgba(255, 255, 255, 0.87);
   background-color: #242424;
 
@@ -11,29 +10,135 @@
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+
+  /* ===== THEME COLORS — edit these to change the app palette ===== */
+
+  /* -- Page background & primary brand -- */
+  --color-page-bg: #0353a4;
+
+  /* -- Surface colors (cards, inputs, panels) -- */
+  --color-surface: #ffffff;
+  --color-surface-alt: #f8f9fa;
+  --color-surface-hover: #e9ecef;
+  --color-surface-border: #dee2e6;
+  --color-input-bg: #cad6f1;
+  --color-input-border: #ddd;
+
+  /* -- Text colors -- */
+  --color-text-primary: #333;
+  --color-text-secondary: #666;
+  --color-text-muted: #7f8c8d;
+  --color-text-on-primary: #ffffff;
+  --color-text-heading: #212529;
+  --color-text-heading-secondary: #495057;
+  --color-text-heading-tertiary: #6c757d;
+  --color-text-dark: #2c3e50;
+
+  /* -- Primary action (buttons, links, active states) -- */
+  --color-primary: #3498db;
+  --color-primary-hover: #2980b9;
+  --color-primary-focus-ring: rgba(52, 152, 219, 0.1);
+
+  /* -- Success -- */
+  --color-success: #27ae60;
+  --color-success-hover: #229954;
+  --color-success-bg: #d4edda;
+  --color-success-border: #c3e6cb;
+  --color-success-text: #155724;
+  --color-success-bg-alt: #d1e7dd;
+  --color-success-text-alt: #0f5132;
+  --color-success-light-bg: #efe;
+
+  /* -- Danger / error -- */
+  --color-danger: #e74c3c;
+  --color-danger-hover: #c0392b;
+  --color-danger-btn: #dc3545;
+  --color-error-bg: #fee;
+  --color-error-border: #fcc;
+  --color-error-text: #c33;
+  --color-error-dark-bg: #f8d7da;
+  --color-error-dark-text: #842029;
+  --color-error-dark-border: #f5c2c7;
+
+  /* -- Warning / modified -- */
+  --color-warning: #e67e22;
+  --color-warning-icon: #f39c12;
+  --color-modified: #ffc107;
+  --color-modified-bg: #fff3cd;
+  --color-modified-text: #856404;
+
+  /* -- Secondary / neutral buttons -- */
+  --color-secondary: #95a5a6;
+  --color-secondary-hover: #7f8c8d;
+
+  /* -- Accent (folder button, purple) -- */
+  --color-accent: #9b59b6;
+  --color-accent-hover: #8e44ad;
+
+  /* -- Info boxes -- */
+  --color-info-bg: #f0f8ff;
+  --color-info-border: #b8daf4;
+  --color-info-heading: #2c5aa0;
+  --color-info-text: #555;
+
+  /* -- Code blocks -- */
+  --color-code-bg: #ecf0f1;
+
+  /* -- Links -- */
+  --color-link: #646cff;
+  --color-link-hover: #535bf2;
+
+  /* -- Toggle / slider -- */
+  --color-toggle-off: #ccc;
+
+  /* -- Video settings -- */
+  --color-video-gradient-start: #667eea;
+  --color-video-gradient-end: #764ba2;
+
+  /* -- Prompt settings -- */
+  --color-prompt-save: #0d6efd;
+  --color-prompt-save-hover: #0b5ed7;
+  --color-prompt-field-highlight: #0d6efd;
+  --color-prompt-variable-bg: #e8f0fe;
+  --color-prompt-variable-tag-bg: #d4e4f7;
+  --color-prompt-variable-tag-text: #1a4a7a;
+  --color-prompt-textarea-focus: #f8f9ff;
+
+  /* -- Drop zone -- */
+  --color-dropzone-border: #cbd5e0;
+  --color-dropzone-active-bg: #ebf5fb;
+
+  /* -- Overlay -- */
+  --color-overlay-bg: rgba(0, 0, 0, 0.8);
+  --color-spinner-track: rgba(255, 255, 255, 0.3);
+
+  /* -- Shadows -- */
+  --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.1);
+  --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.1);
 }
 
 html,
 body,
 #root {
   width: 100%;
+  height: 100%;
   margin: 0;
   padding: 0;
 }
 
 a {
   font-weight: 500;
-  color: #646cff;
+  color: var(--color-link);
   text-decoration: inherit;
 }
 a:hover {
-  color: #535bf2;
+  color: var(--color-link-hover);
 }
 
 body {
   display: flex;
   min-width: 320px;
-  background: #0353a4;
+  background: var(--color-page-bg);
 }
 
 h1 {
@@ -53,22 +158,9 @@ button {
   transition: border-color 0.25s;
 }
 button:hover {
-  border-color: #646cff;
+  border-color: var(--color-link);
 }
 button:focus,
 button:focus-visible {
   outline: 4px auto -webkit-focus-ring-color;
-}
-
-@media (prefers-color-scheme: light) {
-  :root {
-    color: #213547;
-    background-color: #ffffff;
-  }
-  a:hover {
-    color: #747bff;
-  }
-  button {
-    background-color: #f9f9f9;
-  }
 }

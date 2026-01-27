@@ -22,7 +22,7 @@ function App() {
     <div className="app">
       <div className="container">
         <header className="header">
-          <h1>PII Anonymization Tool</h1>
+          <h1>Multimodal Anonymization Tool</h1>
           <p className="subtitle">
             Securely anonymize Personally Identifiable Information in your files using your own local LLM
           </p>
