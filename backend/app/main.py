@@ -14,6 +14,21 @@ import asyncio
 import json
 from dotenv import load_dotenv
 import traceback
+import ssl
+import certifi
+
+# Fix SSL certificate verification on macOS
+# This is necessary because Python on macOS doesn't always have proper SSL certificates
+try:
+    import urllib.request
+    # Create SSL context with certifi's certificates
+    ssl_context = ssl.create_default_context(cafile=certifi.where())
+    # Set as default for urllib
+    urllib.request.install_opener(
+        urllib.request.build_opener(urllib.request.HTTPSHandler(context=ssl_context))
+    )
+except Exception as e:
+    print(f"[WARNING] Could not configure SSL certificates: {e}")
 
 # Load environment variables
 load_dotenv()
@@ -41,7 +56,7 @@ from anonymizer.processors.mede_processor import (
 )
 from anonymizer.config import AnonymizerConfig
 from anonymizer.filename_anonymizer import FilenameAnonymizer
-from anonymizer.prompt_config import PromptConfig, DEFAULT_PROMPT_CONFIG, get_prompt_descriptions
+from anonymizer.prompt_config import PromptConfig, DEFAULT_PROMPT_CONFIG, get_prompt_descriptions, get_template_variables, validate_all_prompts
 
 app = FastAPI(title="PHI Anonymization API", version="1.0.0")
 
@@ -88,6 +103,9 @@ prompt_config: PromptConfig = DEFAULT_PROMPT_CONFIG
 
 # Video processing mode: False = first-frame-only (default), True = all-frames
 video_process_all_frames: bool = False
+
+# Mapping files setting: True = save CSV mapping files (default), False = don't save
+save_mapping_files: bool = True
 
 # Temporary directory for processing files
 TEMP_DIR = Path(tempfile.gettempdir()) / "phi_anonymization"
@@ -137,13 +155,13 @@ async def use_dev_config():
         # Try to load from environment variables
         azure_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
         azure_api_key = os.getenv("AZURE_OPENAI_API_KEY")
-        azure_deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME")
+        azure_deployment = os.getenv("AZURE_DEPLOYMENT_NAME")
 
         if not all([azure_endpoint, azure_api_key, azure_deployment]):
             raise HTTPException(
                 status_code=400,
                 detail="Development credentials not found in environment variables. "
-                       "Please set AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_API_KEY, and AZURE_OPENAI_DEPLOYMENT_NAME"
+                       "Please set AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_API_KEY, and AZURE_DEPLOYMENT_NAME"
             )
 
         config = AnonymizerConfig(
@@ -277,6 +295,7 @@ class PromptConfigUpdate(BaseModel):
     image_verification_prompt: Optional[str] = None
     pdf_anonymization_prompt: Optional[str] = None
     pdf_verification_prompt: Optional[str] = None
+    dicom_metadata_anonymization_prompt: Optional[str] = None
     additional_instructions: Optional[str] = None
 
 
@@ -285,7 +304,8 @@ async def get_prompts():
     """Get current prompt configuration."""
     return {
         "prompts": prompt_config.to_dict(),
-        "descriptions": get_prompt_descriptions()
+        "descriptions": get_prompt_descriptions(),
+        "template_variables": get_template_variables(),
     }
 
 
@@ -294,7 +314,8 @@ async def get_default_prompts():
     """Get default prompt configuration (for reset functionality)."""
     return {
         "prompts": DEFAULT_PROMPT_CONFIG.to_dict(),
-        "descriptions": get_prompt_descriptions()
+        "descriptions": get_prompt_descriptions(),
+        "template_variables": get_template_variables(),
     }
 
 
@@ -326,8 +347,24 @@ async def update_prompts(update: PromptConfigUpdate):
             current["pdf_anonymization_prompt"] = update.pdf_anonymization_prompt
         if update.pdf_verification_prompt is not None:
             current["pdf_verification_prompt"] = update.pdf_verification_prompt
+        if update.dicom_metadata_anonymization_prompt is not None:
+            current["dicom_metadata_anonymization_prompt"] = update.dicom_metadata_anonymization_prompt
         if update.additional_instructions is not None:
             current["additional_instructions"] = update.additional_instructions
+
+        # Validate that required template variables are still present
+        validation_errors = validate_all_prompts(current)
+        if validation_errors:
+            error_messages = []
+            for field_name, missing_vars in validation_errors.items():
+                error_messages.append(
+                    f"{field_name}: missing required placeholder(s) {', '.join(missing_vars)}"
+                )
+            raise HTTPException(
+                status_code=400,
+                detail="Some prompts are missing required placeholders that are needed at runtime. "
+                       "Please restore them:\n" + "\n".join(error_messages)
+            )
 
         # Create new config
         prompt_config = PromptConfig.from_dict(current)
@@ -373,6 +410,29 @@ async def update_video_settings(update: VideoSettingsUpdate):
     return {
         "status": "success",
         "process_all_frames": video_process_all_frames
+    }
+
+
+@app.get("/api/mapping-files-settings")
+async def get_mapping_files_settings():
+    """Get current mapping files settings."""
+    return {
+        "save_mapping_files": save_mapping_files
+    }
+
+
+class MappingFilesSettingsUpdate(BaseModel):
+    save_mapping_files: bool = Field(..., description="If true, save filename_anonymization.csv and folder_anonymization.csv files. If false, don't save.")
+
+
+@app.post("/api/mapping-files-settings")
+async def update_mapping_files_settings(update: MappingFilesSettingsUpdate):
+    """Update mapping files settings."""
+    global save_mapping_files
+    save_mapping_files = update.save_mapping_files
+    return {
+        "status": "success",
+        "save_mapping_files": save_mapping_files
     }
 
 
@@ -436,8 +496,8 @@ async def process_file(
         with open(input_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
 
-        # Anonymize filename using LLM
-        filename_anonymizer = FilenameAnonymizer(config)
+        # Anonymize filename using LLM (note: single file processing doesn't save mappings to CSV)
+        filename_anonymizer = FilenameAnonymizer(config, save_mappings=False)
         filename_result = filename_anonymizer.anonymize_filename(file.filename, is_directory=False, folder_path=job_id)
         output_filename = filename_result.anonymized_filename
         output_path = output_dir / output_filename
@@ -522,6 +582,9 @@ async def process_file(
                 shutil.copy2(video_file, video_output)
                 video_url = f"/api/download/{job_id}/{video_output.name}"
 
+        # Check for processor warnings (e.g. verification agent errors)
+        processor_warnings = getattr(processor, 'warnings', [])
+
         response_data = {
             "status": "success",
             "job_id": job_id,
@@ -529,6 +592,10 @@ async def process_file(
             "download_url": f"/api/download/{job_id}/{output_file.name}",
             "filename_mapping": filename_mapping
         }
+
+        if processor_warnings:
+            response_data["warnings"] = processor_warnings
+            response_data["message"] = "File processed with warnings"
 
         if video_url:
             response_data["video_url"] = video_url
@@ -594,8 +661,8 @@ async def process_folder(
     files_processed = 0
     files_failed = 0
 
-    # Initialize filename anonymizer
-    filename_anonymizer = FilenameAnonymizer(config)
+    # Initialize filename anonymizer with save_mappings option from global setting
+    filename_anonymizer = FilenameAnonymizer(config, output_dir=output_dir, save_mappings=save_mapping_files)
 
     # Dictionary to store folder name mappings (original -> anonymized)
     folder_mapping = {}
@@ -833,12 +900,18 @@ async def process_folder(
                 # Process the file
                 processor.anonymize(input_path, output_path)
 
+                # Check for processor warnings (e.g. verification agent errors)
+                processor_warnings = getattr(processor, 'warnings', [])
+
                 if output_path.exists():
-                    file_results.append({
+                    file_result = {
                         "original_path": rel_path,
                         "anonymized_filename": output_filename,
-                        "status": "success"
-                    })
+                        "status": "warning" if processor_warnings else "success",
+                    }
+                    if processor_warnings:
+                        file_result["warnings"] = processor_warnings
+                    file_results.append(file_result)
                     files_processed += 1
                 else:
                     file_results.append({

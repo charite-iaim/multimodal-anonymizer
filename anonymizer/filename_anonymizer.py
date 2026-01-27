@@ -57,15 +57,17 @@ class FilenameAnonymizer:
     Context-aware: Ensures that files within the same patient folder use consistent IDs.
     """
 
-    def __init__(self, config: AnonymizerConfig, output_dir: Path = None):
+    def __init__(self, config: AnonymizerConfig, output_dir: Path = None, save_mappings: bool = True):
         """Initialize filename anonymizer.
 
         Args:
             config: Anonymizer configuration
             output_dir: Output directory for tracking files (optional, for immediate tracking)
+            save_mappings: Whether to save mapping CSV files (default: True)
         """
         self.config = config
         self.output_dir = output_dir
+        self.save_mappings = save_mappings
 
         # Initialize LLM for PII detection in filenames
         # Note: max_tokens needs to be high enough to accommodate reasoning models
@@ -110,7 +112,7 @@ class FilenameAnonymizer:
 
     def _initialize_folder_csv(self) -> None:
         """Initialize the folder mapping CSV file with headers."""
-        if not self.output_dir:
+        if not self.output_dir or not self.save_mappings:
             return
 
         csv_path = self.output_dir / "folder_anonymization.csv"
@@ -293,7 +295,7 @@ class FilenameAnonymizer:
         Args:
             folder_path: Path to the folder (e.g., "patient_ID_ID_001/csv")
         """
-        if not self.output_dir:
+        if not self.output_dir or not self.save_mappings:
             return
 
         csv_path = self.output_dir / folder_path / "filename_anonymization.csv"
@@ -508,7 +510,7 @@ If no PHI: return original filename with empty phi_detections list.
             folder_path: Path to the folder containing the file
             mapping: File mapping to append
         """
-        if not self.output_dir:
+        if not self.output_dir or not self.save_mappings:
             return
 
         # Initialize CSV file if needed
@@ -534,7 +536,7 @@ If no PHI: return original filename with empty phi_detections list.
         Args:
             mapping: Folder mapping to append
         """
-        if not self.output_dir:
+        if not self.output_dir or not self.save_mappings:
             return
 
         csv_path = self.output_dir / "folder_anonymization.csv"
@@ -599,6 +601,10 @@ If no PHI: return original filename with empty phi_detections list.
         Args:
             output_dir: Root output directory where CSV files will be saved
         """
+        # Don't save if disabled
+        if not self.save_mappings:
+            return
+
         # If output_dir was set during init, mappings were already written incrementally
         # Only print summary in this case
         if self.output_dir == output_dir:
@@ -638,6 +644,10 @@ If no PHI: return original filename with empty phi_detections list.
         Args:
             output_dir: Root output directory where CSV file will be saved
         """
+        # Don't save if disabled
+        if not self.save_mappings:
+            return
+
         if not self.folder_mappings:
             return
 

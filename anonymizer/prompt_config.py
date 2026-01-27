@@ -25,7 +25,7 @@ class PromptConfig:
     - {skipped_columns}: Columns already redacted
     """
 
-    # Phase 1b: Column-level PII detection (CSV only)
+    # Column-level PII detection (CSV/Excel)
     column_detection_prompt: str = field(default="""You are a PII detection agent. Analyze this CSV structure and identify columns that contain Personal Identifiable Information (PII) that should be ENTIRELY redacted.
 
 CSV Column Headers: {columns}
@@ -56,7 +56,7 @@ For EACH column that should be entirely redacted, call:
 If no columns need full redaction, just respond with "No columns identified for full redaction."
 """)
 
-    # Phase 2: PII anonymization for CSV
+    # PII anonymization for CSV/Excel
     csv_anonymization_prompt: str = field(default="""You are a PII anonymization agent. Analyze this CSV data and redact ALL Personal Identifiable Information (PII).{skipped_columns}
 
 CRITICAL: You MUST scan the ENTIRE content of each cell, even if it's very long. Do NOT skip any PIIs!
@@ -101,7 +101,7 @@ IMPORTANT:
 - Redact the specific PII text, not the entire cell
 """)
 
-    # Phase 2: PII anonymization for text files
+    # PII anonymization for text/Word files
     text_anonymization_prompt: str = field(default="""You are a PII anonymization agent. Analyze this medical text and redact ALL Personal Identifiable Information (PII).
 
 CRITICAL: You MUST scan the ENTIRE document, even if it's very long. Do NOT skip any sections!
@@ -137,7 +137,7 @@ IMPORTANT:
 - Be thorough - check for all PII types
 """)
 
-    # Phase 3: Verification prompt for CSV
+    # Verification prompt for CSV/Excel
     csv_verification_prompt: str = field(default="""You are a verification agent for medical data anonymization.
 Compare the ORIGINAL and ANONYMIZED data below and identify any issues.
 
@@ -182,7 +182,7 @@ IMPORTANT:
 Call the appropriate tool for each issue you find. When done, summarize your findings.
 """)
 
-    # Phase 3: Verification prompt for text files
+    # Verification prompt for text/Word files
     text_verification_prompt: str = field(default="""You are a verification agent for medical data anonymization.
 Compare the ORIGINAL and ANONYMIZED text below and identify any issues.
 
@@ -342,6 +342,40 @@ Set is_clean to FALSE if you find ANY remaining PII that needs additional redact
 Be thorough - missing even one PII element is a privacy violation.
 """)
 
+    # DICOM metadata anonymization prompt (for free-text DICOM tags)
+    dicom_metadata_anonymization_prompt: str = field(default="""You are a PII anonymization agent. Analyze the following DICOM metadata tag values and redact ALL Personal Identifiable Information (PII).
+
+These are free-text fields extracted from a DICOM medical image file header. They may contain embedded patient names, doctor names, hospital names, or other identifying information mixed with medical terminology.
+
+=== DICOM METADATA TAGS ===
+{tag_data}
+=== END OF TAGS ===
+
+You have the redact_text tool available. For EACH piece of PII you find, call:
+  redact_text(text_to_redact="exact PII text")
+
+PII categories to redact:
+- Patient names, physician names, doctor names, staff names
+- Hospital names, clinic names, institution names, facility names
+- Physical addresses, street names
+- Patient IDs, medical record numbers
+- Phone numbers, fax numbers, email addresses
+- Any other information that could identify a specific individual or institution
+
+DO NOT redact:
+- Medical terminology, diagnoses, procedures, medications
+- Generic descriptions (e.g., "chest x-ray", "CT abdomen", "routine exam")
+- Anatomical terms, body parts
+- Imaging parameters or technical descriptions
+- Generic locations like "EMERGENCY ROOM", "ICU", "OR"
+
+IMPORTANT:
+- Call redact_text for EACH piece of PII you find
+- Use the EXACT text as it appears
+- The tag name (before the colon) should NOT be redacted, only the value
+- If a tag value contains no PII, skip it entirely
+""")
+
     # Additional instructions that get appended to all prompts
     additional_instructions: str = field(default="")
 
@@ -357,6 +391,7 @@ Be thorough - missing even one PII element is a privacy violation.
             "image_verification_prompt": self.image_verification_prompt,
             "pdf_anonymization_prompt": self.pdf_anonymization_prompt,
             "pdf_verification_prompt": self.pdf_verification_prompt,
+            "dicom_metadata_anonymization_prompt": self.dicom_metadata_anonymization_prompt,
             "additional_instructions": self.additional_instructions,
         }
 
@@ -375,6 +410,7 @@ Be thorough - missing even one PII element is a privacy violation.
             image_verification_prompt=data.get("image_verification_prompt", defaults.image_verification_prompt),
             pdf_anonymization_prompt=data.get("pdf_anonymization_prompt", defaults.pdf_anonymization_prompt),
             pdf_verification_prompt=data.get("pdf_verification_prompt", defaults.pdf_verification_prompt),
+            dicom_metadata_anonymization_prompt=data.get("dicom_metadata_anonymization_prompt", defaults.dicom_metadata_anonymization_prompt),
             additional_instructions=data.get("additional_instructions", ""),
         )
 
@@ -471,22 +507,76 @@ Be thorough - missing even one PII element is a privacy violation.
             prompt += f"\n\nAdditional Instructions:\n{self.additional_instructions}"
         return prompt
 
+    def get_dicom_metadata_anonymization_prompt(self, tag_data: str) -> str:
+        """Get formatted DICOM metadata anonymization prompt."""
+        prompt = self.dicom_metadata_anonymization_prompt.format(tag_data=tag_data)
+        if self.additional_instructions:
+            prompt += f"\n\nAdditional Instructions:\n{self.additional_instructions}"
+        return prompt
+
 
 # Default prompt configuration instance
 DEFAULT_PROMPT_CONFIG = PromptConfig()
 
 
 def get_prompt_descriptions() -> Dict[str, str]:
-    """Get descriptions for each prompt field for the UI."""
+    """Get user-friendly descriptions for each prompt field for the UI."""
     return {
-        "column_detection_prompt": "Phase 1b: Identifies CSV columns that should be entirely redacted (e.g., patient IDs, names). Variables: {columns}, {sample_data}",
-        "csv_anonymization_prompt": "Phase 2 (CSV): Main prompt for detecting and redacting PII in CSV cells. Variables: {csv_data}, {skipped_columns}",
-        "text_anonymization_prompt": "Phase 2 (Text): Main prompt for detecting and redacting PII in text files. Variables: {text_data}",
-        "csv_verification_prompt": "Phase 3 (CSV): Verification prompt that checks for missed PII and over-redaction. Variables: {comparison_data}, {time_offset}",
-        "text_verification_prompt": "Phase 3 (Text): Verification prompt for text files. Variables: {original_text}, {anonymized_text}, {time_offset}",
-        "image_anonymization_prompt": "Image (PNG/JPG/DICOM): Identifies PII in images using Vision LLM + OCR. Variables: {ocr_text_list}",
-        "image_verification_prompt": "Image Verification: Checks redacted images for remaining PII. No variables.",
-        "pdf_anonymization_prompt": "PDF: Identifies PII in PDF pages using Vision LLM + OCR. Variables: {ocr_text_list}",
-        "pdf_verification_prompt": "PDF Verification: Checks redacted PDF pages for remaining PII. No variables.",
+        "column_detection_prompt": "Scans CSV/Excel column headers to find columns that should be fully redacted (e.g. patient IDs, names). Runs before the main anonymization step.",
+        "csv_anonymization_prompt": "Main anonymization prompt for CSV and Excel files. The AI uses this to find and redact PII in individual cells.",
+        "text_anonymization_prompt": "Main anonymization prompt for plain text and Word (.docx) files. The AI uses this to find and redact PII in the document.",
+        "csv_verification_prompt": "Quality check for CSV/Excel files. Compares the original with the anonymized version to catch missed PII and fix over-redaction.",
+        "text_verification_prompt": "Quality check for text and Word files. Compares the original with the anonymized version to catch missed PII and fix over-redaction.",
+        "image_anonymization_prompt": "Finds PII in images (PNG, JPG, DICOM) by combining Vision AI with OCR-detected text.",
+        "image_verification_prompt": "Checks redacted images to verify that all PII has been properly covered by black boxes.",
+        "pdf_anonymization_prompt": "Finds PII in PDF pages by combining Vision AI with OCR-detected text.",
+        "pdf_verification_prompt": "Checks redacted PDF pages to verify that all PII has been properly covered by black boxes.",
+        "dicom_metadata_anonymization_prompt": "Anonymizes free-text fields in DICOM file headers (e.g. physician names, hospital names embedded in metadata).",
         "additional_instructions": "Extra instructions appended to ALL prompts. Use this to add domain-specific rules or exceptions.",
     }
+
+
+# Required template variables for each prompt field.
+# These placeholders are filled in at runtime and MUST remain in the prompt text.
+REQUIRED_TEMPLATE_VARIABLES: Dict[str, list] = {
+    "column_detection_prompt": ["{columns}", "{sample_data}"],
+    "csv_anonymization_prompt": ["{csv_data}", "{skipped_columns}"],
+    "text_anonymization_prompt": ["{text_data}"],
+    "csv_verification_prompt": ["{comparison_data}", "{time_offset}"],
+    "text_verification_prompt": ["{original_text}", "{anonymized_text}", "{time_offset}"],
+    "image_anonymization_prompt": ["{ocr_text_list}"],
+    "image_verification_prompt": [],
+    "pdf_anonymization_prompt": ["{ocr_text_list}"],
+    "pdf_verification_prompt": [],
+    "dicom_metadata_anonymization_prompt": ["{tag_data}"],
+    "additional_instructions": [],
+}
+
+
+def get_template_variables() -> Dict[str, list]:
+    """Get the required template variables for each prompt field."""
+    return dict(REQUIRED_TEMPLATE_VARIABLES)
+
+
+def validate_prompt_variables(field_name: str, prompt_text: str) -> list:
+    """
+    Validate that all required template variables are still present in the prompt.
+
+    Returns a list of missing variable names (empty list if valid).
+    """
+    required = REQUIRED_TEMPLATE_VARIABLES.get(field_name, [])
+    missing = [var for var in required if var not in prompt_text]
+    return missing
+
+
+def validate_all_prompts(prompts_dict: Dict[str, str]) -> Dict[str, list]:
+    """
+    Validate all prompts and return a dict of field_name -> missing variables.
+    Only includes fields that have missing variables.
+    """
+    errors = {}
+    for field_name, prompt_text in prompts_dict.items():
+        missing = validate_prompt_variables(field_name, prompt_text)
+        if missing:
+            errors[field_name] = missing
+    return errors

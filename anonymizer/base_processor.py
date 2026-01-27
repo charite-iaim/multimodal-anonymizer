@@ -19,6 +19,7 @@ class FileProcessor(ABC):
             config: Configuration object with LLM settings
         """
         self.config = config
+        self.warnings: list[str] = []
 
     @abstractmethod
     def can_process(self, file_path: Path) -> bool:

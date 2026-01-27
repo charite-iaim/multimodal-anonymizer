@@ -12,12 +12,19 @@ uvicorn>=0.24.0
 # Environment configuration
 python-dotenv>=1.0.0
 
+# SSL certificate handling (for macOS compatibility)
+certifi>=2023.0.0
+
 # Image processing
 Pillow>=10.0.0
 pydicom>=2.4.0
 
 # OCR for alternative processing mode
 easyocr>=1.7.0
+
+# PaddleOCR for handwritten text detection (used as fallback in verification)
+paddlepaddle>=2.5.0
+paddleocr>=2.7.0
 
 # PDF processing
 pdf2image>=1.16.0
