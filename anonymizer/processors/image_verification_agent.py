@@ -14,9 +14,11 @@ Optional: Over-redaction detection (checks if non-PII was unnecessarily redacted
 
 import base64
 import io
+import numpy as np
 from typing import List, Optional, Tuple
 from PIL import Image, ImageDraw
 from pydantic import BaseModel, Field
+from difflib import SequenceMatcher
 
 from langchain_core.messages import HumanMessage, ToolMessage
 
@@ -30,6 +32,12 @@ from ..tools.face_detection_tool import (
     redact_faces_in_pil_image,
     get_face_bounding_boxes,
 )
+
+try:
+    from paddleocr import PaddleOCR
+    PADDLEOCR_AVAILABLE = True
+except ImportError:
+    PADDLEOCR_AVAILABLE = False
 
 
 class RemainingPII(BaseModel):
@@ -103,6 +111,14 @@ class ImageVerificationAgent:
         self.prompt_config = prompt_config or DEFAULT_PROMPT_CONFIG
         self._verification_prompt_getter = verification_prompt_getter
         self.enable_face_detection = enable_face_detection
+
+        # Initialize PaddleOCR for handwritten text detection during verification
+        self._paddle_ocr = None
+        if PADDLEOCR_AVAILABLE:
+            print("  Verification Agent: Initializing PaddleOCR for handwritten text detection...")
+            self._paddle_ocr = PaddleOCR(use_angle_cls=True, lang='en', show_log=False)
+        else:
+            print("  Verification Agent: PaddleOCR not available - install with: pip install paddlepaddle paddleocr")
 
         # Initialize Vision LLM for verification (structured output mode)
         self.vision_llm = create_chat_llm(
@@ -281,7 +297,9 @@ IMPORTANT:
         Apply additional redactions for remaining PII.
 
         This method uses OCR to find precise bounding boxes for the remaining PII
-        and applies redactions.
+        and applies redactions. If the primary OCR (EasyOCR) cannot locate certain
+        PII items, PaddleOCR is used as a fallback — particularly effective for
+        handwritten text that EasyOCR often misses.
 
         Args:
             image: The current (partially redacted) image
@@ -296,21 +314,32 @@ IMPORTANT:
 
         print(f"  Verification Agent: Applying additional redactions for {len(remaining_pii)} items...")
 
-        # Get OCR results for the current image
+        # Get OCR results from primary OCR engine (EasyOCR)
         ocr_results = ocr_func(image)
 
         # Match remaining PII to OCR bounding boxes
         additional_elements = []
+        unmatched_pii = []
+
         for pii in remaining_pii:
             pii_text = pii.text.strip().lower()
+            matched = False
 
             for ocr in ocr_results:
                 ocr_text = ocr.text.strip().lower()
 
                 # Check for match (exact, substring, or fuzzy)
+                # For substring matching, require the shorter string to be at least
+                # 3 chars and at least 30% of the longer string's length to avoid
+                # single-character OCR results matching everything (e.g. "a" in "daniel martinez")
+                is_substring = False
+                if pii_text in ocr_text or ocr_text in pii_text:
+                    shorter = min(len(pii_text), len(ocr_text))
+                    longer = max(len(pii_text), len(ocr_text))
+                    is_substring = shorter >= 3 and shorter / longer >= 0.3
+
                 if (pii_text == ocr_text or
-                    pii_text in ocr_text or
-                    ocr_text in pii_text or
+                    is_substring or
                     self._fuzzy_match(pii_text, ocr_text)):
 
                     element = PIIElement(
@@ -319,10 +348,36 @@ IMPORTANT:
                         bbox=ocr.bbox
                     )
                     additional_elements.append(element)
-                    print(f"    Matched: \"{pii.text}\" -> \"{ocr.text}\"")
+                    print(f"    EasyOCR matched: \"{pii.text}\" -> \"{ocr.text}\"")
+                    matched = True
                     break
-            else:
-                print(f"    Warning: Could not find bbox for \"{pii.text}\"")
+
+            if not matched:
+                unmatched_pii.append(pii)
+                print(f"    EasyOCR: No match for \"{pii.text}\" - will try PaddleOCR")
+
+        # Fallback: Use PaddleOCR for items that EasyOCR couldn't match
+        # PaddleOCR is better at detecting handwritten text
+        if unmatched_pii and self._paddle_ocr is not None:
+            paddle_elements = self._match_remaining_pii_with_paddle(image, unmatched_pii)
+            additional_elements.extend(paddle_elements)
+
+            # Report any still-unmatched items
+            paddle_matched_texts = {e.text.strip().lower() for e in paddle_elements}
+            for pii in unmatched_pii:
+                # Check if PaddleOCR matched this one (fuzzy check needed)
+                found = False
+                for pt in paddle_matched_texts:
+                    if (pii.text.strip().lower() in pt or
+                        pt in pii.text.strip().lower() or
+                        SequenceMatcher(None, pii.text.strip().lower(), pt).ratio() >= 0.4):
+                        found = True
+                        break
+                if not found:
+                    print(f"    Warning: Neither OCR engine could locate \"{pii.text}\"")
+        elif unmatched_pii:
+            for pii in unmatched_pii:
+                print(f"    Warning: Could not find bbox for \"{pii.text}\" (PaddleOCR not available)")
 
         # Apply redactions
         if additional_elements:
@@ -332,9 +387,143 @@ IMPORTANT:
 
     def _fuzzy_match(self, text1: str, text2: str) -> bool:
         """Check if two texts match with fuzzy matching."""
-        from difflib import SequenceMatcher
         ratio = SequenceMatcher(None, text1, text2).ratio()
         return ratio >= self.similarity_threshold
+
+    def _extract_text_with_paddle_ocr(self, image: Image.Image) -> List[Tuple[str, BoundingBox, float]]:
+        """
+        Extract text from image using PaddleOCR.
+
+        PaddleOCR is better at detecting handwritten text than EasyOCR,
+        making it useful as a fallback during verification when the LLM
+        spots remaining text that EasyOCR missed.
+
+        Args:
+            image: PIL Image to extract text from
+
+        Returns:
+            List of (text, BoundingBox, confidence) tuples
+        """
+        if self._paddle_ocr is None:
+            return []
+
+        # Convert PIL Image to numpy array for PaddleOCR
+        if image.mode in ('L', 'LA', 'P'):
+            image = image.convert('RGB')
+        img_array = np.array(image)
+
+        try:
+            result = self._paddle_ocr.ocr(img_array, cls=True)
+        except Exception as e:
+            print(f"    PaddleOCR error: {e}")
+            return []
+
+        ocr_texts = []
+        if result and result[0]:
+            for line in result[0]:
+                bbox_points, (text, confidence) = line[0], line[1]
+
+                # Convert PaddleOCR bbox (4 corner points) to x, y, width, height
+                x_coords = [pt[0] for pt in bbox_points]
+                y_coords = [pt[1] for pt in bbox_points]
+
+                x = int(min(x_coords))
+                y = int(min(y_coords))
+                width = int(max(x_coords) - x)
+                height = int(max(y_coords) - y)
+
+                bbox = BoundingBox(x=x, y=y, width=width, height=height)
+                ocr_texts.append((text, bbox, confidence))
+                print(f"    PaddleOCR: '{text}' at ({x}, {y}, {width}, {height}) [conf: {confidence:.2f}]")
+
+        return ocr_texts
+
+    def _match_remaining_pii_with_paddle(
+        self,
+        image: Image.Image,
+        unmatched_pii: List[RemainingPII]
+    ) -> List[PIIElement]:
+        """
+        Use PaddleOCR to find bounding boxes for PII text that the primary OCR missed.
+
+        This is specifically designed for handwritten text that EasyOCR struggles with.
+        Uses fuzzy matching since OCR of handwriting is imperfect.
+
+        Args:
+            image: The current image to scan
+            unmatched_pii: PII items that couldn't be matched via primary OCR
+
+        Returns:
+            List of PIIElement objects with bounding boxes from PaddleOCR
+        """
+        if not unmatched_pii or self._paddle_ocr is None:
+            return []
+
+        print(f"    PaddleOCR fallback: Scanning for {len(unmatched_pii)} unmatched PII items...")
+        paddle_results = self._extract_text_with_paddle_ocr(image)
+
+        if not paddle_results:
+            print("    PaddleOCR: No text detected")
+            return []
+
+        matched_elements = []
+        used_paddle_indices = set()
+
+        for pii in unmatched_pii:
+            pii_text = pii.text.strip().lower()
+            best_match = None
+            best_score = 0.0
+            best_idx = -1
+
+            for idx, (ocr_text, bbox, confidence) in enumerate(paddle_results):
+                if idx in used_paddle_indices:
+                    continue
+
+                ocr_lower = ocr_text.strip().lower()
+
+                # Exact match
+                if pii_text == ocr_lower:
+                    best_match = (ocr_text, bbox)
+                    best_score = 1.0
+                    best_idx = idx
+                    break
+
+                # Substring match (require meaningful overlap, not single chars)
+                if pii_text in ocr_lower or ocr_lower in pii_text:
+                    shorter = min(len(pii_text), len(ocr_lower))
+                    longer = max(len(pii_text), len(ocr_lower))
+                    if shorter >= 3 and shorter / longer >= 0.3:
+                        score = 0.9
+                        if score > best_score:
+                            best_match = (ocr_text, bbox)
+                            best_score = score
+                            best_idx = idx
+                        continue
+
+                # Fuzzy match — use a slightly lower threshold for handwritten text
+                # since OCR of handwriting is inherently less accurate
+                ratio = SequenceMatcher(None, pii_text, ocr_lower).ratio()
+                handwriting_threshold = max(0.4, self.similarity_threshold - 0.15)
+                if ratio > best_score and ratio >= handwriting_threshold:
+                    best_match = (ocr_text, bbox)
+                    best_score = ratio
+                    best_idx = idx
+
+            if best_match:
+                used_paddle_indices.add(best_idx)
+                ocr_text, bbox = best_match
+                element = PIIElement(type=pii.type, text=ocr_text, bbox=bbox)
+                matched_elements.append(element)
+                match_type = (
+                    "exact" if best_score == 1.0
+                    else "substring" if best_score == 0.9
+                    else f"fuzzy({best_score:.2f})"
+                )
+                print(f"    PaddleOCR matched: \"{pii.text}\" -> \"{ocr_text}\" ({match_type})")
+            else:
+                print(f"    PaddleOCR: No match for \"{pii.text}\"")
+
+        return matched_elements
 
     def _apply_redactions(self, image: Image.Image, pii_elements: List[PIIElement]) -> Image.Image:
         """Apply black rectangle redactions to image."""

@@ -317,6 +317,14 @@ class PNGVisionOCRProcessor(FileProcessor):
             )
             pii_elements.extend(additional_elements)
 
+            # Check if verification failed due to an error (e.g. deployment not found)
+            if (verification_result is not None
+                    and verification_result.confidence == 0.0
+                    and verification_result.notes.startswith("Verification failed with error:")):
+                warning_msg = f"Verification could not run: {verification_result.notes}"
+                self.warnings.append(warning_msg)
+                print(f"  WARNING: {warning_msg}")
+
         # Step 6: Save results
         output_path.parent.mkdir(parents=True, exist_ok=True)
         image.save(output_path)
@@ -582,13 +590,19 @@ RESPOND ONLY WITH A JSON OBJECT in the following format (no other text):
                     break
 
                 # Strategy 2: Substring match
+                # Require the shorter string to be at least 3 chars and at least
+                # 30% of the longer string's length to avoid single-character OCR
+                # results matching everything (e.g. "a" in "daniel martinez")
                 if pii_lower in ocr_lower or ocr_lower in pii_lower:
-                    score = 0.9  # High score for substring match
-                    if score > best_score:
-                        best_match = ocr
-                        best_score = score
-                        best_idx = idx
-                    continue
+                    shorter = min(len(pii_lower), len(ocr_lower))
+                    longer = max(len(pii_lower), len(ocr_lower))
+                    if shorter >= 3 and shorter / longer >= 0.3:
+                        score = 0.9  # High score for substring match
+                        if score > best_score:
+                            best_match = ocr
+                            best_score = score
+                            best_idx = idx
+                        continue
 
                 # Strategy 3: Fuzzy match
                 similarity = self._calculate_similarity(pii_text, ocr_text)
