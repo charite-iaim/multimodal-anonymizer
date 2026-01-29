@@ -111,6 +111,8 @@
   opacity: 0.8;
   font-size: 0.85rem;
   flex-shrink: 0;
+  width: 100%;
+  max-width: 1200px;
 }
 
 .loading {

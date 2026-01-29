@@ -4,7 +4,7 @@
   font-weight: 400;
 
   color: rgba(255, 255, 255, 0.87);
-  background-color: #242424;
+  background-color: #1e293b;
 
   font-synthesis: none;
   text-rendering: optimizeLegibility;
@@ -14,107 +14,107 @@
   /* ===== THEME COLORS — edit these to change the app palette ===== */
 
   /* -- Page background & primary brand -- */
-  --color-page-bg: #0353a4;
+  --color-page-bg: #1e293b;
 
   /* -- Surface colors (cards, inputs, panels) -- */
   --color-surface: #ffffff;
-  --color-surface-alt: #f8f9fa;
-  --color-surface-hover: #e9ecef;
-  --color-surface-border: #dee2e6;
-  --color-input-bg: #cad6f1;
-  --color-input-border: #ddd;
+  --color-surface-alt: #f8fafc;
+  --color-surface-hover: #e2e8f0;
+  --color-surface-border: #cbd5e1;
+  --color-input-bg: #f1f5f9;
+  --color-input-border: #cbd5e1;
 
   /* -- Text colors -- */
-  --color-text-primary: #333;
-  --color-text-secondary: #666;
-  --color-text-muted: #7f8c8d;
+  --color-text-primary: #1e293b;
+  --color-text-secondary: #475569;
+  --color-text-muted: #94a3b8;
   --color-text-on-primary: #ffffff;
-  --color-text-heading: #212529;
-  --color-text-heading-secondary: #495057;
-  --color-text-heading-tertiary: #6c757d;
-  --color-text-dark: #2c3e50;
+  --color-text-heading: #0f172a;
+  --color-text-heading-secondary: #334155;
+  --color-text-heading-tertiary: #64748b;
+  --color-text-dark: #1e293b;
 
   /* -- Primary action (buttons, links, active states) -- */
-  --color-primary: #3498db;
-  --color-primary-hover: #2980b9;
-  --color-primary-focus-ring: rgba(52, 152, 219, 0.1);
+  --color-primary: #6366f1;
+  --color-primary-hover: #4f46e5;
+  --color-primary-focus-ring: rgba(99, 102, 241, 0.15);
 
-  /* -- Success -- */
-  --color-success: #27ae60;
-  --color-success-hover: #229954;
-  --color-success-bg: #d4edda;
-  --color-success-border: #c3e6cb;
-  --color-success-text: #155724;
-  --color-success-bg-alt: #d1e7dd;
-  --color-success-text-alt: #0f5132;
-  --color-success-light-bg: #efe;
+  /* -- Success -- */ 
+  --color-success: #10b981;
+  --color-success-hover: #059669;
+  --color-success-bg: #d1fae5;
+  --color-success-border: #a7f3d0;
+  --color-success-text: #065f46;
+  --color-success-bg-alt: #d1fae5;
+  --color-success-text-alt: #065f46;
+  --color-success-light-bg: #ecfdf5;
 
   /* -- Danger / error -- */
-  --color-danger: #e74c3c;
-  --color-danger-hover: #c0392b;
-  --color-danger-btn: #dc3545;
-  --color-error-bg: #fee;
-  --color-error-border: #fcc;
-  --color-error-text: #c33;
-  --color-error-dark-bg: #f8d7da;
-  --color-error-dark-text: #842029;
-  --color-error-dark-border: #f5c2c7;
+  --color-danger: #ef4444;
+  --color-danger-hover: #dc2626;
+  --color-danger-btn: #ef4444;
+  --color-error-bg: #fef2f2;
+  --color-error-border: #fecaca;
+  --color-error-text: #dc2626;
+  --color-error-dark-bg: #fee2e2;
+  --color-error-dark-text: #991b1b;
+  --color-error-dark-border: #fecaca;
 
   /* -- Warning / modified -- */
-  --color-warning: #e67e22;
-  --color-warning-icon: #f39c12;
-  --color-modified: #ffc107;
-  --color-modified-bg: #fff3cd;
-  --color-modified-text: #856404;
+  --color-warning: #f59e0b;
+  --color-warning-icon: #f59e0b;
+  --color-modified: #f59e0b;
+  --color-modified-bg: #fef3c7;
+  --color-modified-text: #92400e;
 
   /* -- Secondary / neutral buttons -- */
-  --color-secondary: #95a5a6;
-  --color-secondary-hover: #7f8c8d;
+  --color-secondary: #64748b;
+  --color-secondary-hover: #475569;
 
-  /* -- Accent (folder button, purple) -- */
-  --color-accent: #9b59b6;
-  --color-accent-hover: #8e44ad;
+  /* -- Accent (folder button, violet) -- */
+  --color-accent: #8b5cf6;
+  --color-accent-hover: #7c3aed;
 
   /* -- Info boxes -- */
-  --color-info-bg: #f0f8ff;
-  --color-info-border: #b8daf4;
-  --color-info-heading: #2c5aa0;
-  --color-info-text: #555;
+  --color-info-bg: #eef2ff;
+  --color-info-border: #c7d2fe;
+  --color-info-heading: #4338ca;
+  --color-info-text: #475569;
 
   /* -- Code blocks -- */
-  --color-code-bg: #ecf0f1;
+  --color-code-bg: #f1f5f9;
 
   /* -- Links -- */
-  --color-link: #646cff;
-  --color-link-hover: #535bf2;
+  --color-link: #6366f1;
+  --color-link-hover: #4f46e5;
 
   /* -- Toggle / slider -- */
-  --color-toggle-off: #ccc;
+  --color-toggle-off: #cbd5e1;
 
   /* -- Video settings -- */
-  --color-video-gradient-start: #667eea;
-  --color-video-gradient-end: #764ba2;
+  --color-video-gradient-start: #6366f1;
+  --color-video-gradient-end: #8b5cf6;
 
   /* -- Prompt settings -- */
-  --color-prompt-save: #0d6efd;
-  --color-prompt-save-hover: #0b5ed7;
-  --color-prompt-field-highlight: #0d6efd;
-  --color-prompt-variable-bg: #e8f0fe;
-  --color-prompt-variable-tag-bg: #d4e4f7;
-  --color-prompt-variable-tag-text: #1a4a7a;
-  --color-prompt-textarea-focus: #f8f9ff;
+  --color-prompt-save: #6366f1;
+  --color-prompt-save-hover: #4f46e5;
+  --color-prompt-field-highlight: #6366f1;
+  --color-prompt-variable-bg: #eef2ff;
+  --color-prompt-variable-tag-bg: #e0e7ff;
+  --color-prompt-variable-tag-text: #3730a3;
+  --color-prompt-textarea-focus: #f5f3ff;
 
   /* -- Drop zone -- */
-  --color-dropzone-border: #cbd5e0;
-  --color-dropzone-active-bg: #ebf5fb;
+  --color-dropzone-border: #cbd5e1;
+  --color-dropzone-active-bg: #eef2ff;
 
   /* -- Overlay -- */
-  --color-overlay-bg: rgba(0, 0, 0, 0.8);
+  --color-overlay-bg: rgba(15, 23, 42, 0.85);
   --color-spinner-track: rgba(255, 255, 255, 0.3);
 
   /* -- Shadows -- */
-  --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.1);
-  --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.1);
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.08), 0 1px 2px rgba(0, 0, 0, 0.06);
+  --shadow-md: 0 4px 6px rgba(0, 0, 0, 0.07), 0 2px 4px rgba(0, 0, 0, 0.06);
 }
 
 html,
@@ -153,7 +153,7 @@ button {
   font-size: 1em;
   font-weight: 500;
   font-family: inherit;
-  background-color: #1a1a1a;
+  background-color: var(--color-secondary);
   cursor: pointer;
   transition: border-color 0.25s;
 }

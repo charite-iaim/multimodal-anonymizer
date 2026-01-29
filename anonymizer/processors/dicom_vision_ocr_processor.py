@@ -29,6 +29,7 @@ from ..llm_factory import create_chat_llm
 from ..tools.time_shift_tool import shift_datetime_value, redact_text
 from ..retry_utils import retry_with_backoff, RetryConfig, create_retry_callback
 from .png_vision_ocr_processor import PNGVisionOCRProcessor
+from .dicom_face_redaction_processor import redact_faces_in_dicom_frames, get_face_redaction_masks_for_frames
 
 
 # ── DICOM metadata tag categories for anonymization ──
@@ -131,6 +132,67 @@ class DICOMVisionOCRProcessor(FileProcessor):
             max_tokens=16000,
             tools=[redact_text],
         )
+
+        # Vision LLM for head scan classification
+        self.llm_vision = create_chat_llm(
+            config=config,
+            timeout=120,
+            max_tokens=256,
+            use_vision_model=True,
+        )
+
+    def _is_head_scan(self, image: Image.Image) -> bool:
+        """
+        Ask the vision LLM whether a DICOM image is a CT or MRI scan of the head/face.
+
+        Args:
+            image: A representative frame from the DICOM (first frame).
+
+        Returns:
+            True if the LLM determines this is a CT/MRI head scan showing the face.
+        """
+        import base64
+        import io
+
+        # Convert image to base64 PNG for the vision model
+        rgb_image = image.convert("RGB")
+        buffer = io.BytesIO()
+        rgb_image.save(buffer, format="PNG")
+        base64_image = base64.b64encode(buffer.getvalue()).decode("utf-8")
+
+        prompt = (
+            "You are a medical imaging expert. Look at this DICOM image and determine "
+            "whether it is a CT or MRI scan of the head/face region.\n\n"
+            "Answer ONLY with 'YES' or 'NO'.\n"
+            "- Answer 'YES' if this is a CT or MRI scan of the head or face, or skull\n"
+            "- Answer 'NO' for all other types of medical images (chest CT, abdominal "
+            "scans, X-rays, ultrasounds, etc.).\n\n"
+            "Your answer (YES or NO):"
+        )
+
+        message = HumanMessage(
+            content=[
+                {"type": "text", "text": prompt},
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/png;base64,{base64_image}"},
+                },
+            ]
+        )
+
+        try:
+            response = retry_with_backoff(
+                lambda: self.llm_vision.invoke([message]),
+                config=self.retry_config,
+                on_retry=create_retry_callback(prefix="    [Head scan detection] "),
+            )
+            answer = response.content.strip().upper()
+            is_head = answer.startswith("YES")
+            print(f"  Head scan detection: LLM answered '{answer}' -> {'head scan' if is_head else 'not a head scan'}")
+            return is_head
+        except Exception as e:
+            print(f"  Head scan detection failed: {e}. Falling back to standard processing.")
+            return False
 
     def can_process(self, file_path: Path) -> bool:
         """Check if file is a DICOM image."""
@@ -372,22 +434,25 @@ class DICOMVisionOCRProcessor(FileProcessor):
 
     # ── DICOM pixel data conversion ──
 
-    def _dicom_to_images(self, dicom_path: Path) -> tuple[list[Image.Image], pydicom.Dataset, bool]:
+    def _dicom_to_images(self, dicom_path: Path) -> tuple[list[Image.Image], pydicom.Dataset, bool, np.ndarray]:
         """
-        Convert DICOM file to PIL Image(s).
+        Convert DICOM file to display-quality PIL Image(s) and preserve the raw pixel array.
+
+        The PIL images are used for LLM/OCR detection only. The raw pixel array
+        is preserved so redactions can be applied directly without lossy round-tripping.
 
         Args:
             dicom_path: Path to DICOM file
 
         Returns:
-            Tuple of (list of PIL Images, DICOM dataset, is_multiframe)
+            Tuple of (list of PIL Images, DICOM dataset, is_multiframe, raw_pixel_array)
         """
         ds = pydicom.dcmread(dicom_path, force=True)
-        
+
         # Handle missing transfer syntax by setting a default
         if not hasattr(ds, 'file_meta') or ds.file_meta is None:
             ds.file_meta = pydicom.dataset.FileMetaDataset()
-        
+
         if not hasattr(ds.file_meta, 'TransferSyntaxUID') or ds.file_meta.TransferSyntaxUID is None:
             # Try to infer transfer syntax from the data
             # Common transfer syntaxes to try in order
@@ -396,7 +461,7 @@ class DICOMVisionOCRProcessor(FileProcessor):
                 pydicom.uid.ExplicitVRLittleEndian,
                 pydicom.uid.ExplicitVRBigEndian,
             ]
-            
+
             pixel_array = None
             for ts in transfer_syntaxes:
                 try:
@@ -406,7 +471,7 @@ class DICOMVisionOCRProcessor(FileProcessor):
                     break
                 except Exception as e:
                     continue
-            
+
             if pixel_array is None:
                 raise ValueError(
                     "Unable to decode pixel data with any common transfer syntax. "
@@ -415,67 +480,439 @@ class DICOMVisionOCRProcessor(FileProcessor):
         else:
             pixel_array = ds.pixel_array
 
+        # Keep a copy of the raw pixel array before any display transformations
+        raw_pixel_array = pixel_array.copy()
+
         is_multiframe = len(pixel_array.shape) == 4
 
         if is_multiframe:
             print(f"Multi-frame DICOM detected: {pixel_array.shape[0]} frames")
             frames = []
             for i in range(pixel_array.shape[0]):
-                frame = self._process_frame(pixel_array[i], ds)
+                frame = self._make_display_image(pixel_array[i], ds)
                 frames.append(frame)
-            return frames, ds, True
+            return frames, ds, True, raw_pixel_array
         else:
-            frame = self._process_frame(pixel_array, ds)
-            return [frame], ds, False
+            frame = self._make_display_image(pixel_array, ds)
+            return [frame], ds, False, raw_pixel_array
 
-    def _process_frame(self, pixel_array: np.ndarray, ds: pydicom.Dataset) -> Image.Image:
+    def _make_display_image(self, pixel_array: np.ndarray, ds: pydicom.Dataset) -> Image.Image:
         """
-        Process a single frame/image from pixel array.
+        Create a display-quality 8-bit PIL Image from raw DICOM pixel data.
+
+        This is used ONLY for sending to the LLM/OCR for PII detection and for
+        saving intermediate debug PNGs. The original pixel data is never modified.
 
         Args:
-            pixel_array: Pixel data array (2D or 3D)
+            pixel_array: Pixel data array (2D grayscale or 3D color)
             ds: DICOM dataset for metadata
 
         Returns:
-            PIL Image
+            PIL Image suitable for display/LLM consumption
         """
-        try:
-            pixel_array = apply_voi_lut(pixel_array, ds)
-        except:
-            pass
+        is_color = len(pixel_array.shape) == 3 and pixel_array.shape[2] >= 3
 
-        pixel_array = pixel_array.astype(float)
-        pixel_min = pixel_array.min()
-        pixel_max = pixel_array.max()
+        if not is_color:
+            # Simple min-max normalization for display
+            display = pixel_array.copy().astype(float)
+            pixel_min = display.min()
+            pixel_max = display.max()
 
-        if pixel_max > pixel_min:
-            pixel_array = ((pixel_array - pixel_min) / (pixel_max - pixel_min) * 255.0)
+            if pixel_max > pixel_min:
+                display = ((display - pixel_min) / (pixel_max - pixel_min) * 255.0)
 
-        pixel_array = pixel_array.astype(np.uint8)
+            display = display.astype(np.uint8)
 
-        if hasattr(ds, 'PhotometricInterpretation'):
-            if ds.PhotometricInterpretation == 'MONOCHROME1':
-                pixel_array = 255 - pixel_array
+            if hasattr(ds, 'PhotometricInterpretation'):
+                if ds.PhotometricInterpretation == 'MONOCHROME1':
+                    display = 255 - display
 
-        if len(pixel_array.shape) == 2:
-            image = Image.fromarray(pixel_array, mode='L')
-        elif len(pixel_array.shape) == 3:
-            image = Image.fromarray(pixel_array, mode='RGB')
+            return Image.fromarray(display, mode='L')
         else:
-            raise ValueError(f"Unexpected pixel array shape: {pixel_array.shape}")
+            photometric = getattr(ds, 'PhotometricInterpretation', 'RGB')
 
-        return image
+            if photometric.startswith('YBR'):
+                display = pixel_array.astype(np.uint8)
+                image = Image.fromarray(display, mode='YCbCr')
+                return image.convert('RGB')
+            else:
+                if pixel_array.dtype != np.uint8:
+                    display = pixel_array.astype(float)
+                    pixel_min = display.min()
+                    pixel_max = display.max()
 
-    def _images_to_dicom(self, images: list[Image.Image], original_ds: pydicom.Dataset,
-                         output_path: Path, is_multiframe: bool) -> dict:
+                    if pixel_max > pixel_min:
+                        display = ((display - pixel_min) / (pixel_max - pixel_min) * 255.0)
+
+                    display = display.astype(np.uint8)
+                else:
+                    display = pixel_array
+
+                return Image.fromarray(display, mode='RGB')
+
+    @staticmethod
+    def _apply_redaction_to_pixel_array(
+        pixel_array: np.ndarray,
+        pii_elements: list,
+        ds: pydicom.Dataset,
+    ) -> np.ndarray:
         """
-        Convert PIL Image(s) back to DICOM format, anonymizing metadata.
+        Apply redaction bounding boxes directly on the raw DICOM pixel array.
+
+        For grayscale: fills redacted regions with the minimum pixel value
+        (appears black in MONOCHROME2, white in MONOCHROME1 — both are "blank").
+        For color: fills with zeros (black).
 
         Args:
-            images: List of PIL Images with redactions applied
-            original_ds: Original DICOM dataset
-            output_path: Path to save DICOM file
-            is_multiframe: Whether the original was multi-frame
+            pixel_array: Raw pixel array (2D for grayscale, 3D for color).
+                         Modified in-place.
+            pii_elements: List of PIIElement objects with bounding boxes.
+            ds: DICOM dataset for metadata.
+
+        Returns:
+            The modified pixel array.
+        """
+        is_color = len(pixel_array.shape) == 3 and pixel_array.shape[2] >= 3
+        padding = 5
+
+        # Determine the "black" fill value for this image
+        if is_color:
+            fill_value = 0
+        else:
+            photometric = getattr(ds, 'PhotometricInterpretation', 'MONOCHROME2')
+            if photometric == 'MONOCHROME1':
+                # MONOCHROME1: higher values = darker, so use max to get black
+                fill_value = int(pixel_array.max())
+            else:
+                # MONOCHROME2: lower values = darker, so use min to get black
+                fill_value = int(pixel_array.min())
+
+        rows, cols = pixel_array.shape[0], pixel_array.shape[1]
+
+        for element in pii_elements:
+            bbox = element.bbox
+            if bbox.width > 0 and bbox.height > 0:
+                x1 = max(0, bbox.x - padding)
+                y1 = max(0, bbox.y - padding)
+                x2 = min(cols, bbox.x + bbox.width + padding)
+                y2 = min(rows, bbox.y + bbox.height + padding)
+
+                pixel_array[y1:y2, x1:x2] = fill_value
+                print(f"  Redacted [{element.type}]: \"{element.text}\"")
+
+        return pixel_array
+
+    def _save_dicom_with_pixel_array(
+        self,
+        original_ds: pydicom.Dataset,
+        pixel_array: np.ndarray,
+        output_path: Path,
+    ) -> dict:
+        """
+        Save a DICOM file using the original dataset and a (possibly redacted) pixel array.
+
+        Preserves the original bit depth, transfer syntax, and all pixel-related DICOM tags.
+        Only metadata is anonymized; pixel encoding parameters are left intact.
+
+        Args:
+            original_ds: Original DICOM dataset (used as template).
+            pixel_array: Pixel array to write (same dtype/shape as original).
+            output_path: Path to save the output DICOM file.
+
+        Returns:
+            Dict of metadata changes made during anonymization.
+        """
+        new_ds = original_ds.copy()
+        new_ds.PixelData = pixel_array.tobytes()
+
+        # If the original had a compressed transfer syntax, change to uncompressed
+        # since we've modified the raw pixel data
+        if hasattr(new_ds, 'file_meta') and hasattr(new_ds.file_meta, 'TransferSyntaxUID'):
+            ts = new_ds.file_meta.TransferSyntaxUID
+            # Check if it's a compressed transfer syntax
+            if ts not in [pydicom.uid.ImplicitVRLittleEndian,
+                          pydicom.uid.ExplicitVRLittleEndian,
+                          pydicom.uid.ExplicitVRBigEndian]:
+                # Change to uncompressed
+                new_ds.file_meta.TransferSyntaxUID = pydicom.uid.ExplicitVRLittleEndian
+                print(f"  Changed compressed transfer syntax {ts.name} to ExplicitVRLittleEndian")
+
+        # Anonymize DICOM metadata (blank PHI tags, shift dates, regenerate UIDs, LLM free-text)
+        print("Anonymizing DICOM metadata...")
+        metadata_changes = self._anonymize_metadata(new_ds)
+
+        # Add processing note after metadata anonymization (which may have cleared ImageComments)
+        if hasattr(new_ds, 'ImageComments') and new_ds.ImageComments:
+            new_ds.ImageComments = f"{new_ds.ImageComments}; Anonymized by Vision+OCR LLM processor"
+        else:
+            new_ds.ImageComments = "Anonymized by Vision+OCR LLM processor"
+
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        new_ds.save_as(output_path)
+
+        return metadata_changes
+
+    def _create_video_from_frames(self, frames: list[Image.Image], output_path: Path, fps: int = 10) -> None:
+        """
+        Create an MP4 video from a list of frames for debugging purposes.
+
+        Args:
+            frames: List of PIL Images
+            output_path: Path to save the MP4 file
+            fps: Frames per second for the video
+        """
+        if not frames:
+            return
+
+        first_frame = frames[0]
+        width, height = first_frame.size
+
+        rgb_frames = []
+        for frame in frames:
+            if frame.mode != 'RGB':
+                frame = frame.convert('RGB')
+            rgb_frames.append(np.array(frame))
+
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        video_writer = cv2.VideoWriter(str(output_path), fourcc, fps, (width, height))
+
+        for frame_array in rgb_frames:
+            frame_bgr = cv2.cvtColor(frame_array, cv2.COLOR_RGB2BGR)
+            video_writer.write(frame_bgr)
+
+        video_writer.release()
+        print(f"Created debug video: {output_path}")
+
+    def anonymize(self, input_path: Path, output_path: Path) -> None:
+        """
+        Anonymize DICOM image using Vision LLM + OCR approach.
+
+        The pipeline uses display-quality images for PII detection (LLM + OCR),
+        but applies redaction bounding boxes directly on the original raw pixel
+        data to preserve the full fidelity of the DICOM.
+
+        If the DICOM is detected as a CT/MRI head scan (via LLM), a trained
+        ResNet U-Net model is used to redact facial features. Otherwise the
+        standard Vision+OCR pipeline is used for text-based PII redaction.
+
+        For multi-frame DICOMs, PHI detection is performed only on the first frame
+        and the detected bounding boxes are applied to all frames.
+
+        Args:
+            input_path: Path to input DICOM file
+            output_path: Path to save anonymized DICOM file
+        """
+        print(f"Processing DICOM (Vision+OCR): {input_path.name}")
+
+        print("Converting DICOM to display images...")
+        display_images, dicom_dataset, is_multiframe, raw_pixel_array = self._dicom_to_images(input_path)
+
+        # ── Head scan detection: ask LLM if this is a CT/MRI head scan ──
+        print("Checking if DICOM is a CT/MRI head scan...")
+        use_face_redaction = self._is_head_scan(display_images[0])
+
+        # Initialize pixel array for redaction
+        redacted_pixel_array = raw_pixel_array.copy()
+
+        if use_face_redaction:
+            # Step 1: Apply face redaction for head scans
+            # Extract masks from the model and apply to raw pixel array to preserve bit depth
+            print("Step 1: Using trained face redaction model for CT/MRI head scan...")
+
+            # Get redaction masks from the model
+            face_masks = get_face_redaction_masks_for_frames(display_images)
+
+            # Also get redacted images for debug saving (if needed)
+            redacted_images = None
+            if self.save_intermediate:
+                debug_path = output_path if self.save_intermediate else None
+                redacted_images = redact_faces_in_dicom_frames(display_images, debug_output_path=debug_path)
+
+                intermediate_dir = output_path.parent / "intermediate"
+                intermediate_dir.mkdir(parents=True, exist_ok=True)
+                for i, img in enumerate(display_images):
+                    img.save(intermediate_dir / f"{input_path.stem}_frame{i:04d}_original.png")
+                for i, img in enumerate(redacted_images):
+                    img.save(intermediate_dir / f"{input_path.stem}_frame{i:04d}_face_redacted.png")
+                # Also save the masks for debugging
+                for i, mask in enumerate(face_masks):
+                    mask_img = Image.fromarray((mask * 255).astype(np.uint8), mode="L")
+                    mask_img.save(intermediate_dir / f"{input_path.stem}_frame{i:04d}_face_mask.png")
+
+            # Apply face redaction masks to the raw pixel array (preserves original bit depth)
+            print("Applying face redaction masks to original DICOM pixel data...")
+
+            if is_multiframe:
+                # Multi-frame: apply mask to each frame
+                for frame_idx, mask in enumerate(face_masks):
+                    if frame_idx < redacted_pixel_array.shape[0]:
+                        redacted_pixel_array[frame_idx][mask] = 0
+            else:
+                # Single frame: apply mask directly
+                redacted_pixel_array[face_masks[0]] = 0
+
+            # Step 2: Also run text detection on face-redacted images
+            # Create display images from the face-redacted pixel array for text detection
+            print("Step 2: Running Vision+OCR text detection on face-redacted images...")
+            face_redacted_display_images = []
+            if is_multiframe:
+                for i in range(redacted_pixel_array.shape[0]):
+                    face_redacted_display_images.append(
+                        self._make_display_image(redacted_pixel_array[i], dicom_dataset)
+                    )
+            else:
+                face_redacted_display_images.append(
+                    self._make_display_image(redacted_pixel_array, dicom_dataset)
+                )
+
+            # Detect text PII on the face-redacted images
+            if is_multiframe:
+                print(f"Multi-frame DICOM: Using first-frame-only detection strategy for text")
+                pii_elements = self._detect_pii_multiframe(
+                    face_redacted_display_images, input_path, output_path
+                )
+            else:
+                pii_elements = self._detect_pii_singleframe(
+                    face_redacted_display_images[0], input_path, output_path
+                )
+
+            # Apply text redaction bounding boxes on top of face redaction
+            print("Applying text redactions to DICOM pixel data...")
+            if is_multiframe:
+                for i in range(redacted_pixel_array.shape[0]):
+                    self._apply_redaction_to_pixel_array(
+                        redacted_pixel_array[i], pii_elements, dicom_dataset
+                    )
+            else:
+                self._apply_redaction_to_pixel_array(
+                    redacted_pixel_array, pii_elements, dicom_dataset
+                )
+
+            # Save intermediate fully redacted images for debugging
+            if self.save_intermediate:
+                intermediate_dir = output_path.parent / "intermediate"
+                intermediate_dir.mkdir(parents=True, exist_ok=True)
+                if is_multiframe:
+                    for i in range(redacted_pixel_array.shape[0]):
+                        redacted_display = self._make_display_image(redacted_pixel_array[i], dicom_dataset)
+                        redacted_display.save(intermediate_dir / f"{input_path.stem}_frame{i:04d}_fully_redacted.png")
+                else:
+                    redacted_display = self._make_display_image(redacted_pixel_array, dicom_dataset)
+                    redacted_display.save(intermediate_dir / f"{input_path.stem}_fully_redacted.png")
+
+            # Update debug JSON with combined processing info
+            if self.config.save_debug_files:
+                json_dest = output_path.with_suffix(".json")
+                if json_dest.exists():
+                    with open(json_dest, "r", encoding="utf-8") as f:
+                        output_data = json.load(f)
+                else:
+                    output_data = {}
+
+                output_data["metadata"] = output_data.get("metadata", {})
+                output_data["metadata"].update({
+                    "processing_method": "face_redaction_and_vision_ocr",
+                    "is_head_scan": True,
+                    "total_frames": len(display_images),
+                    "bit_depth_preserved": True,
+                    "face_redaction_applied": True,
+                    "text_redaction_applied": True,
+                    "total_text_pii_elements": len(pii_elements),
+                })
+                with open(json_dest, "w", encoding="utf-8") as f:
+                    json.dump(output_data, f, indent=2, ensure_ascii=False)
+
+            # Save DICOM with the fully redacted pixel array
+            print("Saving fully anonymized DICOM (face + text redaction)...")
+            metadata_changes = self._save_dicom_with_pixel_array(
+                dicom_dataset, redacted_pixel_array, output_path
+            )
+            print(f"Saved anonymized DICOM to: {output_path}")
+        else:
+            # Standard Vision+OCR pipeline: detect on display images,
+            # redact on original pixel data
+            if is_multiframe:
+                print(f"Multi-frame DICOM: Using first-frame-only detection strategy")
+                pii_elements = self._detect_pii_multiframe(
+                    display_images, input_path, output_path
+                )
+            else:
+                pii_elements = self._detect_pii_singleframe(
+                    display_images[0], input_path, output_path
+                )
+
+            # Apply redaction bounding boxes directly on the raw pixel array
+            print("Applying redactions to original DICOM pixel data...")
+
+            if is_multiframe:
+                for i in range(redacted_pixel_array.shape[0]):
+                    self._apply_redaction_to_pixel_array(
+                        redacted_pixel_array[i], pii_elements, dicom_dataset
+                    )
+            else:
+                self._apply_redaction_to_pixel_array(
+                    redacted_pixel_array, pii_elements, dicom_dataset
+                )
+
+            # Save intermediate redacted display images for debugging
+            if self.save_intermediate:
+                intermediate_dir = output_path.parent / "intermediate"
+                intermediate_dir.mkdir(parents=True, exist_ok=True)
+                if is_multiframe:
+                    for i in range(redacted_pixel_array.shape[0]):
+                        redacted_display = self._make_display_image(redacted_pixel_array[i], dicom_dataset)
+                        redacted_display.save(intermediate_dir / f"{input_path.stem}_frame{i:04d}_redacted.png")
+                else:
+                    redacted_display = self._make_display_image(redacted_pixel_array, dicom_dataset)
+                    redacted_display.save(intermediate_dir / f"{input_path.stem}_redacted.png")
+
+            if is_multiframe and self.save_intermediate:
+                # Create debug video from redacted display images
+                redacted_display_frames = []
+                for i in range(redacted_pixel_array.shape[0]):
+                    redacted_display_frames.append(
+                        self._make_display_image(redacted_pixel_array[i], dicom_dataset)
+                    )
+                video_path = output_path.parent / "intermediate" / f"{input_path.stem}_redacted.mp4"
+                print(f"Creating debug video from {len(redacted_display_frames)} frames...")
+                self._create_video_from_frames(redacted_display_frames, video_path, fps=10)
+
+            # Save DICOM with the redacted raw pixel array (preserves original encoding)
+            print("Saving anonymized DICOM with original pixel encoding...")
+            metadata_changes = self._save_dicom_with_pixel_array(
+                dicom_dataset, redacted_pixel_array, output_path
+            )
+            print(f"Saved anonymized DICOM to: {output_path}")
+
+        # Append metadata anonymization details to the debug JSON if it exists
+        if self.config.save_debug_files and metadata_changes:
+            json_dest = output_path.with_suffix(".json")
+            if json_dest.exists():
+                with open(json_dest, "r", encoding="utf-8") as f:
+                    output_data = json.load(f)
+                output_data["metadata_anonymization"] = metadata_changes
+                with open(json_dest, "w", encoding="utf-8") as f:
+                    json.dump(output_data, f, indent=2, ensure_ascii=False)
+
+    def _save_dicom_from_pil(
+        self,
+        images: list[Image.Image],
+        original_ds: pydicom.Dataset,
+        output_path: Path,
+        is_multiframe: bool,
+    ) -> dict:
+        """
+        Save DICOM from PIL images (used only for face redaction model output).
+
+        The face redaction model produces 8-bit RGB PIL images, so this path
+        necessarily converts to 8-bit. Used only when the head scan model is invoked.
+
+        Args:
+            images: List of PIL Images with redactions applied.
+            original_ds: Original DICOM dataset.
+            output_path: Path to save DICOM file.
+            is_multiframe: Whether the original was multi-frame.
 
         Returns:
             Dict of metadata changes made during anonymization.
@@ -538,13 +975,23 @@ class DICOMVisionOCRProcessor(FileProcessor):
         new_ds.BitsAllocated = 8
         new_ds.BitsStored = 8
         new_ds.HighBit = 7
+        new_ds.PixelRepresentation = 0  # unsigned
         new_ds.file_meta.TransferSyntaxUID = pydicom.uid.ExplicitVRLittleEndian
 
-        # Anonymize DICOM metadata (blank PHI tags, shift dates, regenerate UIDs, LLM free-text)
+        # The display transform (VOI LUT, windowing, rescale) has already been
+        # baked into the 8-bit pixel values by _make_display_image.  Remove the
+        # interpretation tags so DICOM viewers don't re-apply them on the
+        # already-windowed data.
+        for tag in ('RescaleIntercept', 'RescaleSlope',
+                    'WindowCenter', 'WindowWidth',
+                    'VOILUTFunction', 'VOILUTSequence'):
+            if hasattr(new_ds, tag):
+                delattr(new_ds, tag)
+
+        # Anonymize DICOM metadata
         print("Anonymizing DICOM metadata...")
         metadata_changes = self._anonymize_metadata(new_ds)
 
-        # Add processing note after metadata anonymization (which may have cleared ImageComments)
         if hasattr(new_ds, 'ImageComments') and new_ds.ImageComments:
             new_ds.ImageComments = f"{new_ds.ImageComments}; Anonymized by Vision+OCR LLM processor"
         else:
@@ -552,99 +999,24 @@ class DICOMVisionOCRProcessor(FileProcessor):
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
         new_ds.save_as(output_path)
+        print(f"Saved anonymized DICOM to: {output_path}")
 
         return metadata_changes
 
-    def _create_video_from_frames(self, frames: list[Image.Image], output_path: Path, fps: int = 10) -> None:
+    def _detect_pii_singleframe(self, image: Image.Image, input_path: Path, output_path: Path) -> list:
         """
-        Create an MP4 video from a list of frames for debugging purposes.
+        Detect PII bounding boxes in a single frame using Vision LLM + OCR.
+
+        Does NOT apply redactions — only returns the list of detected PIIElements.
+        Redaction is applied later directly on the raw pixel array.
 
         Args:
-            frames: List of PIL Images
-            output_path: Path to save the MP4 file
-            fps: Frames per second for the video
-        """
-        if not frames:
-            return
-
-        first_frame = frames[0]
-        width, height = first_frame.size
-
-        rgb_frames = []
-        for frame in frames:
-            if frame.mode != 'RGB':
-                frame = frame.convert('RGB')
-            rgb_frames.append(np.array(frame))
-
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        video_writer = cv2.VideoWriter(str(output_path), fourcc, fps, (width, height))
-
-        for frame_array in rgb_frames:
-            frame_bgr = cv2.cvtColor(frame_array, cv2.COLOR_RGB2BGR)
-            video_writer.write(frame_bgr)
-
-        video_writer.release()
-        print(f"Created debug video: {output_path}")
-
-    def anonymize(self, input_path: Path, output_path: Path) -> None:
-        """
-        Anonymize DICOM image using Vision LLM + OCR approach.
-
-        For multi-frame DICOMs, PHI detection is performed only on the first frame
-        and the detected bounding boxes are applied to all frames.
-
-        Args:
-            input_path: Path to input DICOM file
-            output_path: Path to save anonymized DICOM file
-        """
-        print(f"Processing DICOM (Vision+OCR): {input_path.name}")
-
-        print("Converting DICOM to PNG(s)...")
-        images, dicom_dataset, is_multiframe = self._dicom_to_images(input_path)
-
-        if is_multiframe:
-            print(f"Multi-frame DICOM: Using first-frame-only detection strategy")
-            redacted_images = self._anonymize_multiframe_optimized(
-                images, input_path, output_path
-            )
-        else:
-            redacted_images = self._anonymize_singleframe(images[0], input_path, output_path)
-
-        try:
-            if is_multiframe and self.save_intermediate:
-                video_path = output_path.parent / "intermediate" / f"{input_path.stem}_redacted.mp4"
-                print(f"Creating debug video from {len(redacted_images)} frames...")
-                self._create_video_from_frames(redacted_images, video_path, fps=10)
-
-            print("Converting redacted PNG(s) back to DICOM...")
-            metadata_changes = self._images_to_dicom(redacted_images, dicom_dataset, output_path, is_multiframe)
-            print(f"Saved anonymized DICOM to: {output_path}")
-
-            # Append metadata anonymization details to the debug JSON if it exists
-            if self.config.save_debug_files and metadata_changes:
-                json_dest = output_path.with_suffix(".json")
-                if json_dest.exists():
-                    with open(json_dest, "r", encoding="utf-8") as f:
-                        output_data = json.load(f)
-                    output_data["metadata_anonymization"] = metadata_changes
-                    with open(json_dest, "w", encoding="utf-8") as f:
-                        json.dump(output_data, f, indent=2, ensure_ascii=False)
-
-        finally:
-            pass
-
-    def _anonymize_singleframe(self, image: Image.Image, input_path: Path, output_path: Path) -> list[Image.Image]:
-        """
-        Anonymize a single frame using Vision LLM + OCR pipeline.
-
-        Args:
-            image: PIL Image
+            image: Display-quality PIL Image for LLM/OCR
             input_path: Original input path
             output_path: Output path
 
         Returns:
-            List containing single redacted image
+            List of PIIElement objects with bounding boxes
         """
         original_image = image.copy()  # Keep for verification
 
@@ -655,31 +1027,26 @@ class DICOMVisionOCRProcessor(FileProcessor):
             image.save(intermediate_png_path)
             print(f"Saved intermediate PNG to: {intermediate_png_path}")
 
-        print("Detecting and redacting PHI using Vision+OCR approach...")
+        print("Detecting PHI using Vision+OCR approach...")
         pii_elements = self.png_processor.detect_pii_bboxes(image)
         print(f"Found {len(pii_elements)} PHI elements")
 
-        redacted_image = self.png_processor._apply_redactions(image.copy(), pii_elements)
-
-        # Verification phase
+        # Verification phase (uses display images only for visual checks)
         verification_result = None
         additional_elements = []
         if self.enable_verification and self.png_processor._verification_agent is not None:
             print("\n=== Verification Phase ===")
-            redacted_image, verification_result, additional_elements = self.png_processor._run_verification(
-                redacted_image,
+            # Apply redactions on a display copy for verification
+            redacted_display = self.png_processor._apply_redactions(image.copy(), pii_elements)
+            redacted_display, verification_result, additional_elements = self.png_processor._run_verification(
+                redacted_display,
                 original_image if self.check_over_redaction else None
             )
             pii_elements.extend(additional_elements)
 
-        if self.save_intermediate:
-            redacted_intermediate_path = intermediate_dir / f"{input_path.stem}_redacted.png"
-            redacted_image.save(redacted_intermediate_path)
-            print(f"Saved redacted intermediate PNG to: {redacted_intermediate_path}")
-
         if self.config.save_debug_files:
             from ..models import PIIDetectionResult
-            pii_result = PIIDetectionResult(pii_elements=pii_elements)
+            PIIDetectionResult(pii_elements=pii_elements)
 
             json_dest = output_path.with_suffix(".json")
             output_data = {
@@ -706,7 +1073,6 @@ class DICOMVisionOCRProcessor(FileProcessor):
                 ]
             }
 
-            # Add verification results if available
             if verification_result is not None:
                 output_data["verification"] = {
                     "is_clean": verification_result.is_clean,
@@ -741,27 +1107,27 @@ class DICOMVisionOCRProcessor(FileProcessor):
                 json.dump(output_data, f, indent=2, ensure_ascii=False)
             print(f"Saved detection results to: {json_dest}")
 
-        return [redacted_image]
+        return pii_elements
 
-    def _anonymize_multiframe_optimized(
+    def _detect_pii_multiframe(
         self,
         images: list[Image.Image],
         input_path: Path,
         output_path: Path
-    ) -> list[Image.Image]:
+    ) -> list:
         """
-        Anonymize multi-frame DICOM using first-frame-only detection.
+        Detect PII bounding boxes using first-frame-only detection for multi-frame DICOMs.
 
-        For multi-frame DICOMs, verification is performed on the first frame after
-        initial redaction. Any additional bounding boxes found are applied to all frames.
+        Does NOT apply redactions — only returns the list of detected PIIElements.
+        Verification is performed on a display copy of the first frame.
 
         Args:
-            images: List of all frame images
+            images: List of all display-quality frame images
             input_path: Original input path
             output_path: Output path
 
         Returns:
-            List of all redacted images
+            List of PIIElement objects with bounding boxes
         """
         num_frames = len(images)
         original_first_frame = images[0].copy()  # Keep for verification
@@ -778,40 +1144,23 @@ class DICOMVisionOCRProcessor(FileProcessor):
             images[0].save(first_frame_path)
             print(f"Saved first frame to: {first_frame_path}")
 
-        # Apply initial redactions to first frame for verification
-        redacted_first_frame = self.png_processor._apply_redactions(images[0].copy(), first_frame_bboxes)
-
-        # Verification phase on first frame
+        # Verification phase on a display copy of the first frame
         verification_result = None
         additional_elements = []
-        all_bboxes = list(first_frame_bboxes)  # Start with initial bboxes
+        all_bboxes = list(first_frame_bboxes)
 
         if self.enable_verification and self.png_processor._verification_agent is not None:
             print("\n=== Verification Phase (First Frame) ===")
-            redacted_first_frame, verification_result, additional_elements = self.png_processor._run_verification(
-                redacted_first_frame,
+            redacted_first_display = self.png_processor._apply_redactions(images[0].copy(), first_frame_bboxes)
+            redacted_first_display, verification_result, additional_elements = self.png_processor._run_verification(
+                redacted_first_display,
                 original_first_frame if self.check_over_redaction else None
             )
             all_bboxes.extend(additional_elements)
 
-        # Now apply ALL bounding boxes (initial + verification) to all frames
-        print(f"Applying redactions to all {num_frames} frames...")
-        redacted_images = []
-        for i, image in enumerate(images):
-            if i % 10 == 0 or i == num_frames - 1:
-                print(f"  Redacting frame {i + 1}/{num_frames}...")
-
-            redacted_image = self.png_processor._apply_redactions(image.copy(), all_bboxes)
-            redacted_images.append(redacted_image)
-
-        if self.save_intermediate:
-            redacted_path = intermediate_dir / f"{input_path.stem}_frame0000_redacted.png"
-            redacted_images[0].save(redacted_path)
-            print(f"Saved redacted first frame to: {redacted_path}")
-
         if self.config.save_debug_files:
             from ..models import PIIDetectionResult
-            pii_result = PIIDetectionResult(pii_elements=all_bboxes)
+            PIIDetectionResult(pii_elements=all_bboxes)
 
             json_dest = output_path.with_suffix(".json")
             output_data = {
@@ -842,7 +1191,6 @@ class DICOMVisionOCRProcessor(FileProcessor):
                 ]
             }
 
-            # Add verification results if available
             if verification_result is not None:
                 output_data["verification"] = {
                     "is_clean": verification_result.is_clean,
@@ -877,4 +1225,4 @@ class DICOMVisionOCRProcessor(FileProcessor):
                 json.dump(output_data, f, indent=2, ensure_ascii=False)
             print(f"Saved detection results to: {json_dest}")
 
-        return redacted_images
+        return all_bboxes

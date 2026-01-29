@@ -22,9 +22,9 @@ function App() {
     <div className="app">
       <div className="container">
         <header className="header">
-          <h1>Multimodal Anonymization Tool</h1>
+          <h1>Multimodal Anonymizer</h1>
           <p className="subtitle">
-            Securely anonymize Personally Identifiable Information in your files using your own local LLM
+            Securely deidentify personally identifiable information in your files using your own local multimodal LLM
           </p>
         </header>
 
@@ -50,13 +50,14 @@ function App() {
           </div>
         )}
 
-        <footer className="footer">
-          <p>
-            This tool uses AI to detect and redact Personally Identifiable Information from medical records.
-            Files are processed locally and not stored permanently.
-          </p>
-        </footer>
       </div>
+
+      <footer className="footer">
+        <p>
+          This tool uses AI to detect and redact Personally Identifiable Information from medical records.
+          Files are processed locally and not stored permanently.
+        </p>
+      </footer>
     </div>
   )
 }

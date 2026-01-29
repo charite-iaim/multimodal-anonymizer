@@ -140,9 +140,9 @@
 .success-message {
   padding: 1rem;
   background: var(--color-success-light-bg);
-  border: 1px solid #cfc;
+  border: 1px solid var(--color-success-border);
   border-radius: 4px;
-  color: #3c3;
+  color: var(--color-success-text);
   margin-bottom: 1rem;
 }
 
