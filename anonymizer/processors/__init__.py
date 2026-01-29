@@ -11,17 +11,9 @@ from .agentic_csv_processor import AgenticCSVProcessor
 from .agentic_excel_processor import AgenticExcelProcessor
 from .agentic_audio_processor import AgenticAudioProcessor
 from .image_verification_agent import ImageVerificationAgent, VerificationResult, create_verification_step
-
-# Optional CT/MRI processor (requires additional setup)
-from .mede_processor import (
-    MedeProcessor,
-    is_mede_available,
-    get_mede_status,
-    process_ct_mri_file,
-    CT_MRI_EXTENSIONS,
-    EXTENDED_3D_IMAGE_SUFFIX,
-    is_extended_3d_image_folder,
-    find_3d_image_folders_in_path,
+from .dicom_face_redaction_processor import (
+    redact_faces_in_dicom_frames,
+    load_face_redaction_model,
 )
 
 __all__ = [
@@ -36,13 +28,7 @@ __all__ = [
     "ImageVerificationAgent",
     "VerificationResult",
     "create_verification_step",
-    # Optional CT/MRI support
-    "MedeProcessor",
-    "is_mede_available",
-    "get_mede_status",
-    "process_ct_mri_file",
-    "CT_MRI_EXTENSIONS",
-    "EXTENDED_3D_IMAGE_SUFFIX",
-    "is_extended_3d_image_folder",
-    "find_3d_image_folders_in_path",
+    # Face redaction for CT/MRI head scans
+    "redact_faces_in_dicom_frames",
+    "load_face_redaction_model",
 ]
