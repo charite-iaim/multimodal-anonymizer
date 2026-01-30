@@ -145,8 +145,6 @@ class TrOCRHandwritingRecognizer:
     def recognize_text(
         self,
         image: Image.Image,
-        num_beams: int = 4,
-        max_length: Optional[int] = None
     ) -> Tuple[str, float]:
         """
         Recognize text in a single image crop.
@@ -156,8 +154,6 @@ class TrOCRHandwritingRecognizer:
 
         Args:
             image: PIL Image containing handwritten text
-            num_beams: Number of beams for beam search decoding
-            max_length: Maximum output sequence length
 
         Returns:
             Tuple of (recognized_text, confidence_score)
@@ -172,38 +168,21 @@ class TrOCRHandwritingRecognizer:
         pixel_values = self.processor(image, return_tensors="pt").pixel_values
         pixel_values = pixel_values.to(self.device)
 
-        # Generate text with beam search
+        # Generate text with default parameters for maximum speed
         with torch.no_grad():
-            output = self.model.generate(
-                pixel_values,
-                max_length=max_length or self.max_length,
-                num_beams=num_beams,
-                return_dict_in_generate=True,
-                output_scores=True,
-            )
+            generated_ids = self.model.generate(pixel_values)
 
         # Decode output tokens to text
-        generated_ids = output.sequences
         generated_text = self.processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
 
-        # Calculate confidence from sequence scores
-        # Using the transition scores to estimate confidence
-        if hasattr(output, 'sequences_scores') and output.sequences_scores is not None:
-            # sequences_scores is log probability, convert to probability
-            confidence = torch.exp(output.sequences_scores[0]).item()
-            confidence = min(1.0, max(0.0, confidence))
-        else:
-            # Fallback: estimate from beam scores if available
-            confidence = 0.8  # Default confidence if scores not available
-
-        return generated_text.strip(), confidence
+        # Return fixed confidence since we're not computing scores for speed
+        return generated_text.strip(), 0.8
 
     def recognize_text_regions(
         self,
         image: Image.Image,
         bboxes: List[Tuple[int, int, int, int]],
         padding: int = 5,
-        num_beams: int = 4
     ) -> List[Tuple[str, Tuple[int, int, int, int], float]]:
         """
         Recognize text in multiple regions of an image.
@@ -212,7 +191,6 @@ class TrOCRHandwritingRecognizer:
             image: Full PIL Image
             bboxes: List of bounding boxes as (x, y, width, height) tuples
             padding: Extra padding around each bbox when cropping
-            num_beams: Number of beams for beam search
 
         Returns:
             List of (text, bbox, confidence) tuples
@@ -236,7 +214,7 @@ class TrOCRHandwritingRecognizer:
                 continue
 
             # Recognize text
-            text, confidence = self.recognize_text(crop, num_beams=num_beams)
+            text, confidence = self.recognize_text(crop)
 
             if text:  # Only include non-empty results
                 results.append((text, bbox, confidence))
