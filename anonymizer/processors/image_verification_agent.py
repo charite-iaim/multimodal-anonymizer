@@ -14,7 +14,6 @@ Optional: Over-redaction detection (checks if non-PII was unnecessarily redacted
 
 import base64
 import io
-import numpy as np
 from typing import List, Optional, Tuple
 from PIL import Image, ImageDraw
 from pydantic import BaseModel, Field
@@ -33,11 +32,16 @@ from ..tools.face_detection_tool import (
     get_face_bounding_boxes,
 )
 
+# TrOCR for handwriting recognition
 try:
-    from paddleocr import PaddleOCR
-    PADDLEOCR_AVAILABLE = True
+    from ..tools.trocr_ocr import (
+        is_trocr_available,
+        get_trocr_recognizer,
+        TrOCRHandwritingRecognizer
+    )
+    TROCR_AVAILABLE = is_trocr_available()
 except ImportError:
-    PADDLEOCR_AVAILABLE = False
+    TROCR_AVAILABLE = False
 
 
 class RemainingPII(BaseModel):
@@ -112,13 +116,19 @@ class ImageVerificationAgent:
         self._verification_prompt_getter = verification_prompt_getter
         self.enable_face_detection = enable_face_detection
 
-        # Initialize PaddleOCR for handwritten text detection during verification
-        self._paddle_ocr = None
-        if PADDLEOCR_AVAILABLE:
-            print("  Verification Agent: Initializing PaddleOCR for handwritten text detection...")
-            self._paddle_ocr = PaddleOCR(use_angle_cls=True, lang='en', show_log=False)
-        else:
-            print("  Verification Agent: PaddleOCR not available - install with: pip install paddlepaddle paddleocr")
+        # Initialize TrOCR for handwriting recognition
+        self._trocr_recognizer = None
+
+        if TROCR_AVAILABLE:
+            try:
+                print("  Verification Agent: Initializing TrOCR for handwritten text detection...")
+                self._trocr_recognizer = get_trocr_recognizer()
+            except Exception as e:
+                print(f"  Verification Agent: Failed to load TrOCR model: {e}")
+                self._trocr_recognizer = None
+
+        if self._trocr_recognizer is None:
+            print("  Verification Agent: No handwriting OCR available - install transformers+torch for TrOCR")
 
         # Initialize Vision LLM for verification (structured output mode)
         self.vision_llm = create_chat_llm(
@@ -298,7 +308,7 @@ IMPORTANT:
 
         This method uses OCR to find precise bounding boxes for the remaining PII
         and applies redactions. If the primary OCR (EasyOCR) cannot locate certain
-        PII items, PaddleOCR is used as a fallback — particularly effective for
+        PII items, TrOCR is used as a fallback — particularly effective for
         handwritten text that EasyOCR often misses.
 
         Args:
@@ -354,30 +364,31 @@ IMPORTANT:
 
             if not matched:
                 unmatched_pii.append(pii)
-                print(f"    EasyOCR: No match for \"{pii.text}\" - will try PaddleOCR")
+                if self._trocr_recognizer is not None:
+                    print(f"    EasyOCR: No match for \"{pii.text}\" - will try TrOCR")
 
-        # Fallback: Use PaddleOCR for items that EasyOCR couldn't match
-        # PaddleOCR is better at detecting handwritten text
-        if unmatched_pii and self._paddle_ocr is not None:
-            paddle_elements = self._match_remaining_pii_with_paddle(image, unmatched_pii)
-            additional_elements.extend(paddle_elements)
+        # Fallback: Use TrOCR for items that EasyOCR couldn't match
+        # TrOCR (fine-tuned) is effective for handwritten text detection
+        if unmatched_pii and self._trocr_recognizer is not None:
+            fallback_elements = self._match_remaining_pii_with_trocr(image, unmatched_pii)
+            additional_elements.extend(fallback_elements)
 
             # Report any still-unmatched items
-            paddle_matched_texts = {e.text.strip().lower() for e in paddle_elements}
+            fallback_matched_texts = {e.text.strip().lower() for e in fallback_elements}
             for pii in unmatched_pii:
-                # Check if PaddleOCR matched this one (fuzzy check needed)
+                # Check if fallback OCR matched this one (fuzzy check needed)
                 found = False
-                for pt in paddle_matched_texts:
-                    if (pii.text.strip().lower() in pt or
-                        pt in pii.text.strip().lower() or
-                        SequenceMatcher(None, pii.text.strip().lower(), pt).ratio() >= 0.4):
+                for ft in fallback_matched_texts:
+                    if (pii.text.strip().lower() in ft or
+                        ft in pii.text.strip().lower() or
+                        SequenceMatcher(None, pii.text.strip().lower(), ft).ratio() >= 0.4):
                         found = True
                         break
                 if not found:
                     print(f"    Warning: Neither OCR engine could locate \"{pii.text}\"")
         elif unmatched_pii:
             for pii in unmatched_pii:
-                print(f"    Warning: Could not find bbox for \"{pii.text}\" (PaddleOCR not available)")
+                print(f"    Warning: Could not find bbox for \"{pii.text}\" (no handwriting OCR available)")
 
         # Apply redactions
         if additional_elements:
@@ -390,13 +401,13 @@ IMPORTANT:
         ratio = SequenceMatcher(None, text1, text2).ratio()
         return ratio >= self.similarity_threshold
 
-    def _extract_text_with_paddle_ocr(self, image: Image.Image) -> List[Tuple[str, BoundingBox, float]]:
+    def _extract_text_with_trocr(self, image: Image.Image) -> List[Tuple[str, BoundingBox, float]]:
         """
-        Extract text from image using PaddleOCR.
+        Extract text from image using TrOCR (fine-tuned handwriting model).
 
-        PaddleOCR is better at detecting handwritten text than EasyOCR,
-        making it useful as a fallback during verification when the LLM
-        spots remaining text that EasyOCR missed.
+        TrOCR is a transformer-based OCR model that excels at handwritten text
+        recognition. This method uses a sliding window approach since TrOCR
+        works best on cropped text regions.
 
         Args:
             image: PIL Image to extract text from
@@ -404,70 +415,145 @@ IMPORTANT:
         Returns:
             List of (text, BoundingBox, confidence) tuples
         """
-        if self._paddle_ocr is None:
+        if self._trocr_recognizer is None:
             return []
 
-        # Convert PIL Image to numpy array for PaddleOCR
+        # Ensure RGB
         if image.mode in ('L', 'LA', 'P'):
             image = image.convert('RGB')
-        img_array = np.array(image)
-
-        try:
-            result = self._paddle_ocr.ocr(img_array, cls=True)
-        except Exception as e:
-            print(f"    PaddleOCR error: {e}")
-            return []
 
         ocr_texts = []
-        if result and result[0]:
-            for line in result[0]:
-                bbox_points, (text, confidence) = line[0], line[1]
 
-                # Convert PaddleOCR bbox (4 corner points) to x, y, width, height
-                x_coords = [pt[0] for pt in bbox_points]
-                y_coords = [pt[1] for pt in bbox_points]
+        try:
+            # For full image scanning, we use a grid-based approach
+            # to find text in different regions
+            img_width, img_height = image.size
 
-                x = int(min(x_coords))
-                y = int(min(y_coords))
-                width = int(max(x_coords) - x)
-                height = int(max(y_coords) - y)
+            # Define grid of regions to scan
+            # Use overlapping windows to catch text at boundaries
+            window_sizes = [(384, 96), (384, 128), (256, 64)]  # (width, height)
+            stride_ratio = 0.5  # 50% overlap
 
-                bbox = BoundingBox(x=x, y=y, width=width, height=height)
-                ocr_texts.append((text, bbox, confidence))
-                print(f"    PaddleOCR: '{text}' at ({x}, {y}, {width}, {height}) [conf: {confidence:.2f}]")
+            for win_w, win_h in window_sizes:
+                stride_x = int(win_w * stride_ratio)
+                stride_y = int(win_h * stride_ratio)
+
+                for y in range(0, max(1, img_height - win_h + 1), stride_y):
+                    for x in range(0, max(1, img_width - win_w + 1), stride_x):
+                        # Crop region
+                        x2 = min(x + win_w, img_width)
+                        y2 = min(y + win_h, img_height)
+                        crop = image.crop((x, y, x2, y2))
+
+                        # Skip very small crops
+                        if crop.width < 32 or crop.height < 16:
+                            continue
+
+                        # Recognize text in this region
+                        text, confidence = self._trocr_recognizer.recognize_text(crop)
+
+                        # Filter low confidence and empty results
+                        if text and len(text.strip()) >= 2 and confidence >= 0.3:
+                            bbox = BoundingBox(x=x, y=y, width=x2 - x, height=y2 - y)
+                            ocr_texts.append((text.strip(), bbox, confidence))
+                            print(f"    TrOCR: '{text.strip()}' at ({x}, {y}, {x2-x}, {y2-y}) [conf: {confidence:.2f}]")
+
+            # Also try the full image if it's reasonably sized
+            if img_width <= 800 and img_height <= 200:
+                text, confidence = self._trocr_recognizer.recognize_text(image)
+                if text and len(text.strip()) >= 2 and confidence >= 0.3:
+                    bbox = BoundingBox(x=0, y=0, width=img_width, height=img_height)
+                    ocr_texts.append((text.strip(), bbox, confidence))
+                    print(f"    TrOCR (full): '{text.strip()}' [conf: {confidence:.2f}]")
+
+        except Exception as e:
+            print(f"    TrOCR error: {e}")
+            return []
+
+        # Deduplicate overlapping results (keep highest confidence)
+        ocr_texts = self._deduplicate_ocr_results(ocr_texts)
 
         return ocr_texts
 
-    def _match_remaining_pii_with_paddle(
+    def _deduplicate_ocr_results(
+        self,
+        results: List[Tuple[str, BoundingBox, float]]
+    ) -> List[Tuple[str, BoundingBox, float]]:
+        """
+        Remove duplicate/overlapping OCR results, keeping the highest confidence.
+
+        Args:
+            results: List of (text, bbox, confidence) tuples
+
+        Returns:
+            Deduplicated list
+        """
+        if not results:
+            return results
+
+        # Sort by confidence descending
+        sorted_results = sorted(results, key=lambda x: x[2], reverse=True)
+        kept = []
+
+        for text, bbox, conf in sorted_results:
+            # Check if this overlaps significantly with any kept result
+            is_duplicate = False
+            for kept_text, kept_bbox, kept_conf in kept:
+                # Calculate IoU (intersection over union)
+                x1 = max(bbox.x, kept_bbox.x)
+                y1 = max(bbox.y, kept_bbox.y)
+                x2 = min(bbox.x + bbox.width, kept_bbox.x + kept_bbox.width)
+                y2 = min(bbox.y + bbox.height, kept_bbox.y + kept_bbox.height)
+
+                if x2 > x1 and y2 > y1:
+                    intersection = (x2 - x1) * (y2 - y1)
+                    area1 = bbox.width * bbox.height
+                    area2 = kept_bbox.width * kept_bbox.height
+                    union = area1 + area2 - intersection
+                    iou = intersection / union if union > 0 else 0
+
+                    # Also check text similarity
+                    text_similarity = SequenceMatcher(None, text.lower(), kept_text.lower()).ratio()
+
+                    if iou > 0.3 or text_similarity > 0.8:
+                        is_duplicate = True
+                        break
+
+            if not is_duplicate:
+                kept.append((text, bbox, conf))
+
+        return kept
+
+    def _match_remaining_pii_with_trocr(
         self,
         image: Image.Image,
         unmatched_pii: List[RemainingPII]
     ) -> List[PIIElement]:
         """
-        Use PaddleOCR to find bounding boxes for PII text that the primary OCR missed.
+        Use TrOCR to find bounding boxes for PII text that the primary OCR missed.
 
-        This is specifically designed for handwritten text that EasyOCR struggles with.
-        Uses fuzzy matching since OCR of handwriting is imperfect.
+        TrOCR is a fine-tuned transformer model specifically designed for
+        handwritten text recognition, making it effective for this use case.
 
         Args:
             image: The current image to scan
             unmatched_pii: PII items that couldn't be matched via primary OCR
 
         Returns:
-            List of PIIElement objects with bounding boxes from PaddleOCR
+            List of PIIElement objects with bounding boxes from TrOCR
         """
-        if not unmatched_pii or self._paddle_ocr is None:
+        if not unmatched_pii or self._trocr_recognizer is None:
             return []
 
-        print(f"    PaddleOCR fallback: Scanning for {len(unmatched_pii)} unmatched PII items...")
-        paddle_results = self._extract_text_with_paddle_ocr(image)
+        print(f"    TrOCR fallback: Scanning for {len(unmatched_pii)} unmatched PII items...")
+        trocr_results = self._extract_text_with_trocr(image)
 
-        if not paddle_results:
-            print("    PaddleOCR: No text detected")
+        if not trocr_results:
+            print("    TrOCR: No text detected")
             return []
 
         matched_elements = []
-        used_paddle_indices = set()
+        used_trocr_indices = set()
 
         for pii in unmatched_pii:
             pii_text = pii.text.strip().lower()
@@ -475,8 +561,8 @@ IMPORTANT:
             best_score = 0.0
             best_idx = -1
 
-            for idx, (ocr_text, bbox, confidence) in enumerate(paddle_results):
-                if idx in used_paddle_indices:
+            for idx, (ocr_text, bbox, confidence) in enumerate(trocr_results):
+                if idx in used_trocr_indices:
                     continue
 
                 ocr_lower = ocr_text.strip().lower()
@@ -488,7 +574,7 @@ IMPORTANT:
                     best_idx = idx
                     break
 
-                # Substring match (require meaningful overlap, not single chars)
+                # Substring match (require meaningful overlap)
                 if pii_text in ocr_lower or ocr_lower in pii_text:
                     shorter = min(len(pii_text), len(ocr_lower))
                     longer = max(len(pii_text), len(ocr_lower))
@@ -500,17 +586,16 @@ IMPORTANT:
                             best_idx = idx
                         continue
 
-                # Fuzzy match — use a slightly lower threshold for handwritten text
-                # since OCR of handwriting is inherently less accurate
+                # Fuzzy match — TrOCR is more accurate, so use higher threshold
                 ratio = SequenceMatcher(None, pii_text, ocr_lower).ratio()
-                handwriting_threshold = max(0.4, self.similarity_threshold - 0.15)
+                handwriting_threshold = max(0.45, self.similarity_threshold - 0.1)
                 if ratio > best_score and ratio >= handwriting_threshold:
                     best_match = (ocr_text, bbox)
                     best_score = ratio
                     best_idx = idx
 
             if best_match:
-                used_paddle_indices.add(best_idx)
+                used_trocr_indices.add(best_idx)
                 ocr_text, bbox = best_match
                 element = PIIElement(type=pii.type, text=ocr_text, bbox=bbox)
                 matched_elements.append(element)
@@ -519,9 +604,9 @@ IMPORTANT:
                     else "substring" if best_score == 0.9
                     else f"fuzzy({best_score:.2f})"
                 )
-                print(f"    PaddleOCR matched: \"{pii.text}\" -> \"{ocr_text}\" ({match_type})")
+                print(f"    TrOCR matched: \"{pii.text}\" -> \"{ocr_text}\" ({match_type})")
             else:
-                print(f"    PaddleOCR: No match for \"{pii.text}\"")
+                print(f"    TrOCR: No match for \"{pii.text}\"")
 
         return matched_elements
 

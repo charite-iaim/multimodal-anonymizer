@@ -18,13 +18,6 @@ const isVideoFile = (file) => {
   return VIDEO_EXTENSIONS.includes(ext)
 }
 
-// CT/MRI file extensions
-const CT_MRI_EXTENSIONS = ['.nii', '.nii.gz', '.nrrd', '.mha', '.mhd']
-const isCTMRIFile = (file) => {
-  const name = file.name.toLowerCase()
-  return CT_MRI_EXTENSIONS.some(ext => name.endsWith(ext))
-}
-
 function FileUpload({ backendUrl }) {
   const [file, setFile] = useState(null)
   const [files, setFiles] = useState([])  // For folder uploads
@@ -38,32 +31,13 @@ function FileUpload({ backendUrl }) {
   const [saveMappingFiles, setSaveMappingFiles] = useState(true)
   const [result, setResult] = useState(null)
   const [error, setError] = useState(null)
-  const [features, setFeatures] = useState(null)  // Feature availability
   const fileInputRef = useRef(null)
   const folderInputRef = useRef(null)
 
   // Check if any selected files are videos
   const hasVideoFiles = file ? isVideoFile(file) : files.some(f => isVideoFile(f))
 
-  // Check if any selected files are CT/MRI
-  const hasCTMRIFiles = file ? isCTMRIFile(file) : files.some(f => isCTMRIFile(f))
-
-  // Fetch features and video settings on mount and when backend URL changes
-  useEffect(() => {
-    const fetchFeatures = async () => {
-      try {
-        const response = await fetch(`${backendUrl}/api/features`)
-        if (response.ok) {
-          const data = await response.json()
-          setFeatures(data)
-        }
-      } catch (err) {
-        console.error('Failed to fetch features:', err)
-      }
-    }
-    fetchFeatures()
-  }, [backendUrl])
-
+  // Fetch video settings on mount and when backend URL changes
   useEffect(() => {
     const fetchVideoSettings = async () => {
       try {
@@ -413,25 +387,6 @@ function FileUpload({ backendUrl }) {
         onToggle={() => setPromptSettingsOpen(!promptSettingsOpen)}
       />
 
-      {/* CT/MRI processing warning - show when CT/MRI files are selected but feature is unavailable */}
-      {hasCTMRIFiles && features && !features.ct_mri_processing?.available && (
-        <div className="feature-warning">
-          <div className="feature-warning-header">
-            <BsExclamationTriangle className="warning-icon" />
-            <span className="feature-warning-title">CT/MRI Processing Not Available</span>
-          </div>
-          <div className="feature-warning-content">
-            <p>
-              The selected CT/MRI files ({files.filter(f => isCTMRIFile(f)).length || 1} file{(files.filter(f => isCTMRIFile(f)).length || 1) > 1 ? 's' : ''}) require additional setup to process.
-            </p>
-            <p className="feature-warning-details">
-              CT/MRI processing requires a separate Python 3.11 environment with the mede library installed.
-              See <code>docs/MEDE_SETUP.md</code> for setup instructions.
-            </p>
-          </div>
-        </div>
-      )}
-
       {/* Video processing settings - show when video files are selected */}
       {hasVideoFiles && (
         <div className="video-settings">
@@ -498,7 +453,7 @@ function FileUpload({ backendUrl }) {
           type="file"
           className="file-input"
           onChange={handleFileChange}
-          accept=".png,.jpg,.jpeg,.csv,.txt,.dcm,.dicom,.pdf,.hea,.docx,.xlsx,.xls,.mp4,.avi,.mov,.mkv,.wav,.mp3,.nii,.nii.gz,.nrrd,.mha,.mhd"
+          accept=".png,.jpg,.jpeg,.csv,.txt,.dcm,.dicom,.pdf,.hea,.docx,.xlsx,.xls,.mp4,.avi,.mov,.mkv,.wav,.mp3"
         />
         <input
           ref={folderInputRef}
@@ -585,14 +540,8 @@ function FileUpload({ backendUrl }) {
               </button>
             </div>
             <p className="supported-formats">
-              Supported: PNG, JPG, CSV, TXT, DICOM, PDF, HEA, DOCX, Excel, MP4, AVI, MOV, WAV, MP3
-              {features?.ct_mri_processing?.available && ', NIfTI, NRRD, MHA'}
+              Supported: PNG, JPG, JPEG, CSV, TXT, DOCX, DICOM, PDF, HEA, Excel, MP4, AVI, MOV, WAV, MP3
             </p>
-            {features?.ct_mri_processing?.available && (
-              <p className="format-hint">
-                💡 For 3D CT/MRI scans: name folders with suffix <code>_extended_3d_image</code>
-              </p>
-            )}
           </div>
         )}
       </div>

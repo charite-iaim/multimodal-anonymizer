@@ -22,9 +22,14 @@ pydicom>=2.4.0
 # OCR for alternative processing mode
 easyocr>=1.7.0
 
-# PaddleOCR for handwritten text detection (used as fallback in verification)
-paddlepaddle>=2.5.0
-paddleocr>=2.7.0
+# TrOCR for handwritten text detection (preferred, uses custom fine-tuned model)
+transformers>=4.36.0
+safetensors>=0.4.0
+torch>=2.0.0
+
+# PaddleOCR for handwritten text detection (legacy fallback if TrOCR unavailable)
+# paddlepaddle>=2.5.0
+# paddleocr>=2.7.0
 
 # PDF processing
 pdf2image>=1.16.0
