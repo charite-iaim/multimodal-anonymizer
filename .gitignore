@@ -14,3 +14,4 @@ node_modules/
 data/
 __pycache__
 results
+anonymizer/models/face-redaction_epoch17.pth
