@@ -37,7 +37,7 @@ load_dotenv()
 sys.path.append(str(Path(__file__).parent.parent.parent))
 
 from anonymizer.processors.png_vision_ocr_processor import PNGVisionOCRProcessor
-from anonymizer.processors.dicom_vision_ocr_processor import DICOMVisionOCRProcessor
+from anonymizer.processors.dicom_vision_ocr_processor import DICOMVisionOCRProcessor, get_dicom_info
 from anonymizer.processors.pdf_vision_ocr_processor import PDFVisionOCRProcessor
 from anonymizer.processors.video_vision_ocr_processor import VideoVisionOCRProcessor
 from anonymizer.processors.agentic_csv_processor import AgenticCSVProcessor
@@ -353,6 +353,121 @@ async def reset_prompts():
     }
 
 
+@app.post("/api/file-info")
+async def get_file_info(file: UploadFile = File(...)):
+    """
+    Get information about an uploaded file, including whether it's a video.
+
+    This is useful for checking DICOM files before processing to determine
+    if they are multi-frame (video) DICOMs, allowing the user to choose
+    frame-by-frame processing.
+
+    Returns:
+        File information including:
+        - is_video: True if the file contains multiple frames
+        - frame_count: Number of frames (1 for single-frame files)
+        - file_type: Detected file type (dicom, video, image, etc.)
+        - Additional metadata for DICOM files (dimensions, modality, etc.)
+    """
+    # Create temporary file to analyze
+    job_id = str(uuid.uuid4())
+    job_dir = TEMP_DIR / job_id
+    job_dir.mkdir(exist_ok=True)
+
+    input_path = job_dir / file.filename
+
+    try:
+        # Save uploaded file temporarily
+        with open(input_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+
+        file_extension = input_path.suffix.lower()
+
+        # Check if it's a DICOM file
+        if file_extension in ['.dcm', '.dicom']:
+            is_dicom = True
+        else:
+            # Check for DICOM magic bytes for files without extension
+            is_dicom = False
+            try:
+                with open(input_path, 'rb') as f:
+                    f.seek(128)
+                    magic = f.read(4)
+                    if magic == b'DICM':
+                        is_dicom = True
+            except (IOError, OSError):
+                pass
+
+        if is_dicom:
+            try:
+                info = get_dicom_info(input_path)
+                return {
+                    "file_type": "dicom",
+                    "is_video": info['is_video'],
+                    "frame_count": info['frame_count'],
+                    "dimensions": info['dimensions'],
+                    "is_color": info['is_color'],
+                    "modality": info['modality'],
+                    "bits_stored": info['bits_stored'],
+                    "supports_frame_by_frame": info['is_video'],  # Can use frame-by-frame if it's a video
+                }
+            except Exception as e:
+                return {
+                    "file_type": "dicom",
+                    "is_video": False,
+                    "frame_count": 1,
+                    "error": f"Could not read DICOM pixel data: {str(e)}",
+                    "supports_frame_by_frame": False,
+                }
+
+        elif file_extension in ['.mp4', '.avi', '.mov', '.mkv']:
+            # For regular video files, get frame count
+            import cv2
+            cap = cv2.VideoCapture(str(input_path))
+            frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            cap.release()
+
+            return {
+                "file_type": "video",
+                "is_video": True,
+                "frame_count": frame_count,
+                "dimensions": (width, height),
+                "fps": fps,
+                "supports_frame_by_frame": True,
+            }
+
+        elif file_extension in ['.png', '.jpg', '.jpeg']:
+            return {
+                "file_type": "image",
+                "is_video": False,
+                "frame_count": 1,
+                "supports_frame_by_frame": False,
+            }
+
+        elif file_extension == '.pdf':
+            return {
+                "file_type": "pdf",
+                "is_video": False,
+                "frame_count": 1,
+                "supports_frame_by_frame": False,
+            }
+
+        else:
+            return {
+                "file_type": "unknown",
+                "is_video": False,
+                "frame_count": 1,
+                "supports_frame_by_frame": False,
+            }
+
+    finally:
+        # Clean up temporary files
+        shutil.rmtree(job_dir, ignore_errors=True)
+
+
 @app.get("/api/video-settings")
 async def get_video_settings():
     """Get current video processing settings."""
@@ -483,7 +598,7 @@ async def process_file(
         file_extension = input_path.suffix.lower()
 
         if file_extension in ['.dcm', '.dicom']:
-            processor = DICOMVisionOCRProcessor(config, save_intermediate=True, prompt_config=prompt_config)
+            processor = DICOMVisionOCRProcessor(config, save_intermediate=True, prompt_config=prompt_config, process_all_frames=video_process_all_frames)
         elif file_extension in ['.mp4', '.avi', '.mov', '.mkv']:
             processor = VideoVisionOCRProcessor(config, save_intermediate=True, prompt_config=prompt_config, process_all_frames=video_process_all_frames)
         elif file_extension == '.pdf':
@@ -502,7 +617,7 @@ async def process_file(
             processor = AgenticAudioProcessor(config, prompt_config=prompt_config)
         else:
             # Fallback: try DICOM processor for files without extension (common in MIMIC)
-            test_processor = DICOMVisionOCRProcessor(config, save_intermediate=True, prompt_config=prompt_config)
+            test_processor = DICOMVisionOCRProcessor(config, save_intermediate=True, prompt_config=prompt_config, process_all_frames=video_process_all_frames)
             if test_processor.can_process(input_path):
                 processor = test_processor
 
@@ -711,7 +826,7 @@ async def process_folder(
                 file_extension = input_path.suffix.lower()
 
                 if file_extension in ['.dcm', '.dicom']:
-                    processor = DICOMVisionOCRProcessor(config, save_intermediate=False, prompt_config=prompt_config)
+                    processor = DICOMVisionOCRProcessor(config, save_intermediate=False, prompt_config=prompt_config, process_all_frames=video_process_all_frames)
                 elif file_extension in ['.mp4', '.avi', '.mov', '.mkv']:
                     processor = VideoVisionOCRProcessor(config, save_intermediate=False, prompt_config=prompt_config, process_all_frames=video_process_all_frames)
                 elif file_extension == '.pdf':
@@ -730,7 +845,7 @@ async def process_folder(
                     processor = AgenticAudioProcessor(config, prompt_config=prompt_config)
                 else:
                     # Fallback: try DICOM processor for files without extension (common in MIMIC)
-                    test_processor = DICOMVisionOCRProcessor(config, save_intermediate=False, prompt_config=prompt_config)
+                    test_processor = DICOMVisionOCRProcessor(config, save_intermediate=False, prompt_config=prompt_config, process_all_frames=video_process_all_frames)
                     if test_processor.can_process(input_path):
                         processor = test_processor
 

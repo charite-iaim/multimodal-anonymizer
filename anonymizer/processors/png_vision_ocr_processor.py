@@ -261,12 +261,13 @@ class PNGVisionOCRProcessor(FileProcessor):
         Anonymize image using Vision LLM + OCR matching.
 
         Steps:
-        1. Run OCR to extract all text with precise bounding boxes
-        2. Send image to Vision LLM to identify which text contains PII
-        3. Match LLM-identified PII against OCR results using fuzzy matching
-        4. Redact matched regions using OCR bounding boxes
-        5. (Optional) Verification agent checks for remaining PII
-        6. Save anonymized image
+        1. (If enabled) Run face detection and redact any faces FIRST
+        2. Run OCR to extract all text with precise bounding boxes
+        3. Send image to Vision LLM to identify which text contains PII
+        4. Match LLM-identified PII against OCR results using fuzzy matching
+        5. Redact matched regions using OCR bounding boxes
+        6. (Optional) Verification agent checks for remaining PII
+        7. Save anonymized image
 
         Args:
             input_path: Path to input image
@@ -280,33 +281,49 @@ class PNGVisionOCRProcessor(FileProcessor):
         width, height = image.size
         print(f"Image size: {width}x{height}")
 
-        # Step 1: Extract text using OCR
-        print("Running OCR to extract text with bounding boxes...")
-        ocr_results = self._extract_text_with_ocr(input_path)
+        # Step 1: Face Detection (FIRST - before any other processing)
+        face_elements = []
+        if self.enable_face_detection and self._verification_agent is not None:
+            print("\n=== Face Detection Phase (Pre-OCR) ===")
+            image, face_bboxes = self._verification_agent.detect_and_redact_faces(image)
+            if face_bboxes:
+                # Track face detections as PIIElements
+                for i, bbox in enumerate(face_bboxes):
+                    face_element = PIIElement(
+                        type="face",
+                        text=f"face_{i+1}",
+                        bbox=bbox
+                    )
+                    face_elements.append(face_element)
+                print(f"Redacted {len(face_bboxes)} face(s) before OCR processing")
+
+        # Step 2: Extract text using OCR (on face-redacted image)
+        print("\nRunning OCR to extract text with bounding boxes...")
+        ocr_results = self._extract_text_with_ocr_from_image(image)
         print(f"Found {len(ocr_results)} text regions via OCR")
 
-        pii_elements = []
+        pii_elements = face_elements.copy()  # Start with face elements
         pii_texts = []
 
         if not ocr_results:
-            print("No text found in image - will check for faces")
-            # Don't return early - continue to verification for face detection
+            print("No text found in image - skipping text PII detection")
         else:
-            # Step 2: Send image to Vision LLM to identify PII
+            # Step 3: Send image to Vision LLM to identify PII
             print("Sending image to Vision LLM for PII identification...")
             pii_texts = self._identify_pii_with_vision(image, ocr_results)
             print(f"Vision LLM identified {len(pii_texts)} PII elements")
 
-            # Step 3: Match LLM-identified PII to OCR bounding boxes
+            # Step 4: Match LLM-identified PII to OCR bounding boxes
             print("Matching PII texts to OCR bounding boxes...")
-            pii_elements = self._match_pii_to_ocr(pii_texts, ocr_results)
-            print(f"Successfully matched {len(pii_elements)} PII elements to bounding boxes")
+            text_pii_elements = self._match_pii_to_ocr(pii_texts, ocr_results)
+            print(f"Successfully matched {len(text_pii_elements)} PII elements to bounding boxes")
+            pii_elements.extend(text_pii_elements)
 
-            # Step 4: Apply redactions
-            if pii_elements:
-                image = self._apply_redactions(image.copy(), pii_elements)
+            # Step 5: Apply text redactions
+            if text_pii_elements:
+                image = self._apply_redactions(image.copy(), text_pii_elements)
 
-        # Step 5: Verification (if enabled)
+        # Step 6: Verification (if enabled)
         verification_result = None
         additional_elements = []
         if self.enable_verification and self._verification_agent is not None:
@@ -325,7 +342,7 @@ class PNGVisionOCRProcessor(FileProcessor):
                 self.warnings.append(warning_msg)
                 print(f"  WARNING: {warning_msg}")
 
-        # Step 6: Save results
+        # Step 7: Save results
         output_path.parent.mkdir(parents=True, exist_ok=True)
         image.save(output_path)
         print(f"Saved anonymized image to: {output_path}")
@@ -695,12 +712,11 @@ RESPOND ONLY WITH A JSON OBJECT in the following format (no other text):
         """
         Run verification agent to check for remaining PII and apply additional redactions.
 
-        This includes:
-        1. Face detection phase (if enabled) - detects and redacts any visible faces
-        2. PII verification rounds - checks for remaining PII text and applies redactions
+        Note: Face detection is now performed BEFORE OCR in the main anonymize() method,
+        so this verification phase only checks for remaining text PII.
 
         Args:
-            redacted_image: Image after initial redaction
+            redacted_image: Image after initial redaction (including face redaction)
             original_image: Original image (optional, for over-redaction check)
 
         Returns:
@@ -710,22 +726,7 @@ RESPOND ONLY WITH A JSON OBJECT in the following format (no other text):
         all_additional_elements = []
         final_result = None
 
-        # Phase 1: Face Detection (if enabled)
-        if self.enable_face_detection and self._verification_agent.enable_face_detection:
-            print("\n  --- Face Detection Phase ---")
-            current_image, face_bboxes = self._verification_agent.detect_and_redact_faces(current_image)
-            if face_bboxes:
-                # Add face detections as PIIElements
-                for i, bbox in enumerate(face_bboxes):
-                    from ..models import PIIElement
-                    face_element = PIIElement(
-                        type="face",
-                        text=f"face_{i+1}",
-                        bbox=bbox
-                    )
-                    all_additional_elements.append(face_element)
-
-        # Phase 2: PII Verification Rounds
+        # PII Verification Rounds (face detection already done before OCR)
         for round_num in range(self.max_verification_rounds):
             print(f"\n  --- Verification Round {round_num + 1}/{self.max_verification_rounds} ---")
 

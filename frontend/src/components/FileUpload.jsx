@@ -13,9 +13,17 @@ const shouldIgnoreFile = (file) => {
 
 // Video file extensions
 const VIDEO_EXTENSIONS = ['.mp4', '.avi', '.mov', '.mkv']
-const isVideoFile = (file) => {
+// DICOM file extensions
+const DICOM_EXTENSIONS = ['.dcm', '.dicom']
+
+const isVideoExtension = (file) => {
   const ext = '.' + file.name.split('.').pop().toLowerCase()
   return VIDEO_EXTENSIONS.includes(ext)
+}
+
+const isDicomExtension = (file) => {
+  const ext = '.' + file.name.split('.').pop().toLowerCase()
+  return DICOM_EXTENSIONS.includes(ext)
 }
 
 function FileUpload({ backendUrl }) {
@@ -31,11 +39,20 @@ function FileUpload({ backendUrl }) {
   const [saveMappingFiles, setSaveMappingFiles] = useState(true)
   const [result, setResult] = useState(null)
   const [error, setError] = useState(null)
+  const [fileInfo, setFileInfo] = useState(null)  // Info about the selected file (e.g., DICOM video detection)
+  const [checkingFileInfo, setCheckingFileInfo] = useState(false)
   const fileInputRef = useRef(null)
   const folderInputRef = useRef(null)
 
-  // Check if any selected files are videos
-  const hasVideoFiles = file ? isVideoFile(file) : files.some(f => isVideoFile(f))
+  // Check if any selected files are videos (either by extension or by DICOM video detection)
+  const hasVideoFiles = (() => {
+    // Check regular video files by extension
+    if (file && isVideoExtension(file)) return true
+    if (files.some(f => isVideoExtension(f))) return true
+    // Check if single DICOM file was detected as video
+    if (file && fileInfo?.is_video && fileInfo?.supports_frame_by_frame) return true
+    return false
+  })()
 
   // Fetch video settings on mount and when backend URL changes
   useEffect(() => {
@@ -93,6 +110,41 @@ function FileUpload({ backendUrl }) {
       })
     } catch (err) {
       console.error('Failed to update mapping files settings:', err)
+    }
+  }
+
+  // Check if a file is a DICOM video (multi-frame) using the backend API
+  const checkFileInfo = async (fileToCheck) => {
+    // Only check DICOM files - other files don't need this check
+    if (!isDicomExtension(fileToCheck)) {
+      setFileInfo(null)
+      return
+    }
+
+    setCheckingFileInfo(true)
+    try {
+      const formData = new FormData()
+      formData.append('file', fileToCheck)
+
+      const response = await fetch(`${backendUrl}/api/file-info`, {
+        method: 'POST',
+        body: formData,
+      })
+
+      if (response.ok) {
+        const info = await response.json()
+        setFileInfo(info)
+        if (info.is_video && info.supports_frame_by_frame) {
+          console.log(`DICOM video detected: ${info.frame_count} frames`)
+        }
+      } else {
+        setFileInfo(null)
+      }
+    } catch (err) {
+      console.error('Failed to check file info:', err)
+      setFileInfo(null)
+    } finally {
+      setCheckingFileInfo(false)
     }
   }
 
@@ -181,6 +233,9 @@ function FileUpload({ backendUrl }) {
         if (!shouldIgnoreFile(droppedFile)) {
           setFile(droppedFile)
           setFiles([])
+          setFileInfo(null)
+          // Check if DICOM file is a video
+          checkFileInfo(droppedFile)
         }
       }
     }
@@ -190,11 +245,15 @@ function FileUpload({ backendUrl }) {
 
   const handleFileChange = (e) => {
     if (e.target.files && e.target.files[0]) {
-      setFile(e.target.files[0])
+      const selectedFile = e.target.files[0]
+      setFile(selectedFile)
       setFiles([])
       setUploadMode('file')
       setResult(null)
       setError(null)
+      setFileInfo(null)
+      // Check if DICOM file is a video
+      checkFileInfo(selectedFile)
     }
   }
 
@@ -207,6 +266,7 @@ function FileUpload({ backendUrl }) {
         setUploadMode('folder')
         setResult(null)
         setError(null)
+        setFileInfo(null)  // Clear file info for folder uploads
       }
     }
   }
@@ -369,6 +429,7 @@ function FileUpload({ backendUrl }) {
     setUploadMode('file')
     setResult(null)
     setError(null)
+    setFileInfo(null)
     if (fileInputRef.current) {
       fileInputRef.current.value = ''
     }
@@ -387,30 +448,41 @@ function FileUpload({ backendUrl }) {
         onToggle={() => setPromptSettingsOpen(!promptSettingsOpen)}
       />
 
-      {/* Video processing settings - show when video files are selected */}
-      {hasVideoFiles && (
+      {/* Video processing settings - show when video files are selected or DICOM video detected */}
+      {(hasVideoFiles || checkingFileInfo) && (
         <div className="video-settings">
           <div className="video-settings-header">
             <BsCameraVideo className="video-icon" />
             <span className="video-settings-title">Video Processing Settings</span>
+            {fileInfo?.is_video && fileInfo?.frame_count && (
+              <span className="video-frame-count">
+                ({fileInfo.frame_count} frames)
+              </span>
+            )}
           </div>
-          <div className="video-settings-content">
-            <label className="video-checkbox-label">
-              <input
-                type="checkbox"
-                className="video-checkbox"
-                checked={processAllFrames}
-                onChange={(e) => handleVideoSettingChange(e.target.checked)}
-                disabled={processing}
-              />
-              <div className="video-checkbox-info">
-                <span className="video-checkbox-text">Analyze every frame</span>
-                <span className="video-checkbox-description">
-                  PHI detection runs on each frame individually (much slower, catches frame-specific PHI); otherwise, only the first frame is analyzed and its results are applied to all frames.
-                </span>
-              </div>
-            </label>
-          </div>
+          {checkingFileInfo ? (
+            <div className="video-settings-content">
+              <span className="checking-file-info">Checking file format...</span>
+            </div>
+          ) : (
+            <div className="video-settings-content">
+              <label className="video-checkbox-label">
+                <input
+                  type="checkbox"
+                  className="video-checkbox"
+                  checked={processAllFrames}
+                  onChange={(e) => handleVideoSettingChange(e.target.checked)}
+                  disabled={processing}
+                />
+                <div className="video-checkbox-info">
+                  <span className="video-checkbox-text">Analyze every frame</span>
+                  <span className="video-checkbox-description">
+                    PHI detection runs on each frame individually (much slower, catches frame-specific PHI); otherwise, only the first frame is analyzed and its results are applied to all frames.
+                  </span>
+                </div>
+              </label>
+            </div>
+          )}
         </div>
       )}
 

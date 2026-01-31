@@ -30,6 +30,19 @@
   font-size: 0.95rem;
 }
 
+.video-frame-count {
+  font-size: 0.85rem;
+  color: var(--color-text-secondary);
+  font-weight: normal;
+  margin-left: auto;
+}
+
+.checking-file-info {
+  color: var(--color-text-secondary);
+  font-style: italic;
+  font-size: 0.9rem;
+}
+
 .video-settings-content {
   background: var(--color-surface);
   border-radius: 6px;

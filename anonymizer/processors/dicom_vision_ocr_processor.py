@@ -76,6 +76,155 @@ UIDS_TO_REGENERATE = [
 ]
 
 
+def is_dicom_video(file_path: Path) -> tuple[bool, int]:
+    """
+    Check if a DICOM file contains video data (multiple frames).
+
+    This function can be used to detect multi-frame DICOMs early, allowing
+    users to choose frame-by-frame processing mode before anonymization.
+
+    Args:
+        file_path: Path to the DICOM file
+
+    Returns:
+        Tuple of (is_video, frame_count) where:
+        - is_video: True if the DICOM has multiple frames (is a video)
+        - frame_count: Number of frames in the DICOM (1 for single-frame)
+
+    Raises:
+        ValueError: If the file cannot be read as a DICOM or has no pixel data
+
+    Example:
+        >>> is_video, num_frames = is_dicom_video(Path("scan.dcm"))
+        >>> if is_video:
+        ...     print(f"DICOM video detected with {num_frames} frames")
+        ...     # Offer user choice for frame-by-frame processing
+    """
+    ds = pydicom.dcmread(file_path, force=True)
+
+    # Handle missing transfer syntax
+    if not hasattr(ds, 'file_meta') or ds.file_meta is None:
+        ds.file_meta = pydicom.dataset.FileMetaDataset()
+
+    if not hasattr(ds.file_meta, 'TransferSyntaxUID') or ds.file_meta.TransferSyntaxUID is None:
+        transfer_syntaxes = [
+            pydicom.uid.ImplicitVRLittleEndian,
+            pydicom.uid.ExplicitVRLittleEndian,
+            pydicom.uid.ExplicitVRBigEndian,
+        ]
+
+        pixel_array = None
+        for ts in transfer_syntaxes:
+            try:
+                ds.file_meta.TransferSyntaxUID = ts
+                pixel_array = ds.pixel_array
+                break
+            except Exception:
+                continue
+
+        if pixel_array is None:
+            raise ValueError(
+                "Unable to decode pixel data. The DICOM file may be corrupted "
+                "or use an unsupported format."
+            )
+    else:
+        pixel_array = ds.pixel_array
+
+    # 4D array indicates multi-frame DICOM (video)
+    # Shape: (frames, height, width) for grayscale or (frames, height, width, channels) for color
+    is_video = len(pixel_array.shape) == 4 or (
+        len(pixel_array.shape) == 3 and
+        hasattr(ds, 'NumberOfFrames') and
+        int(ds.NumberOfFrames) > 1
+    )
+
+    if is_video:
+        frame_count = pixel_array.shape[0]
+    else:
+        frame_count = 1
+
+    return is_video, frame_count
+
+
+def get_dicom_info(file_path: Path) -> dict:
+    """
+    Get detailed information about a DICOM file.
+
+    Args:
+        file_path: Path to the DICOM file
+
+    Returns:
+        Dictionary containing:
+        - is_video: True if multi-frame DICOM
+        - frame_count: Number of frames
+        - dimensions: (width, height) of frames
+        - is_color: True if RGB/color image
+        - modality: DICOM modality (CT, MR, US, etc.) if available
+        - bits_stored: Bits per pixel
+
+    Example:
+        >>> info = get_dicom_info(Path("scan.dcm"))
+        >>> if info['is_video']:
+        ...     print(f"Video with {info['frame_count']} frames")
+    """
+    ds = pydicom.dcmread(file_path, force=True)
+
+    # Handle missing transfer syntax
+    if not hasattr(ds, 'file_meta') or ds.file_meta is None:
+        ds.file_meta = pydicom.dataset.FileMetaDataset()
+
+    if not hasattr(ds.file_meta, 'TransferSyntaxUID') or ds.file_meta.TransferSyntaxUID is None:
+        transfer_syntaxes = [
+            pydicom.uid.ImplicitVRLittleEndian,
+            pydicom.uid.ExplicitVRLittleEndian,
+            pydicom.uid.ExplicitVRBigEndian,
+        ]
+
+        pixel_array = None
+        for ts in transfer_syntaxes:
+            try:
+                ds.file_meta.TransferSyntaxUID = ts
+                pixel_array = ds.pixel_array
+                break
+            except Exception:
+                continue
+
+        if pixel_array is None:
+            raise ValueError(
+                "Unable to decode pixel data. The DICOM file may be corrupted "
+                "or use an unsupported format."
+            )
+    else:
+        pixel_array = ds.pixel_array
+
+    # Determine if multi-frame
+    is_video = len(pixel_array.shape) == 4 or (
+        len(pixel_array.shape) == 3 and
+        hasattr(ds, 'NumberOfFrames') and
+        int(ds.NumberOfFrames) > 1
+    )
+
+    if is_video:
+        frame_count = pixel_array.shape[0]
+        height = pixel_array.shape[1]
+        width = pixel_array.shape[2]
+        is_color = len(pixel_array.shape) == 4 and pixel_array.shape[3] >= 3
+    else:
+        frame_count = 1
+        height = pixel_array.shape[0]
+        width = pixel_array.shape[1]
+        is_color = len(pixel_array.shape) == 3 and pixel_array.shape[2] >= 3
+
+    return {
+        'is_video': is_video,
+        'frame_count': frame_count,
+        'dimensions': (width, height),
+        'is_color': is_color,
+        'modality': getattr(ds, 'Modality', None),
+        'bits_stored': getattr(ds, 'BitsStored', None),
+    }
+
+
 class DICOMVisionOCRProcessor(FileProcessor):
     """Processor for DICOM images using Vision LLM + OCR approach."""
 
@@ -87,7 +236,8 @@ class DICOMVisionOCRProcessor(FileProcessor):
         enable_verification: bool = True,
         check_over_redaction: bool = False,
         max_verification_rounds: int = 2,
-        prompt_config: PromptConfig = None
+        prompt_config: PromptConfig = None,
+        process_all_frames: bool = False
     ):
         """
         Initialize DICOM Vision+OCR processor.
@@ -101,6 +251,9 @@ class DICOMVisionOCRProcessor(FileProcessor):
             check_over_redaction: If True, also check for over-redaction
             max_verification_rounds: Maximum rounds of verify-and-redact
             prompt_config: Optional custom prompt configuration
+            process_all_frames: If True, run PHI detection on every frame of multi-frame
+                              DICOMs (resource-intensive). If False (default), detect on
+                              first frame only and apply to all frames.
         """
         super().__init__(config)
         self.save_intermediate = save_intermediate if save_intermediate is not None else config.save_debug_files
@@ -108,6 +261,7 @@ class DICOMVisionOCRProcessor(FileProcessor):
         self.check_over_redaction = check_over_redaction
         self.max_verification_rounds = max_verification_rounds
         self.prompt_config = prompt_config or DEFAULT_PROMPT_CONFIG
+        self.process_all_frames = process_all_frames
         self.png_processor = PNGVisionOCRProcessor(
             config,
             similarity_threshold=similarity_threshold,

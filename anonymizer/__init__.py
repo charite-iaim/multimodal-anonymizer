@@ -5,7 +5,11 @@ Flexible file anonymization pipeline using LangChain (agentic approach).
 from .config import AnonymizerConfig
 from .base_processor import FileProcessor
 from .processors.png_vision_ocr_processor import PNGVisionOCRProcessor
-from .processors.dicom_vision_ocr_processor import DICOMVisionOCRProcessor
+from .processors.dicom_vision_ocr_processor import (
+    DICOMVisionOCRProcessor,
+    is_dicom_video,
+    get_dicom_info,
+)
 from .processors.pdf_vision_ocr_processor import PDFVisionOCRProcessor
 from .processors.agentic_text_processor import AgenticTextProcessor
 from .processors.agentic_csv_processor import AgenticCSVProcessor
@@ -28,4 +32,7 @@ __all__ = [
     "RetryConfig",
     "retry_with_backoff",
     "with_retry",
+    # DICOM utilities
+    "is_dicom_video",
+    "get_dicom_info",
 ]
