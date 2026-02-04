@@ -41,7 +41,8 @@ openai>=1.0.0
 
 # Audio processing (for voice anonymization - fully local)
 openai-whisper>=20231117  # Local Whisper model for speech-to-text
-pyttsx3>=2.90  # Local TTS using system speech synthesis (Python 3.13 compatible)
+kokoro-onnx>=0.4.0  # Kokoro TTS - lightweight ONNX-based text-to-speech (~300MB, Python 3.13 compatible)
+soundfile>=0.12.0  # Audio file I/O for TTS
 pydub>=0.25.0  # Audio format conversion (requires ffmpeg)
 
 # Optional: For evaluation script

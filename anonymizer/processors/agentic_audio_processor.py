@@ -4,7 +4,7 @@ Agentic audio file processor for voice data anonymization.
 This processor handles .wav and .mp3 audio files through a three-step pipeline:
 1. Transcription: Use local Whisper model to convert speech to text
 2. Anonymization: Use LLM to remove PII (names, dates, etc.) from transcript
-3. Synthesis: Use local pyttsx3 TTS to convert anonymized text back to speech
+3. Synthesis: Use Kokoro TTS to convert anonymized text back to speech
 
 The output is saved in the same format as the original file.
 All processing runs locally (except for LLM anonymization which uses configured provider).
@@ -17,6 +17,7 @@ from pathlib import Path
 from datetime import datetime
 from typing import Tuple, Optional
 import random
+import numpy as np
 
 from langchain_core.messages import HumanMessage, ToolMessage
 from pydantic import BaseModel, Field
@@ -35,12 +36,18 @@ try:
 except ImportError:
     WHISPER_AVAILABLE = False
 
-# Local pyttsx3 TTS import
+# Kokoro TTS import (lightweight ONNX-based TTS, ~80MB, Python 3.13 compatible)
 try:
-    import pyttsx3
-    PYTTSX3_AVAILABLE = True
+    from kokoro_onnx import Kokoro
+    import soundfile as sf
+    import requests
+    KOKORO_AVAILABLE = True
 except ImportError:
-    PYTTSX3_AVAILABLE = False
+    KOKORO_AVAILABLE = False
+
+# Kokoro model files from GitHub releases
+KOKORO_MODEL_URL = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx"
+KOKORO_VOICES_URL = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin"
 
 # Audio format conversion
 try:
@@ -52,20 +59,18 @@ except ImportError:
 
 class AgenticAudioProcessor(FileProcessor):
     """
-    Agentic processor for audio files (.wav, .mp3) using local Whisper + LLM + local TTS.
+    Agentic processor for audio files (.wav, .mp3) using local Whisper + LLM + Kokoro TTS.
 
     Pipeline:
     1. Local Whisper model transcribes audio to text
     2. LLM anonymizes the transcript (removes PII, shifts dates)
-    3. Local pyttsx3 TTS converts anonymized text back to speech
+    3. Kokoro TTS converts anonymized text back to speech
     4. Audio is saved in the original format
-    
+
     All processing runs locally except for LLM anonymization.
-    
-    pyttsx3 uses the system's built-in speech synthesis:
-    - macOS: NSSpeechSynthesizer
-    - Windows: SAPI5
-    - Linux: espeak
+
+    Kokoro TTS is a lightweight ONNX-based TTS (~300MB) with good quality output.
+    Multiple voices are available (af_heart, af_bella, am_adam, am_michael, bf_emma, etc.).
     """
 
     # Supported audio formats
@@ -74,14 +79,29 @@ class AgenticAudioProcessor(FileProcessor):
     # Available Whisper model sizes (from smallest/fastest to largest/most accurate)
     WHISPER_MODELS = ["tiny", "base", "small", "medium", "large"]
 
+    # Available Kokoro TTS voices
+    # Format: voice_id -> description
+    TTS_VOICES = {
+        "af_heart": "American Female (Heart) - warm, expressive",
+        "af_bella": "American Female (Bella) - clear, professional",
+        "af_sarah": "American Female (Sarah) - friendly",
+        "am_adam": "American Male (Adam) - deep, calm",
+        "am_michael": "American Male (Michael) - professional",
+        "bf_emma": "British Female (Emma) - clear, neutral",
+        "bm_george": "British Male (George) - formal",
+    }
+
+    # Default voice - good balance of quality and naturalness
+    DEFAULT_TTS_VOICE = "af_heart"
+
     def __init__(
         self,
         config: AnonymizerConfig,
         time_offset_days: Optional[int] = None,
         prompt_config: Optional[PromptConfig] = None,
         whisper_model_size: str = "large",
-        tts_rate: int = 150,
-        tts_voice_id: Optional[str] = None,
+        tts_voice: str = "af_heart",
+        tts_speed: float = 1.0,
     ):
         """
         Initialize agentic audio processor with fully local speech processing.
@@ -91,9 +111,13 @@ class AgenticAudioProcessor(FileProcessor):
             time_offset_days: Fixed offset for time shifting. If None, a random offset is generated.
             prompt_config: Custom prompt configuration. If None, uses default prompts.
             whisper_model_size: Local Whisper model size (tiny, base, small, medium, large)
-            tts_rate: Speech rate in words per minute (default: 150)
-            tts_voice_id: System voice ID to use. If None, uses system default.
-                         Use list_available_voices() to see available voices.
+            tts_voice: Kokoro TTS voice to use. Options:
+                      - "af_heart" (default, American Female, warm)
+                      - "af_bella", "af_sarah" (American Female variants)
+                      - "am_adam", "am_michael" (American Male)
+                      - "bf_emma" (British Female)
+                      - "bm_george" (British Male)
+            tts_speed: Speech speed multiplier (default 1.0, range 0.5-2.0)
         """
         super().__init__(config)
 
@@ -103,10 +127,10 @@ class AgenticAudioProcessor(FileProcessor):
                 "Local Whisper library is required for audio transcription. "
                 "Install it with: pip install -U openai-whisper"
             )
-        if not PYTTSX3_AVAILABLE:
+        if not KOKORO_AVAILABLE:
             raise ImportError(
-                "pyttsx3 library is required for local speech synthesis. "
-                "Install it with: pip install pyttsx3"
+                "Kokoro TTS library is required for speech synthesis. "
+                "Install it with: pip install kokoro-onnx soundfile"
             )
         if not PYDUB_AVAILABLE:
             raise ImportError(
@@ -126,20 +150,21 @@ class AgenticAudioProcessor(FileProcessor):
 
         # Whisper configuration
         self.whisper_model_size = whisper_model_size if whisper_model_size in self.WHISPER_MODELS else "large"
-        
+
         # Load local Whisper model
         print(f"Loading Whisper model: {self.whisper_model_size}...")
         self.whisper_model = whisper.load_model(self.whisper_model_size)
         print(f"Whisper model loaded successfully")
 
-        # TTS configuration
-        self.tts_rate = tts_rate
-        self.tts_voice_id = tts_voice_id
-        
-        # Test TTS engine initialization
-        print("Initializing TTS engine...")
-        self._test_tts_engine()
-        print("TTS engine ready")
+        # Kokoro TTS configuration
+        self.tts_voice = tts_voice
+        self.tts_speed = tts_speed
+
+        # Initialize Kokoro TTS (download models if needed)
+        print(f"Initializing Kokoro TTS (voice: {tts_voice})...")
+        model_path, voices_path = self._ensure_kokoro_models()
+        self.tts = Kokoro(model_path, voices_path)
+        print(f"Kokoro TTS ready")
 
         # Configure retry settings for LLM calls
         self.retry_config = RetryConfig(
@@ -158,22 +183,42 @@ class AgenticAudioProcessor(FileProcessor):
             tools=[shift_datetime, redact_text],
         )
 
-    def _test_tts_engine(self):
-        """Test that TTS engine can be initialized."""
-        engine = pyttsx3.init()
-        voices = engine.getProperty('voices')
-        print(f"  Available system voices: {len(voices)}")
-        engine.stop()
+    def _ensure_kokoro_models(self) -> tuple:
+        """
+        Ensure Kokoro model files are downloaded and return their paths.
 
-    def _create_tts_engine(self):
-        """Create a new TTS engine instance with configured settings."""
-        engine = pyttsx3.init()
-        engine.setProperty('rate', self.tts_rate)
-        
-        if self.tts_voice_id:
-            engine.setProperty('voice', self.tts_voice_id)
-        
-        return engine
+        Downloads model files from GitHub releases if not present.
+
+        Returns:
+            Tuple of (model_path, voices_path)
+        """
+        cache_dir = Path.home() / ".cache" / "kokoro-onnx"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+
+        model_path = cache_dir / "kokoro-v1.0.onnx"
+        voices_path = cache_dir / "voices-v1.0.bin"
+
+        # Download model if not present
+        if not model_path.exists():
+            print(f"  Downloading Kokoro model (~80MB)...")
+            response = requests.get(KOKORO_MODEL_URL, stream=True)
+            response.raise_for_status()
+            with open(model_path, "wb") as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    f.write(chunk)
+            print(f"  Model downloaded to {model_path}")
+
+        # Download voices if not present
+        if not voices_path.exists():
+            print(f"  Downloading Kokoro voices (~2MB)...")
+            response = requests.get(KOKORO_VOICES_URL, stream=True)
+            response.raise_for_status()
+            with open(voices_path, "wb") as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    f.write(chunk)
+            print(f"  Voices downloaded to {voices_path}")
+
+        return str(model_path), str(voices_path)
 
     def can_process(self, file_path: Path) -> bool:
         """Check if file is a supported audio file (.wav or .mp3)."""
@@ -198,7 +243,7 @@ class AgenticAudioProcessor(FileProcessor):
         Steps:
         1. Transcribe audio to text using local Whisper model
         2. Anonymize text using LLM (redact PII, shift dates)
-        3. Convert anonymized text back to speech using local pyttsx3 TTS
+        3. Convert anonymized text back to speech using Kokoro TTS
         4. Save in the original audio format
 
         Args:
@@ -234,9 +279,8 @@ class AgenticAudioProcessor(FileProcessor):
         print(f"Anonymized text ({stats['dates_shifted']} dates shifted, {stats['pii_redacted']} PII redacted)")
         print(f"Anonymized preview: {anonymized_text[:200]}...")
 
-        # Step 3: Convert anonymized text to speech using local TTS
-        print("\n=== Step 3: Speech Synthesis (Local pyttsx3 TTS) ===")
-        print(f"Speech rate: {self.tts_rate} words/min")
+        # Step 3: Convert anonymized text to speech using Kokoro TTS
+        print("\n=== Step 3: Speech Synthesis (Kokoro TTS) ===")
         tts_audio_path = self._synthesize_speech(anonymized_text)
 
         # Step 4: Convert to original format and save
@@ -573,7 +617,7 @@ When verification is complete and no more issues found, respond with "VERIFICATI
 
     def _synthesize_speech(self, text: str) -> Path:
         """
-        Convert text to speech using local pyttsx3 TTS.
+        Convert text to speech using Kokoro TTS.
 
         Args:
             text: Text to convert to speech
@@ -581,24 +625,25 @@ When verification is complete and no more issues found, respond with "VERIFICATI
         Returns:
             Path to the generated audio file (WAV format)
         """
-        print(f"  Synthesizing speech ({len(text)} characters)...")
+        print(f"  Synthesizing speech ({len(text)} characters) with Kokoro TTS...")
+        print(f"  Voice: {self.tts_voice}, Speed: {self.tts_speed}")
 
         output_path = Path(tempfile.mktemp(suffix=".wav"))
-        
-        # Create TTS engine
-        engine = self._create_tts_engine()
-        
-        try:
-            # Save speech to file
-            engine.save_to_file(text, str(output_path))
-            engine.runAndWait()
-        finally:
-            engine.stop()
-        
+
+        # Generate audio using Kokoro TTS
+        samples, sample_rate = self.tts.create(
+            text=text,
+            voice=self.tts_voice,
+            speed=self.tts_speed,
+        )
+
+        # Save to WAV file
+        sf.write(str(output_path), samples, sample_rate)
+
         # Verify the file was created
         if not output_path.exists() or output_path.stat().st_size == 0:
-            raise RuntimeError("TTS failed to generate audio file")
-        
+            raise RuntimeError("Kokoro TTS failed to generate audio file")
+
         print(f"  Generated audio: {output_path.stat().st_size / 1024:.1f} KB")
         return output_path
 
@@ -607,12 +652,10 @@ When verification is complete and no more issues found, respond with "VERIFICATI
         Convert audio to target format and save.
 
         Args:
-            source_path: Path to source audio (from TTS - may be WAV or AIFF depending on platform)
+            source_path: Path to source audio (WAV from Kokoro TTS)
             output_path: Path to save converted audio
             target_format: Target format (.wav or .mp3)
         """
-        # Use from_file() for auto-detection since pyttsx3 generates different formats
-        # on different platforms (AIFF on macOS, WAV on Windows/Linux)
         audio = AudioSegment.from_file(str(source_path))
 
         if target_format == ".wav":
@@ -648,11 +691,12 @@ When verification is complete and no more issues found, respond with "VERIFICATI
                 "input_file": str(input_path.name),
                 "output_file": str(output_path.name),
                 "timestamp": datetime.now().isoformat(),
-                "processing_method": "agentic_audio_anonymization_local",
+                "processing_method": "agentic_audio_anonymization_kokoro",
                 "time_offset_days": self.time_offset_days,
                 "whisper_model_size": self.whisper_model_size,
-                "tts_rate": self.tts_rate,
-                "tts_voice_id": self.tts_voice_id,
+                "tts_engine": "kokoro-onnx",
+                "tts_voice": self.tts_voice,
+                "tts_speed": self.tts_speed,
             },
             "stats": stats,
             "original_transcript": original_transcript,
@@ -664,29 +708,18 @@ When verification is complete and no more issues found, respond with "VERIFICATI
 
         print(f"  Saved debug metadata to: {json_path}")
 
-    @staticmethod
-    def list_available_voices() -> list:
+    @classmethod
+    def list_available_voices(cls) -> list:
         """
-        List all available system TTS voices.
-        
+        List available Kokoro TTS voices.
+
         Returns:
-            List of voice information dictionaries with 'id' and 'name' keys
+            List of voice information dictionaries with 'id' and 'description' keys
         """
-        if not PYTTSX3_AVAILABLE:
-            print("pyttsx3 not installed. Install with: pip install pyttsx3")
-            return []
-        
-        engine = pyttsx3.init()
-        voices = engine.getProperty('voices')
-        
         voice_list = []
-        for voice in voices:
+        for voice_id, description in cls.TTS_VOICES.items():
             voice_list.append({
-                'id': voice.id,
-                'name': voice.name,
-                'languages': getattr(voice, 'languages', []),
-                'gender': getattr(voice, 'gender', None),
+                'id': voice_id,
+                'description': description,
             })
-        
-        engine.stop()
         return voice_list
