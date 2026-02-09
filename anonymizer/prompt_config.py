@@ -148,10 +148,9 @@ Do NOT stop at the first few lines - scan ALL the way to the end of each field.
 
 Time offset used: {time_offset} days
 
-You have THREE tools available:
+You have TWO tools available:
 1. shift_datetime - to fix unshifted dates
 2. redact_text - to redact PII that was missed
-3. restore_text - to fix over-redaction (restore incorrectly redacted content)
 
 Your tasks (BE THOROUGH - check EVERY line of long text fields):
 
@@ -165,14 +164,6 @@ Your tasks (BE THOROUGH - check EVERY line of long text fields):
    - Fax numbers, email addresses
    - Specific addresses or facility names that identify location
    → Use redact_text(text_to_redact, row_index, column_name) to fix
-
-3. CHECK FOR OVER-REDACTION: Look for content that was INCORRECTLY redacted (asterisks where there shouldn't be):
-   - Medical terminology (diabetes, hypertension, pneumonia, etc.)
-   - Medication names (metformin, lisinopril, aspirin, etc.)
-   - Procedure names (colonoscopy, MRI, CT scan, etc.)
-   - Generic locations (EMERGENCY ROOM, ICU, HOME, etc.)
-   - Dates that were redacted instead of shifted
-   → Use restore_text(redacted_text, original_text, row_index, column_name) to fix
 
 IMPORTANT:
 - Compare ORIGINAL vs ANONYMIZED to identify issues
@@ -197,10 +188,9 @@ Do NOT stop at the first few lines - scan ALL the way to the end.
 
 Time offset used: {time_offset} days
 
-You have THREE tools available:
+You have TWO tools available:
 1. shift_datetime - to fix unshifted dates
 2. redact_text - to redact PII that was missed
-3. restore_text - to fix over-redaction (restore incorrectly redacted content)
 
 Your tasks (BE THOROUGH - check EVERY line of long documents):
 
@@ -213,13 +203,6 @@ Your tasks (BE THOROUGH - check EVERY line of long documents):
    - Phone numbers, fax numbers, email addresses
    - Specific addresses or facility names
    → Use redact_text(text_to_redact="the PII text") to fix
-
-3. CHECK FOR OVER-REDACTION: Look for asterisks that replaced NON-PII content:
-   - Medical terminology (diabetes, hypertension, pneumonia, etc.)
-   - Medication names (metformin, lisinopril, aspirin, etc.)
-   - Procedure names (colonoscopy, MRI, CT scan, etc.)
-   - Generic locations (EMERGENCY ROOM, ICU, HOME, etc.)
-   → Use restore_text(redacted_text="*****", original_text="original term") to fix
 
 IMPORTANT:
 - Compare ORIGINAL vs ANONYMIZED to identify issues

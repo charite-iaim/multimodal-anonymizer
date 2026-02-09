@@ -294,33 +294,3 @@ def redact_column(column_name: str, reason: str) -> str:
         return "[REDACT_COLUMN_FAILED: empty column name]"
 
     return f"[REDACT_COLUMN:{column_name}:{reason}]"
-
-
-@tool("restore_text", args_schema=RestoreTextInput)
-def restore_text(redacted_text: str, original_text: str, row_index: int, column_name: str) -> str:
-    """
-    Restore incorrectly redacted text (fix over-redaction).
-
-    Use this tool when non-PII content was incorrectly redacted. This restores
-    the original text that should not have been anonymized, such as:
-    - Medical terminology (diabetes, hypertension, etc.)
-    - Procedure names (colonoscopy, MRI, etc.)
-    - Medication names (metformin, lisinopril, etc.)
-    - Generic locations (EMERGENCY ROOM, ICU, HOME)
-
-    Args:
-        redacted_text: The incorrectly redacted text (asterisks) currently in the data
-        original_text: The original text to restore (from the original data)
-        row_index: Row index (0-based) where the over-redaction occurred
-        column_name: Column name where the over-redaction occurred
-
-    Returns:
-        The original text that should be restored
-    """
-    if not original_text:
-        return "[RESTORE_FAILED: no original text provided]"
-    
-    if not redacted_text:
-        return "[RESTORE_FAILED: no redacted text to find]"
-    
-    return original_text

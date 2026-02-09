@@ -81,6 +81,16 @@ def create_chat_llm(
             structured_output=structured_output,
             use_vision_model=use_vision_model,
         )
+    elif config.llm_provider == "local":
+        return _create_local_llm(
+            config=config,
+            temperature=temp,
+            timeout=timeout,
+            max_tokens=max_tokens,
+            tools=tools,
+            structured_output=structured_output,
+            use_vision_model=use_vision_model,
+        )
     else:
         raise ValueError(f"Unsupported LLM provider: {config.llm_provider}")
 
@@ -192,6 +202,54 @@ def _create_openrouter_llm(
         model=model,
         api_key=config.openrouter_api_key,
         base_url=config.openrouter_base_url,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        timeout=timeout,
+    )
+
+    if structured_output is not None:
+        return llm.with_structured_output(structured_output)
+    elif tools is not None:
+        return llm.bind_tools(tools)
+
+    return llm
+
+
+def _create_local_llm(
+    config: AnonymizerConfig,
+    temperature: float,
+    timeout: int,
+    max_tokens: int,
+    tools: Optional[List[Any]] = None,
+    structured_output: Optional[Type[BaseModel]] = None,
+    use_vision_model: bool = False,
+) -> BaseChatModel:
+    """
+    Create local LLM instance (OpenAI-compatible).
+
+    Works with any local LLM server that provides an OpenAI-compatible API:
+    - Ollama (http://localhost:11434/v1)
+    - LM Studio (http://localhost:1234/v1)
+    - vLLM (http://localhost:8000/v1)
+    - LocalAI (http://localhost:8080/v1)
+    - text-generation-webui with OpenAI extension
+    - Any other OpenAI-compatible server
+    """
+    from langchain_openai import ChatOpenAI
+
+    # Use vision model if specified and requested, otherwise use the main model
+    if use_vision_model and config.local_vision_model:
+        model = config.local_vision_model
+    else:
+        model = config.local_model
+
+    # Use a dummy key if none provided (most local servers don't need authentication)
+    api_key = config.local_api_key or "not-needed"
+
+    llm = ChatOpenAI(
+        model=model,
+        api_key=api_key,
+        base_url=config.local_base_url,
         temperature=temperature,
         max_tokens=max_tokens,
         timeout=timeout,

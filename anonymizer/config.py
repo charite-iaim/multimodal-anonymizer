@@ -13,7 +13,7 @@ env_path = Path(__file__).parent.parent / ".env"
 load_dotenv(dotenv_path=env_path)
 
 # Supported LLM providers
-LLMProvider = Literal["azure", "fireworks", "poe", "openrouter"]
+LLMProvider = Literal["azure", "fireworks", "poe", "openrouter", "local"]
 
 
 @dataclass
@@ -61,11 +61,17 @@ class AnonymizerConfig:
     openrouter_vision_model: str = "anthropic/claude-sonnet-4"
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
 
+    # Local LLM Configuration (OpenAI-compatible: Ollama, LM Studio, vLLM, LocalAI, etc.)
+    local_base_url: Optional[str] = None  # e.g., http://localhost:11434/v1
+    local_model: str = "llama3.2"  # Model name as known by the local server
+    local_vision_model: Optional[str] = None  # Optional separate vision model
+    local_api_key: Optional[str] = None  # Most local servers don't need this
+
     def __post_init__(self):
         """Load configuration from environment if not provided."""
         # Load LLM provider from environment if set
         env_provider = os.getenv("LLM_PROVIDER")
-        if env_provider and env_provider.lower() in ("azure", "fireworks", "poe", "openrouter"):
+        if env_provider and env_provider.lower() in ("azure", "fireworks", "poe", "openrouter", "local"):
             self.llm_provider = env_provider.lower()
 
         # Load Azure configuration
@@ -149,3 +155,7 @@ class AnonymizerConfig:
         elif self.llm_provider == "openrouter":
             if not self.openrouter_api_key:
                 raise ValueError("OPENROUTER_API_KEY must be set in environment or config (get it from https://openrouter.ai/keys)")
+
+        elif self.llm_provider == "local":
+            if not self.local_base_url:
+                raise ValueError("local_base_url must be set for local LLM provider (e.g., http://localhost:11434/v1 for Ollama)")

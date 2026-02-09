@@ -23,7 +23,7 @@ from pydantic import BaseModel, Field
 from ..base_processor import FileProcessor
 from ..config import AnonymizerConfig
 from ..llm_factory import create_chat_llm
-from ..tools.time_shift_tool import shift_datetime, redact_text, restore_text, redact_column
+from ..tools.time_shift_tool import shift_datetime, redact_text, redact_column
 from ..retry_utils import retry_with_backoff, RetryConfig, create_retry_callback
 from ..prompt_config import PromptConfig, DEFAULT_PROMPT_CONFIG
 
@@ -38,7 +38,7 @@ class DateTimeShift(BaseModel):
 
 class VerificationIssue(BaseModel):
     """An issue found during verification."""
-    issue_type: str = Field(description="Type: 'unshifted_date', 'unredacted_pii', 'over_redaction'")
+    issue_type: str = Field(description="Type: 'unshifted_date', 'unredacted_pii'")
     row_index: int = Field(description="Row index (0-based)")
     column_name: str = Field(description="Column name")
     description: str = Field(description="Description of the issue")

@@ -6,6 +6,9 @@ function ConfigForm({ backendUrl, onConfigured }) {
   const [customUrl, setCustomUrl] = useState(() => {
     return localStorage.getItem('customLlmUrl') || ''
   })
+  const [customModel, setCustomModel] = useState(() => {
+    return localStorage.getItem('customLlmModel') || 'llama3.2'
+  })
   const [customApiKey, setCustomApiKey] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
@@ -51,6 +54,7 @@ function ConfigForm({ backendUrl, onConfigured }) {
         },
         body: JSON.stringify({
           llm_url: customUrl,
+          model_name: customModel,
           api_key: customApiKey || null
         })
       })
@@ -60,8 +64,9 @@ function ConfigForm({ backendUrl, onConfigured }) {
         throw new Error(errorData.detail || 'Failed to configure custom LLM')
       }
 
-      // Save URL to localStorage (not the API key)
+      // Save URL and model to localStorage (not the API key)
       localStorage.setItem('customLlmUrl', customUrl)
+      localStorage.setItem('customLlmModel', customModel)
 
       setSuccess(true)
       setTimeout(() => {
@@ -125,10 +130,16 @@ function ConfigForm({ backendUrl, onConfigured }) {
       ) : (
         <form onSubmit={handleCustomMode} className="custom-mode-section">
           <div className="info-box">
-            <h3>Custom LLM</h3>
+            <h3>Local LLM</h3>
             <p>
-              Use your own local LLM or OpenAI-compatible endpoint.
+              Connect to any local LLM server with an OpenAI-compatible API:
             </p>
+            <ul>
+              <li><strong>Ollama</strong> - ollama.com</li>
+              <li><strong>LM Studio</strong> - lmstudio.ai</li>
+              <li><strong>vLLM</strong> - vllm.ai</li>
+              <li><strong>LocalAI</strong> - localai.io</li>
+            </ul>
           </div>
 
           <div className="form-group">
@@ -144,7 +155,27 @@ function ConfigForm({ backendUrl, onConfigured }) {
               placeholder="http://localhost:11434/v1"
               required
             />
-            <small>Your local LLM or OpenAI-compatible API endpoint</small>
+            <small>
+              Common endpoints: Ollama (localhost:11434/v1), LM Studio (localhost:1234/v1), vLLM (localhost:8000/v1)
+            </small>
+          </div>
+
+          <div className="form-group">
+            <label htmlFor="custom_model">
+              Model Name
+              <span className="required">*</span>
+            </label>
+            <input
+              type="text"
+              id="custom_model"
+              value={customModel}
+              onChange={(e) => setCustomModel(e.target.value)}
+              placeholder="llama3.2"
+              required
+            />
+            <small>
+              Model name as shown in your LLM server (e.g., llama3.2, mistral, qwen2.5:14b)
+            </small>
           </div>
 
           <div className="form-group">
@@ -158,7 +189,7 @@ function ConfigForm({ backendUrl, onConfigured }) {
               onChange={(e) => setCustomApiKey(e.target.value)}
               placeholder="Leave empty if not required"
             />
-            <small>API key if your LLM requires authentication</small>
+            <small>Most local LLM servers don't require an API key</small>
           </div>
 
           <button

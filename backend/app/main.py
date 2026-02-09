@@ -108,6 +108,7 @@ job_progress: Dict[str, Dict] = {}
 
 class CustomLLMConfig(BaseModel):
     llm_url: str = Field(..., description="Custom LLM endpoint URL (OpenAI-compatible)")
+    model_name: str = Field(default="llama3.2", description="Model name as known by the local server")
     api_key: Optional[str] = Field(default=None, description="Optional API key for custom LLM")
 
 
@@ -168,25 +169,31 @@ async def use_dev_config():
 
 @app.post("/api/config/custom")
 async def set_custom_llm(llm_config: CustomLLMConfig):
-    """Configure a custom LLM endpoint (OpenAI-compatible API)."""
+    """
+    Configure a custom local LLM endpoint (OpenAI-compatible API).
+
+    Works with any local LLM server:
+    - Ollama: http://localhost:11434/v1
+    - LM Studio: http://localhost:1234/v1
+    - vLLM: http://localhost:8000/v1
+    - LocalAI: http://localhost:8080/v1
+    - Any other OpenAI-compatible server
+    """
     global config
 
     try:
-        # For custom LLM, we'll use OpenAI-compatible endpoint
-        # This will require modifying the AnonymizerConfig to support custom endpoints
-        # For now, we'll use the URL as the azure_endpoint
         config = AnonymizerConfig(
-            azure_endpoint=llm_config.llm_url,
-            azure_api_key=llm_config.api_key or "dummy-key",
-            azure_deployment_name="custom",  # Not used for custom endpoints
-            azure_api_version="2024-08-01-preview",
-            model_name="gpt-4o-mini",
+            llm_provider="local",
+            local_base_url=llm_config.llm_url,
+            local_model=llm_config.model_name,
+            local_api_key=llm_config.api_key,
         )
 
         return {
             "status": "success",
-            "message": "Custom LLM configuration updated successfully",
-            "mode": "custom"
+            "message": f"Connected to local LLM at {llm_config.llm_url} using model '{llm_config.model_name}'",
+            "mode": "custom",
+            "model": llm_config.model_name
         }
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Invalid configuration: {str(e)}")
