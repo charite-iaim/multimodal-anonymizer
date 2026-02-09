@@ -423,17 +423,34 @@ If no PHI: return original filename with empty phi_detections list.
             message = HumanMessage(content=prompt)
             result = self.llm.invoke([message])
 
+            # Ensure file extension is preserved (LLM might forget it)
+            if not is_directory:
+                original_ext = Path(filename).suffix  # e.g., ".dcm", ".csv"
+                anonymized_ext = Path(result.anonymized_filename).suffix
+                if original_ext and original_ext != anonymized_ext:
+                    # LLM forgot or changed the extension - restore it
+                    if anonymized_ext:
+                        # Replace wrong extension with original
+                        result_anonymized = result.anonymized_filename[:-len(anonymized_ext)] + original_ext
+                    else:
+                        # No extension in result - append original
+                        result_anonymized = result.anonymized_filename + original_ext
+                else:
+                    result_anonymized = result.anonymized_filename
+            else:
+                result_anonymized = result.anonymized_filename
+
             # For directories containing "ID", add sequential counter suffix
-            if is_directory and "ID" in result.anonymized_filename:
-                base_anonymized_name = result.anonymized_filename
+            if is_directory and "ID" in result_anonymized:
+                base_anonymized_name = result_anonymized
                 sequential_name = self.get_sequential_folder_name(base_anonymized_name)
                 anonymized_filename = sequential_name
             elif not is_directory and folder_path:
                 # For files within a folder, always add sequential number to ensure uniqueness
-                base_anonymized_name = result.anonymized_filename
+                base_anonymized_name = result_anonymized
                 anonymized_filename = self.get_sequential_filename(folder_path, base_anonymized_name)
             else:
-                anonymized_filename = result.anonymized_filename
+                anonymized_filename = result_anonymized
 
             return FilenameAnonymizationResult(
                 original_filename=result.original_filename,
