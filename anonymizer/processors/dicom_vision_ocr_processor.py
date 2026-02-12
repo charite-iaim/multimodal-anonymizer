@@ -308,10 +308,10 @@ class DICOMVisionOCRProcessor(FileProcessor):
         import base64
         import io
 
-        # Convert image to base64 PNG for the vision model
+        # Convert image to base64 JPEG for the vision model
         rgb_image = image.convert("RGB")
         buffer = io.BytesIO()
-        rgb_image.save(buffer, format="PNG")
+        rgb_image.save(buffer, format="JPEG", quality=80)
         base64_image = base64.b64encode(buffer.getvalue()).decode("utf-8")
 
         prompt = (
@@ -329,7 +329,7 @@ class DICOMVisionOCRProcessor(FileProcessor):
                 {"type": "text", "text": prompt},
                 {
                     "type": "image_url",
-                    "image_url": {"url": f"data:image/png;base64,{base64_image}"},
+                    "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"},
                 },
             ]
         )

@@ -236,6 +236,7 @@ def _create_local_llm(
     - Any other OpenAI-compatible server
     """
     from langchain_openai import ChatOpenAI
+    import httpx
 
     # Use vision model if specified and requested, otherwise use the main model
     if use_vision_model and config.local_vision_model:
@@ -246,6 +247,18 @@ def _create_local_llm(
     # Use a dummy key if none provided (most local servers don't need authentication)
     api_key = config.local_api_key or "not-needed"
 
+    # Disable SSL verification for localhost tunnels (e.g., SSH tunnel to remote LLM)
+    http_client = None
+    if config.local_base_url and "localhost" in config.local_base_url:
+        http_client = httpx.Client(verify=False)
+
+    # Pass thinking mode via extra_body for reasoning models (e.g., kimi-k2.5)
+    model_kwargs = {}
+    if not config.local_thinking:
+        model_kwargs["extra_body"] = {
+            "chat_template_kwargs": {"thinking": False}
+        }
+
     llm = ChatOpenAI(
         model=model,
         api_key=api_key,
@@ -253,6 +266,8 @@ def _create_local_llm(
         temperature=temperature,
         max_tokens=max_tokens,
         timeout=timeout,
+        **({"http_client": http_client} if http_client else {}),
+        **model_kwargs,
     )
 
     if structured_output is not None:

@@ -66,6 +66,7 @@ class AnonymizerConfig:
     local_model: str = "llama3.2"  # Model name as known by the local server
     local_vision_model: Optional[str] = None  # Optional separate vision model
     local_api_key: Optional[str] = None  # Most local servers don't need this
+    local_thinking: bool = False  # Enable/disable thinking mode for reasoning models (e.g., kimi-k2.5)
 
     def __post_init__(self):
         """Load configuration from environment if not provided."""
@@ -132,6 +133,27 @@ class AnonymizerConfig:
         env_openrouter_base_url = os.getenv("OPENROUTER_BASE_URL")
         if env_openrouter_base_url:
             self.openrouter_base_url = env_openrouter_base_url
+
+        # Load Local LLM configuration
+        env_local_base_url = os.getenv("LOCAL_BASE_URL")
+        if env_local_base_url:
+            self.local_base_url = env_local_base_url
+
+        env_local_model = os.getenv("LOCAL_MODEL")
+        if env_local_model:
+            self.local_model = env_local_model
+
+        env_local_vision_model = os.getenv("LOCAL_VISION_MODEL")
+        if env_local_vision_model:
+            self.local_vision_model = env_local_vision_model
+
+        env_local_api_key = os.getenv("LOCAL_API_KEY")
+        if env_local_api_key:
+            self.local_api_key = env_local_api_key
+
+        env_local_thinking = os.getenv("LOCAL_THINKING")
+        if env_local_thinking is not None:
+            self.local_thinking = env_local_thinking.lower() in ("true", "1", "yes")
 
         # Validate required fields based on provider
         if self.llm_provider == "azure":

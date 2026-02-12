@@ -476,11 +476,11 @@ class AgenticTextProcessor(FileProcessor):
         max_chunk_size = 4000
 
         if len(original_content) <= max_chunk_size:
-            modified_content, total_fixes = self._verify_chunk(
+            modified_content, total_fixes, _ = self._verify_chunk(
                 original_content, anonymized_content, 0
             )
         else:
-            # Process in chunks
+            # Process in chunks with overlap — collect all replacements and apply globally
             orig_chunks = self._split_into_chunks(original_content, max_chunk_size)
             anon_chunks = self._split_into_chunks(anonymized_content, max_chunk_size)
 
@@ -488,13 +488,20 @@ class AgenticTextProcessor(FileProcessor):
             num_chunks = min(len(orig_chunks), len(anon_chunks))
             print(f"  Verifying {num_chunks} chunks...")
 
+            all_replacements: Dict[str, str] = {}
+
             for chunk_num in range(num_chunks):
                 _, orig_chunk = orig_chunks[chunk_num]
                 _, anon_chunk = anon_chunks[chunk_num]
 
                 print(f"  Verifying chunk {chunk_num + 1}/{num_chunks}")
-                _, chunk_fixes = self._verify_chunk(orig_chunk, anon_chunk, chunk_num)
+                _, chunk_fixes, chunk_replacements = self._verify_chunk(orig_chunk, anon_chunk, chunk_num)
                 total_fixes += chunk_fixes
+                all_replacements.update(chunk_replacements)
+
+            # Apply all collected replacements to the full content
+            for original, fixed in all_replacements.items():
+                modified_content = modified_content.replace(original, fixed)
 
         return modified_content, total_fixes
 
@@ -503,7 +510,7 @@ class AgenticTextProcessor(FileProcessor):
         original_chunk: str,
         anonymized_chunk: str,
         chunk_num: int
-    ) -> Tuple[str, int]:
+    ) -> Tuple[str, int, Dict[str, str]]:
         """
         Verify and fix a chunk of text.
 
@@ -513,10 +520,11 @@ class AgenticTextProcessor(FileProcessor):
             chunk_num: Chunk number for logging
 
         Returns:
-            Tuple of (fixed chunk, number of fixes)
+            Tuple of (fixed chunk, number of fixes, dict of original->fixed replacements)
         """
         modified_chunk = anonymized_chunk
         fixes = 0
+        replacements: Dict[str, str] = {}
 
         # Use configurable prompt
         prompt = self.prompt_config.get_text_verification_prompt(
@@ -560,6 +568,7 @@ class AgenticTextProcessor(FileProcessor):
                         if "[SHIFT_FAILED]" not in result:
                             if original_date in modified_chunk:
                                 modified_chunk = modified_chunk.replace(original_date, result)
+                                replacements[original_date] = result
                                 fixes += 1
                                 print(f"    Fixed date: {original_date} -> {result}")
 
@@ -575,6 +584,7 @@ class AgenticTextProcessor(FileProcessor):
                         if "[REDACT_FAILED" not in result:
                             if text_to_redact in modified_chunk:
                                 modified_chunk = modified_chunk.replace(text_to_redact, result)
+                                replacements[text_to_redact] = result
                                 fixes += 1
                                 print(f"    Fixed PII: '{text_to_redact}' -> '{result}'")
 
@@ -587,7 +597,7 @@ class AgenticTextProcessor(FileProcessor):
                 print(f"    Verification error: {e}")
                 break
 
-        return modified_chunk, fixes
+        return modified_chunk, fixes, replacements
 
     def _save_json_output(
         self,

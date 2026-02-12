@@ -615,27 +615,103 @@ When verification is complete and no more issues found, respond with "VERIFICATI
 
         return modified_text, fixes
 
-    def _synthesize_speech(self, text: str) -> Path:
+    def _generate_beep(self, duration_ms: int = 300, frequency: int = 1000, sample_rate: int = 24000) -> np.ndarray:
         """
-        Convert text to speech using Kokoro TTS.
+        Generate a beep/censor tone.
 
         Args:
-            text: Text to convert to speech
+            duration_ms: Duration of the beep in milliseconds
+            frequency: Frequency of the beep in Hz (1000 Hz is the standard censor tone)
+            sample_rate: Audio sample rate
+
+        Returns:
+            Numpy array of audio samples
+        """
+        num_samples = int(sample_rate * duration_ms / 1000)
+        t = np.linspace(0, duration_ms / 1000, num_samples, endpoint=False)
+        # Generate sine wave at the specified frequency
+        beep = 0.5 * np.sin(2 * np.pi * frequency * t)
+        # Apply short fade-in/fade-out to avoid clicks (10ms each)
+        fade_samples = int(sample_rate * 0.01)
+        if fade_samples > 0 and len(beep) > 2 * fade_samples:
+            beep[:fade_samples] *= np.linspace(0, 1, fade_samples)
+            beep[-fade_samples:] *= np.linspace(1, 0, fade_samples)
+        return beep.astype(np.float32)
+
+    def _synthesize_speech(self, text: str) -> Path:
+        """
+        Convert text to speech using Kokoro TTS, replacing redacted sections
+        (asterisk sequences) with a beep/censor tone.
+
+        Args:
+            text: Text to convert to speech (may contain ***** redactions)
 
         Returns:
             Path to the generated audio file (WAV format)
         """
+        import re
+
         print(f"  Synthesizing speech ({len(text)} characters) with Kokoro TTS...")
         print(f"  Voice: {self.tts_voice}, Speed: {self.tts_speed}")
 
         output_path = Path(tempfile.mktemp(suffix=".wav"))
 
-        # Generate audio using Kokoro TTS
-        samples, sample_rate = self.tts.create(
-            text=text,
-            voice=self.tts_voice,
-            speed=self.tts_speed,
-        )
+        # Split text on asterisk sequences (2 or more asterisks = redacted PII)
+        segments = re.split(r'(\*{2,})', text)
+
+        # Check if there are any redacted segments
+        has_redactions = any(re.match(r'^\*{2,}$', seg) for seg in segments)
+
+        if not has_redactions:
+            # No redactions, synthesize normally
+            samples, sample_rate = self.tts.create(
+                text=text,
+                voice=self.tts_voice,
+                speed=self.tts_speed,
+            )
+        else:
+            # Synthesize each segment, replacing asterisks with beep tones
+            sample_rate = 24000  # Kokoro default sample rate
+            audio_parts = []
+            beep_count = 0
+
+            for seg in segments:
+                if not seg.strip():
+                    continue
+
+                if re.match(r'^\*{2,}$', seg):
+                    # Redacted segment -> insert beep tone
+                    beep = self._generate_beep(
+                        duration_ms=300,
+                        frequency=1000,
+                        sample_rate=sample_rate,
+                    )
+                    audio_parts.append(beep)
+                    beep_count += 1
+                else:
+                    # Normal text -> synthesize with TTS
+                    text_segment = seg.strip()
+                    if text_segment:
+                        try:
+                            seg_samples, seg_rate = self.tts.create(
+                                text=text_segment,
+                                voice=self.tts_voice,
+                                speed=self.tts_speed,
+                            )
+                            # Resample if needed (unlikely but safe)
+                            if seg_rate != sample_rate:
+                                sample_rate = seg_rate
+                            audio_parts.append(seg_samples)
+                        except Exception as e:
+                            print(f"    Warning: TTS failed for segment, skipping: {e}")
+
+            print(f"  Replaced {beep_count} redacted sections with beep tones")
+
+            if audio_parts:
+                samples = np.concatenate(audio_parts)
+            else:
+                # Fallback: generate a short silence
+                samples = np.zeros(sample_rate, dtype=np.float32)
 
         # Save to WAV file
         sf.write(str(output_path), samples, sample_rate)

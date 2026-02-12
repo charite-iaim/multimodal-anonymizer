@@ -1039,8 +1039,20 @@ def main():
         help="Maximum number of global retry rounds for failed files at the end (default: 3)"
     )
     parser.add_argument(
-        "--provider", type=str, choices=["azure", "fireworks"], default=None,
-        help="LLM provider to use (azure or fireworks). Overrides LLM_PROVIDER environment variable."
+        "--provider", type=str, choices=["azure", "fireworks", "local"], default=None,
+        help="LLM provider to use (azure, fireworks, or local). Overrides LLM_PROVIDER environment variable."
+    )
+    parser.add_argument(
+        "--local-base-url", type=str, default=None,
+        help="Base URL for local LLM server (e.g., http://localhost:11434/v1 for Ollama). Overrides LOCAL_BASE_URL env var."
+    )
+    parser.add_argument(
+        "--local-model", type=str, default=None,
+        help="Model name for local LLM (e.g., llama3.2, qwen3-vl:32b). Overrides LOCAL_MODEL env var."
+    )
+    parser.add_argument(
+        "--local-vision-model", type=str, default=None,
+        help="Vision model name for local LLM (if different from --local-model). Overrides LOCAL_VISION_MODEL env var."
     )
     parser.add_argument(
         "--prompt-config", type=str, choices=["default", "mimic"], default="mimic",
@@ -1061,6 +1073,12 @@ def main():
     }
     if args.provider:
         config_kwargs["llm_provider"] = args.provider
+    if args.local_base_url:
+        config_kwargs["local_base_url"] = args.local_base_url
+    if args.local_model:
+        config_kwargs["local_model"] = args.local_model
+    if args.local_vision_model:
+        config_kwargs["local_vision_model"] = args.local_vision_model
 
     config = AnonymizerConfig(**config_kwargs)
 
@@ -1118,6 +1136,12 @@ def main():
     print(f"LLM Provider: {config.llm_provider}")
     if config.llm_provider == "azure":
         print(f"  Model: {config.azure_deployment_name}")
+    elif config.llm_provider == "local":
+        print(f"  Model: {config.local_model}")
+        if config.local_vision_model:
+            print(f"  Vision Model: {config.local_vision_model}")
+        print(f"  Base URL: {config.local_base_url}")
+        print(f"  Thinking: {config.local_thinking}")
     else:
         print(f"  Model: {config.fireworks_model}")
         print(f"  Vision Model: {config.fireworks_vision_model}")

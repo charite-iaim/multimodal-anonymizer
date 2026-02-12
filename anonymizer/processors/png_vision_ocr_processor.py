@@ -442,12 +442,12 @@ class PNGVisionOCRProcessor(FileProcessor):
         else:
             resized_image = image
 
-        # Encode image to base64
+        # Encode image to base64 using JPEG to reduce payload size
         buffer = io.BytesIO()
-        # Convert to RGB if necessary (for JPEG compatibility)
-        if resized_image.mode in ('L', 'LA', 'P'):
+        # Convert to RGB if necessary
+        if resized_image.mode in ('L', 'LA', 'P', 'RGBA'):
             resized_image = resized_image.convert('RGB')
-        resized_image.save(buffer, format="PNG")
+        resized_image.save(buffer, format="JPEG", quality=80)
         base64_image = base64.b64encode(buffer.getvalue()).decode("utf-8")
 
         # Create prompt with OCR context
@@ -475,7 +475,7 @@ RESPOND ONLY WITH A JSON OBJECT in the following format (no other text):
                 {"type": "text", "text": base_prompt},
                 {
                     "type": "image_url",
-                    "image_url": {"url": f"data:image/png;base64,{base64_image}"},
+                    "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"},
                 },
             ]
         )
@@ -511,7 +511,7 @@ RESPOND ONLY WITH A JSON OBJECT in the following format (no other text):
                 {"type": "text", "text": fallback_prompt},
                 {
                     "type": "image_url",
-                    "image_url": {"url": f"data:image/png;base64,{base64_image}"},
+                    "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"},
                 },
             ]
         )

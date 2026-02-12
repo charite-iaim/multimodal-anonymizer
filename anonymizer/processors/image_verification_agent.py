@@ -192,7 +192,10 @@ class ImageVerificationAgent:
         return result
 
     def _image_to_base64(self, image: Image.Image, max_dimension: int = 1024) -> str:
-        """Convert PIL Image to base64 string, resizing if needed."""
+        """Convert PIL Image to base64 string, resizing if needed.
+
+        Uses JPEG encoding to reduce payload size
+        """
         width, height = image.size
 
         if width > max_dimension or height > max_dimension:
@@ -200,12 +203,12 @@ class ImageVerificationAgent:
             new_size = (int(width * scale), int(height * scale))
             image = image.resize(new_size, Image.Resampling.LANCZOS)
 
-        # Convert to RGB if necessary
-        if image.mode in ('L', 'LA', 'P'):
+        # Convert to RGB if necessary (JPEG doesn't support alpha)
+        if image.mode in ('L', 'LA', 'P', 'RGBA'):
             image = image.convert('RGB')
 
         buffer = io.BytesIO()
-        image.save(buffer, format="PNG")
+        image.save(buffer, format="JPEG", quality=80)
         return base64.b64encode(buffer.getvalue()).decode("utf-8")
 
     def _verify_redacted_only(self, redacted_b64: str) -> VerificationResult:
@@ -221,7 +224,7 @@ class ImageVerificationAgent:
                 {"type": "text", "text": prompt},
                 {
                     "type": "image_url",
-                    "image_url": {"url": f"data:image/png;base64,{redacted_b64}"},
+                    "image_url": {"url": f"data:image/jpeg;base64,{redacted_b64}"},
                 },
             ]
         )
@@ -277,11 +280,11 @@ IMPORTANT:
                 {"type": "text", "text": prompt},
                 {
                     "type": "image_url",
-                    "image_url": {"url": f"data:image/png;base64,{original_b64}"},
+                    "image_url": {"url": f"data:image/jpeg;base64,{original_b64}"},
                 },
                 {
                     "type": "image_url",
-                    "image_url": {"url": f"data:image/png;base64,{redacted_b64}"},
+                    "image_url": {"url": f"data:image/jpeg;base64,{redacted_b64}"},
                 },
             ]
         )
@@ -712,7 +715,7 @@ IMPORTANT:
                 {"type": "text", "text": prompt},
                 {
                     "type": "image_url",
-                    "image_url": {"url": f"data:image/png;base64,{redacted_b64}"},
+                    "image_url": {"url": f"data:image/jpeg;base64,{redacted_b64}"},
                 },
             ]
         )
