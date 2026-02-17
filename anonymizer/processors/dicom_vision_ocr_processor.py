@@ -29,7 +29,8 @@ from ..llm_factory import create_chat_llm
 from ..tools.time_shift_tool import shift_datetime_value, redact_text
 from ..retry_utils import retry_with_backoff, RetryConfig, create_retry_callback
 from .png_vision_ocr_processor import PNGVisionOCRProcessor
-from .dicom_face_redaction_processor import redact_faces_in_dicom_frames, get_face_redaction_masks_for_frames
+from ..tools.face_detection_tool import detect_faces_in_image, redact_faces_in_pil_image
+from .dicom_face_redaction_processor import get_face_redaction_masks_for_frames
 
 
 # ── DICOM metadata tag categories for anonymization ──
@@ -864,38 +865,35 @@ class DICOMVisionOCRProcessor(FileProcessor):
 
         # ── Head scan detection: ask LLM if this is a CT/MRI head scan ──
         print("Checking if DICOM is a CT/MRI head scan...")
-        use_face_redaction = self._is_head_scan(display_images[0])
+        is_head_scan = self._is_head_scan(display_images[0])
 
         # Initialize pixel array for redaction
         redacted_pixel_array = raw_pixel_array.copy()
 
-        if use_face_redaction:
-            # Step 1: Apply face redaction for head scans
-            # Extract masks from the model and apply to raw pixel array to preserve bit depth
-            print("Step 1: Using trained face redaction model for CT/MRI head scan...")
+        # Apply appropriate face/defacing based on scan type:
+        # - Head scan (CT/MRI): Use U-Net defacing model (trained for medical imaging)
+        # - Not head scan: Use RetinaNet face detection (for photos/videos with faces)
 
-            # Get redaction masks from the model
+        if is_head_scan:
+            # HEAD SCAN: Apply U-Net defacing model for CT/MRI head scans
+            print("Step 1: Using U-Net defacing model for CT/MRI head scan...")
+
+            # Get defacing masks from the U-Net model
             face_masks = get_face_redaction_masks_for_frames(display_images)
 
-            # Also get redacted images for debug saving (if needed)
-            redacted_images = None
+            # Save intermediate images if enabled
             if self.save_intermediate:
-                debug_path = output_path if self.save_intermediate else None
-                redacted_images = redact_faces_in_dicom_frames(display_images, debug_output_path=debug_path)
-
                 intermediate_dir = output_path.parent / "intermediate"
                 intermediate_dir.mkdir(parents=True, exist_ok=True)
                 for i, img in enumerate(display_images):
                     img.save(intermediate_dir / f"{input_path.stem}_frame{i:04d}_original.png")
-                for i, img in enumerate(redacted_images):
-                    img.save(intermediate_dir / f"{input_path.stem}_frame{i:04d}_face_redacted.png")
-                # Also save the masks for debugging
+                # Save the masks for debugging
                 for i, mask in enumerate(face_masks):
                     mask_img = Image.fromarray((mask * 255).astype(np.uint8), mode="L")
-                    mask_img.save(intermediate_dir / f"{input_path.stem}_frame{i:04d}_face_mask.png")
+                    mask_img.save(intermediate_dir / f"{input_path.stem}_frame{i:04d}_deface_mask.png")
 
-            # Apply face redaction masks to the raw pixel array (preserves original bit depth)
-            print("Applying face redaction masks to original DICOM pixel data...")
+            # Apply defacing masks to the raw pixel array (preserves original bit depth)
+            print("Applying defacing masks to original DICOM pixel data...")
 
             if is_multiframe:
                 # Multi-frame: apply mask to each frame
@@ -905,6 +903,88 @@ class DICOMVisionOCRProcessor(FileProcessor):
             else:
                 # Single frame: apply mask directly
                 redacted_pixel_array[face_masks[0]] = 0
+
+            # Save DICOM with the defaced pixel array
+            print("Saving defaced DICOM...")
+            metadata_changes = self._save_dicom_with_pixel_array(
+                dicom_dataset, redacted_pixel_array, output_path
+            )
+            print(f"Saved anonymized DICOM to: {output_path}")
+
+            # Save debug JSON for head scan processing
+            if self.config.save_debug_files:
+                json_dest = output_path.with_suffix(".json")
+                output_data = {
+                    "metadata": {
+                        "input_file": str(input_path.name),
+                        "output_file": str(output_path.name),
+                        "timestamp": datetime.now().isoformat(),
+                        "processing_method": "unet_defacing",
+                        "is_head_scan": True,
+                        "total_frames": len(display_images),
+                        "bit_depth_preserved": True,
+                        "face_redaction_applied": True,
+                        "text_redaction_applied": False,
+                    }
+                }
+                if metadata_changes:
+                    output_data["metadata_anonymization"] = metadata_changes
+                with open(json_dest, "w", encoding="utf-8") as f:
+                    json.dump(output_data, f, indent=2, ensure_ascii=False)
+                print(f"Saved detection results to: {json_dest}")
+
+            return  # Exit early for head scan processing
+
+        else:
+            # NOT A HEAD SCAN: Apply RetinaNet face detection for photos/videos
+            print("Step 1: Using RetinaNet face detection (not a head scan)...")
+
+            # Detect faces in each frame using RetinaNet
+            all_face_detections = []
+            total_faces = 0
+            for i, img in enumerate(display_images):
+                faces = detect_faces_in_image(img, score_threshold=0.5, min_face_size=30)
+                all_face_detections.append(faces)
+                total_faces += len(faces)
+                if i % 10 == 0 or i == len(display_images) - 1:
+                    print(f"  Frame {i + 1}/{len(display_images)}: {len(faces)} face(s) detected")
+
+            print(f"  Total faces detected: {total_faces}")
+
+            # Save intermediate images if enabled
+            if self.save_intermediate:
+                intermediate_dir = output_path.parent / "intermediate"
+                intermediate_dir.mkdir(parents=True, exist_ok=True)
+                for i, img in enumerate(display_images):
+                    img.save(intermediate_dir / f"{input_path.stem}_frame{i:04d}_original.png")
+                # Save face-redacted display images for debugging
+                for i, (img, faces) in enumerate(zip(display_images, all_face_detections)):
+                    if faces:
+                        redacted_img = redact_faces_in_pil_image(img, faces, padding=10)
+                        redacted_img.save(intermediate_dir / f"{input_path.stem}_frame{i:04d}_face_redacted.png")
+
+            # Apply face redaction bounding boxes to the raw pixel array (preserves original bit depth)
+            print("Applying face redaction to original DICOM pixel data...")
+            padding = 10
+
+            if is_multiframe:
+                # Multi-frame: apply face bboxes to each frame
+                for frame_idx, faces in enumerate(all_face_detections):
+                    if frame_idx < redacted_pixel_array.shape[0]:
+                        for face in faces:
+                            x1 = max(0, face.x - padding)
+                            y1 = max(0, face.y - padding)
+                            x2 = min(redacted_pixel_array.shape[2], face.x + face.width + padding)
+                            y2 = min(redacted_pixel_array.shape[1], face.y + face.height + padding)
+                            redacted_pixel_array[frame_idx, y1:y2, x1:x2] = 0
+            else:
+                # Single frame: apply face bboxes directly
+                for face in all_face_detections[0]:
+                    x1 = max(0, face.x - padding)
+                    y1 = max(0, face.y - padding)
+                    x2 = min(redacted_pixel_array.shape[1], face.x + face.width + padding)
+                    y2 = min(redacted_pixel_array.shape[0], face.y + face.height + padding)
+                    redacted_pixel_array[y1:y2, x1:x2] = 0
 
             # Step 2: Also run text detection on face-redacted images
             # Create display images from the face-redacted pixel array for text detection
@@ -967,7 +1047,7 @@ class DICOMVisionOCRProcessor(FileProcessor):
                 output_data["metadata"] = output_data.get("metadata", {})
                 output_data["metadata"].update({
                     "processing_method": "face_redaction_and_vision_ocr",
-                    "is_head_scan": True,
+                    "is_head_scan": is_head_scan,
                     "total_frames": len(display_images),
                     "bit_depth_preserved": True,
                     "face_redaction_applied": True,
@@ -978,62 +1058,7 @@ class DICOMVisionOCRProcessor(FileProcessor):
                     json.dump(output_data, f, indent=2, ensure_ascii=False)
 
             # Save DICOM with the fully redacted pixel array
-            print("Saving fully anonymized DICOM (face + text redaction)...")
-            metadata_changes = self._save_dicom_with_pixel_array(
-                dicom_dataset, redacted_pixel_array, output_path
-            )
-            print(f"Saved anonymized DICOM to: {output_path}")
-        else:
-            # Standard Vision+OCR pipeline: detect on display images,
-            # redact on original pixel data
-            if is_multiframe:
-                print(f"Multi-frame DICOM: Using first-frame-only detection strategy")
-                pii_elements = self._detect_pii_multiframe(
-                    display_images, input_path, output_path
-                )
-            else:
-                pii_elements = self._detect_pii_singleframe(
-                    display_images[0], input_path, output_path
-                )
-
-            # Apply redaction bounding boxes directly on the raw pixel array
-            print("Applying redactions to original DICOM pixel data...")
-
-            if is_multiframe:
-                for i in range(redacted_pixel_array.shape[0]):
-                    self._apply_redaction_to_pixel_array(
-                        redacted_pixel_array[i], pii_elements, dicom_dataset
-                    )
-            else:
-                self._apply_redaction_to_pixel_array(
-                    redacted_pixel_array, pii_elements, dicom_dataset
-                )
-
-            # Save intermediate redacted display images for debugging
-            if self.save_intermediate:
-                intermediate_dir = output_path.parent / "intermediate"
-                intermediate_dir.mkdir(parents=True, exist_ok=True)
-                if is_multiframe:
-                    for i in range(redacted_pixel_array.shape[0]):
-                        redacted_display = self._make_display_image(redacted_pixel_array[i], dicom_dataset)
-                        redacted_display.save(intermediate_dir / f"{input_path.stem}_frame{i:04d}_redacted.png")
-                else:
-                    redacted_display = self._make_display_image(redacted_pixel_array, dicom_dataset)
-                    redacted_display.save(intermediate_dir / f"{input_path.stem}_redacted.png")
-
-            if is_multiframe and self.save_intermediate:
-                # Create debug video from redacted display images
-                redacted_display_frames = []
-                for i in range(redacted_pixel_array.shape[0]):
-                    redacted_display_frames.append(
-                        self._make_display_image(redacted_pixel_array[i], dicom_dataset)
-                    )
-                video_path = output_path.parent / "intermediate" / f"{input_path.stem}_redacted.mp4"
-                print(f"Creating debug video from {len(redacted_display_frames)} frames...")
-                self._create_video_from_frames(redacted_display_frames, video_path, fps=10)
-
-            # Save DICOM with the redacted raw pixel array (preserves original encoding)
-            print("Saving anonymized DICOM with original pixel encoding...")
+            print("Saving fully anonymized DICOM (face anonymization + text redaction)...")
             metadata_changes = self._save_dicom_with_pixel_array(
                 dicom_dataset, redacted_pixel_array, output_path
             )
