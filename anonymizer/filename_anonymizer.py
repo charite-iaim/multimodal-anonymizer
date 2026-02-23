@@ -3,6 +3,7 @@ Filename and folder name anonymizer with PII detection and reversible mapping.
 """
 
 import csv
+import re
 from pathlib import Path
 from datetime import datetime
 from typing import List, Dict, Optional
@@ -73,11 +74,13 @@ class FilenameAnonymizer:
         # Note: max_tokens needs to be high enough to accommodate reasoning models
         # which use reasoning_tokens within the max_tokens budget (e.g., GLM-4 can use
         # ~1800 reasoning tokens, so we need at least 2500+ for a complete response)
+        # We don't use structured_output here because some models (e.g., kimi-k2.5)
+        # return JSON with literal control characters that break Pydantic parsing.
+        # Instead, we manually parse and sanitize the JSON in anonymize_filename().
         self.llm = create_chat_llm(
             config=config,
             temperature=0.0,  # Use deterministic output for consistency
             max_tokens=4096,  # Higher limit to accommodate reasoning models
-            structured_output=FilenameAnonymizationResult,
         )
 
         # Store file mappings by folder for CSV export
@@ -356,6 +359,38 @@ class FilenameAnonymizer:
 
         return f"{stem}_{counter:04d}{ext}"
 
+    @staticmethod
+    def _sanitize_and_parse_json(raw_text: str) -> FilenameAnonymizationResult:
+        """Parse LLM response text into FilenameAnonymizationResult, sanitizing control characters.
+
+        Some models (e.g., kimi-k2.5) return JSON with literal newlines/control characters
+        inside string values, which is invalid JSON. This method strips them before parsing.
+        """
+        # Extract JSON object from the response (model may include extra text)
+        json_match = re.search(r'\{.*\}', raw_text, re.DOTALL)
+        if not json_match:
+            raise ValueError(f"No JSON object found in LLM response: {raw_text[:200]}")
+
+        json_str = json_match.group(0)
+
+        # Remove control characters (U+0000 to U+001F) that appear inside JSON strings,
+        # except for already-escaped sequences like \n, \t, \r which are valid JSON escapes.
+        # We replace unescaped control chars (literal bytes 0x00-0x1F) with empty string.
+        json_str = re.sub(r'[\x00-\x1f]+', '', json_str)
+
+        return FilenameAnonymizationResult.model_validate_json(json_str)
+
+    @staticmethod
+    def _get_extension(filename: str) -> str:
+        """Extract the file extension (e.g., '.dcm', '.hea') from a filename.
+
+        Returns empty string if the filename has no extension.
+        """
+        last_dot = filename.rfind('.')
+        if last_dot > 0:  # dot must not be at position 0 (hidden files like .gitignore)
+            return filename[last_dot:]
+        return ''
+
     def anonymize_filename(self, filename: str, is_directory: bool = False, folder_path: str = "") -> FilenameAnonymizationResult:
         """
         Detect PII in filename and replace with generic category placeholders.
@@ -416,41 +451,41 @@ Output:
   ]
 
 If no PHI: return original filename with empty phi_detections list.
+
+IMPORTANT: Respond with ONLY a valid JSON object (no markdown, no extra text). The JSON must have these fields:
+- "original_filename": the original filename as given
+- "anonymized_filename": the anonymized version
+- "phi_detections": array of objects with "original_value" and "category"
 """
 
         try:
             # Call LLM to detect PII in filename and get anonymized version
             message = HumanMessage(content=prompt)
-            result = self.llm.invoke([message])
+            raw_response = self.llm.invoke([message])
+            result = self._sanitize_and_parse_json(raw_response.content)
 
-            # Ensure file extension is preserved (LLM might forget it)
+            # Ensure the original file extension is preserved even if the LLM strips it
             if not is_directory:
-                original_ext = Path(filename).suffix  # e.g., ".dcm", ".csv"
-                anonymized_ext = Path(result.anonymized_filename).suffix
-                if original_ext and original_ext != anonymized_ext:
-                    # LLM forgot or changed the extension - restore it
-                    if anonymized_ext:
-                        # Replace wrong extension with original
-                        result_anonymized = result.anonymized_filename[:-len(anonymized_ext)] + original_ext
-                    else:
-                        # No extension in result - append original
-                        result_anonymized = result.anonymized_filename + original_ext
-                else:
-                    result_anonymized = result.anonymized_filename
-            else:
-                result_anonymized = result.anonymized_filename
+                original_ext = self._get_extension(filename)
+                anonymized_ext = self._get_extension(result.anonymized_filename)
+                if original_ext and not anonymized_ext:
+                    result.anonymized_filename = result.anonymized_filename + original_ext
+                elif original_ext and original_ext != anonymized_ext:
+                    # Replace wrong extension with original
+                    result_anonymized = result.anonymized_filename[:-len(anonymized_ext)] + original_ext
+                    result.anonymized_filename = result_anonymized
 
             # For directories containing "ID", add sequential counter suffix
-            if is_directory and "ID" in result_anonymized:
-                base_anonymized_name = result_anonymized
+            if is_directory and "ID" in result.anonymized_filename:
+                base_anonymized_name = result.anonymized_filename
                 sequential_name = self.get_sequential_folder_name(base_anonymized_name)
                 anonymized_filename = sequential_name
             elif not is_directory and folder_path:
                 # For files within a folder, always add sequential number to ensure uniqueness
-                base_anonymized_name = result_anonymized
+                base_anonymized_name = result.anonymized_filename
                 anonymized_filename = self.get_sequential_filename(folder_path, base_anonymized_name)
             else:
-                anonymized_filename = result_anonymized
+                anonymized_filename = result.anonymized_filename
 
             return FilenameAnonymizationResult(
                 original_filename=result.original_filename,

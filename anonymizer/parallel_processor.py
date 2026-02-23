@@ -77,18 +77,44 @@ def _process_file_worker(job_data: Dict[str, Any]) -> ProcessingResult:
 
     input_path = Path(job_data['input_path'])
 
+    # Pre-compute output path so we can clean up on failure
+    output_dir = Path(job_data['output_dir'])
+    preserve_structure = job_data['preserve_structure']
+    anonymized_relative_path = Path(job_data['anonymized_relative_path']) if job_data['anonymized_relative_path'] else None
+    anonymized_filename = job_data.get('anonymized_filename')
+
+    if preserve_structure and anonymized_relative_path:
+        file_output_dir = output_dir / anonymized_relative_path
+        output_path = file_output_dir / anonymized_filename
+    else:
+        file_stem = input_path.stem
+        file_output_dir = output_dir / file_stem
+        output_path = file_output_dir / anonymized_filename
+
+    def _cleanup_partial_output():
+        """Remove partial output file and empty parent directory on failure."""
+        try:
+            if output_path.exists():
+                output_path.unlink()
+                print(f"    Cleaned up partial output: {output_path}")
+            # Also clean up debug JSON if it exists
+            json_output = output_path.with_suffix('.json')
+            if json_output.exists():
+                json_output.unlink()
+            # Remove output directory if it's now empty
+            if file_output_dir.exists() and not any(file_output_dir.iterdir()):
+                file_output_dir.rmdir()
+        except OSError:
+            pass
+
     def process_with_retry():
         nonlocal retries_attempted
 
         # Extract job data
-        output_dir = Path(job_data['output_dir'])
         config_dict = job_data['config']
         use_llm_detection = job_data['use_llm_detection']
-        preserve_structure = job_data['preserve_structure']
         relative_path = Path(job_data['relative_path']) if job_data['relative_path'] else None
-        anonymized_relative_path = Path(job_data['anonymized_relative_path']) if job_data['anonymized_relative_path'] else None
         anonymize_paths = job_data['anonymize_paths']
-        anonymized_filename = job_data.get('anonymized_filename')
         folder_path = job_data.get('folder_path', '')
         time_offset_days = job_data.get('time_offset_days')
         prompt_config_name = job_data.get('prompt_config_name', 'default')
@@ -107,16 +133,8 @@ def _process_file_worker(job_data: Dict[str, Any]) -> ProcessingResult:
         if processor is None:
             raise ValueError(f"No processor available for: {input_path.name}")
 
-        # Determine output path
-        if preserve_structure and anonymized_relative_path:
-            file_output_dir = output_dir / anonymized_relative_path
-            file_output_dir.mkdir(parents=True, exist_ok=True)
-            output_path = file_output_dir / anonymized_filename
-        else:
-            file_stem = input_path.stem
-            file_output_dir = output_dir / file_stem
-            file_output_dir.mkdir(parents=True, exist_ok=True)
-            output_path = file_output_dir / anonymized_filename
+        # Ensure output directory exists
+        file_output_dir.mkdir(parents=True, exist_ok=True)
 
         # Process the file
         processor.anonymize(input_path, output_path)
@@ -125,10 +143,12 @@ def _process_file_worker(job_data: Dict[str, Any]) -> ProcessingResult:
     def on_retry(attempt, error, delay):
         nonlocal retries_attempted
         retries_attempted = attempt
+        # Clean up any partial output from the failed attempt before retrying
+        _cleanup_partial_output()
         print(f"    Retry {attempt}/{max_retries} for {input_path.name}: {type(error).__name__} - waiting {delay:.1f}s")
 
     try:
-        output_path = retry_with_backoff(
+        result_path = retry_with_backoff(
             process_with_retry,
             config=retry_config,
             on_retry=on_retry,
@@ -137,7 +157,7 @@ def _process_file_worker(job_data: Dict[str, Any]) -> ProcessingResult:
         processing_time = time.time() - start_time
         return ProcessingResult(
             input_path=input_path,
-            output_path=output_path,
+            output_path=result_path,
             success=True,
             processing_time=processing_time,
             retries_attempted=retries_attempted,
@@ -146,6 +166,7 @@ def _process_file_worker(job_data: Dict[str, Any]) -> ProcessingResult:
 
     except ValueError as e:
         # No processor available - not a retryable error
+        _cleanup_partial_output()
         processing_time = time.time() - start_time
         return ProcessingResult(
             input_path=input_path,
@@ -158,6 +179,8 @@ def _process_file_worker(job_data: Dict[str, Any]) -> ProcessingResult:
         )
 
     except Exception as e:
+        # Clean up partial output after all retries exhausted
+        _cleanup_partial_output()
         processing_time = time.time() - start_time
         error_msg = f"{str(e)}\n{traceback.format_exc()}"
 
