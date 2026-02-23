@@ -174,9 +174,10 @@ def process_file(
     filename_anonymizer: FilenameAnonymizer = None,
     anonymize_paths: bool = True,
     tracker: ProcessingTracker = None,
+    skip_existing_output: bool = False,
     time_offset_days: int = None,
     prompt_config = None
-) -> bool:
+) -> bool | None:
     """
     Process a single file.
 
@@ -195,12 +196,12 @@ def process_file(
         prompt_config: Optional PromptConfig instance for customizing prompts
 
     Returns:
-        True if successful
+        True if successful, False if failed, None if skipped
     """
     # Check if file has already been processed
     if tracker and tracker.is_file_processed(input_path):
         print(f"Skipping already processed file: {input_path.name}")
-        return True
+        return None
 
     processor = get_processor(input_path, config, use_llm_detection, time_offset_days=time_offset_days, prompt_config=prompt_config)
 
@@ -250,6 +251,13 @@ def process_file(
                 anonymized_filename=anonymized_filename,
                 phi_detections=anonymization_result.phi_detections
             )
+
+    # Skip if output already exists (optional)
+    if skip_existing_output and output_path.exists():
+        print(f"Skipping existing output file: {output_path}")
+        if tracker:
+            tracker.mark_file_processed(input_path, output_path, success=True)
+        return None
     else:
         # Create separate output folder for this file (original behavior)
         file_stem = input_path.stem  # filename without extension
@@ -284,6 +292,30 @@ def process_file(
         print(f"Error processing {input_path.name}: {e}")
         traceback.print_exc()
 
+        # Clean up partial output file so failed results don't end up in output folder
+        if output_path.exists():
+            try:
+                output_path.unlink()
+                print(f"Cleaned up partial output: {output_path}")
+            except OSError as cleanup_err:
+                print(f"Warning: Could not clean up partial output {output_path}: {cleanup_err}")
+
+        # Also clean up debug JSON if it exists
+        json_output = output_path.with_suffix('.json')
+        if json_output.exists():
+            try:
+                json_output.unlink()
+            except OSError:
+                pass
+
+        # Remove output directory if it's now empty
+        if file_output_dir.exists() and not any(file_output_dir.iterdir()):
+            try:
+                file_output_dir.rmdir()
+                print(f"Removed empty output directory: {file_output_dir}")
+            except OSError:
+                pass
+
         # Mark file as failed in tracker
         if tracker:
             tracker.mark_file_processed(input_path, output_path, success=False)
@@ -301,6 +333,7 @@ def process_directory(
     skip_hidden: bool = True,
     anonymize_paths: bool = True,
     tracker: ProcessingTracker = None,
+    skip_existing_output: bool = False,
     parallel: bool = True,
     num_workers: int = None,
     prompt_config = None
@@ -355,10 +388,22 @@ def process_directory(
                 skipped += 1
                 continue
 
-            if process_file(file_path, output_dir, config, use_llm_detection,
-                          filename_anonymizer=filename_anonymizer, anonymize_paths=anonymize_paths,
-                          tracker=tracker, prompt_config=prompt_config):
+            result = process_file(
+                file_path,
+                output_dir,
+                config,
+                use_llm_detection,
+                filename_anonymizer=filename_anonymizer,
+                anonymize_paths=anonymize_paths,
+                tracker=tracker,
+                skip_existing_output=skip_existing_output,
+                prompt_config=prompt_config,
+            )
+
+            if result is True:
                 successful += 1
+            elif result is None:
+                skipped += 1
             else:
                 failed += 1
 
@@ -386,6 +431,7 @@ def process_directory(
             skip_hidden=skip_hidden,
             anonymize_paths=anonymize_paths,
             tracker=tracker,
+            skip_existing_output=skip_existing_output,
             parallel=parallel,
             num_workers=num_workers,
             prompt_config=prompt_config
@@ -401,6 +447,7 @@ def _process_directory_parallel(
     skip_hidden: bool = True,
     anonymize_paths: bool = True,
     tracker: ProcessingTracker = None,
+    skip_existing_output: bool = False,
     num_workers: int = None,
     prompt_config = None
 ) -> dict:
@@ -589,6 +636,19 @@ def _process_directory_parallel(
         else:
             anonymized_filename = f"anonymized_{file_path.name}"
 
+        # Skip if expected output already exists (optional)
+        if preserve_structure and anonymized_relative_path:
+            expected_output_path = output_dir / anonymized_relative_path / anonymized_filename
+        else:
+            expected_output_path = output_dir / file_path.stem / anonymized_filename
+
+        if skip_existing_output and expected_output_path.exists():
+            skipped += 1
+            print(f"  [{i+1}/{total_files}] Skipping existing output: {expected_output_path}")
+            if tracker:
+                tracker.mark_file_processed(file_path, expected_output_path, success=True)
+            continue
+
         # Get patient-specific time offset
         if relative_path.parent.parts:
             patient_folder = relative_path.parent.parts[0]
@@ -760,6 +820,7 @@ def process_directory_recursive(
     skip_hidden: bool = True,
     anonymize_paths: bool = True,
     tracker: ProcessingTracker = None,
+    skip_existing_output: bool = False,
     _root_dir: Path = None,
     _stats: dict = None,
     _filename_anonymizer: FilenameAnonymizer = None,
@@ -819,6 +880,7 @@ def process_directory_recursive(
                 skip_hidden=skip_hidden,
                 anonymize_paths=anonymize_paths,
                 tracker=tracker,
+                skip_existing_output=skip_existing_output,
                 num_workers=num_workers,
                 prompt_config=prompt_config
             )
@@ -885,12 +947,15 @@ def process_directory_recursive(
                 filename_anonymizer=_filename_anonymizer,
                 anonymize_paths=anonymize_paths,
                 tracker=tracker,
+                skip_existing_output=skip_existing_output,
                 time_offset_days=time_offset,
                 prompt_config=prompt_config
             )
 
-            if success:
+            if success is True:
                 _stats["successful"] += 1
+            elif success is None:
+                _stats["skipped"] += 1
             else:
                 _stats["failed"] += 1
 
@@ -941,6 +1006,7 @@ def process_directory_recursive(
                 skip_hidden=skip_hidden,
                 anonymize_paths=anonymize_paths,
                 tracker=tracker,
+                skip_existing_output=skip_existing_output,
                 _root_dir=_root_dir,
                 _stats=_stats,
                 _filename_anonymizer=_filename_anonymizer,
@@ -1005,6 +1071,10 @@ def main():
     parser.add_argument(
         "--no-anonymize-paths", action="store_true",
         help="Disable automatic filename and folder name anonymization. By default, paths ARE anonymized."
+    )
+    parser.add_argument(
+        "--skip-existing-output", action="store_true",
+        help="Skip processing files when the expected output file already exists."
     )
     parser.add_argument(
         "--tracking-file", "-t", type=str, default=None,
@@ -1176,6 +1246,11 @@ def main():
     else:
         print(f"Path anonymization: disabled (only file contents will be anonymized)")
 
+    if args.skip_existing_output:
+        print(f"Skip existing output: enabled")
+    else:
+        print(f"Skip existing output: disabled")
+
     if tracker:
         print(f"Tracking: enabled (tracking file: {args.tracking_file})")
         print(f"  Hash computation: {'disabled' if args.no_hash else 'enabled'}")
@@ -1198,7 +1273,8 @@ def main():
     if input_path.is_file():
         # For single file, process with automatic filename anonymization
         process_file(input_path, output_dir, config, use_llm_detection,
-                    anonymize_paths=anonymize_paths, tracker=tracker, prompt_config=prompt_config)
+                    anonymize_paths=anonymize_paths, tracker=tracker,
+                    skip_existing_output=args.skip_existing_output, prompt_config=prompt_config)
     elif input_path.is_dir():
         process_directory(
             input_path,
@@ -1210,6 +1286,7 @@ def main():
             skip_hidden=not args.include_hidden,
             anonymize_paths=anonymize_paths,
             tracker=tracker,
+            skip_existing_output=args.skip_existing_output,
             parallel=parallel,
             num_workers=num_workers,
             prompt_config=prompt_config

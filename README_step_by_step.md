@@ -44,6 +44,9 @@ git clone <repository-url>
 cd mimiciv-anonymization-pipeline
 ```
 
+load models from git lfs
+brew install git-lfs
+
 ### 2. Configure Azure Credentials
 
 Create a `.env` file in the project root with your Azure OpenAI credentials:
