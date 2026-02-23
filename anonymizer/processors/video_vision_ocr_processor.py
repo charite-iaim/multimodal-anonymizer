@@ -5,6 +5,8 @@ Supports MP4 files and DICOM videos (multi-frame DICOMs).
 This processor can operate in two modes:
 1. First-frame-only (default): PHI detection on first frame, applied to all frames
 2. Frame-by-frame: PHI detection on every frame (resource-intensive)
+
+Face redaction is applied when the video is NOT a head/face CT/MRI scan.
 """
 
 import json
@@ -14,13 +16,19 @@ from PIL import Image
 from datetime import datetime
 import cv2
 
+from langchain_core.messages import HumanMessage
+
 # Increase PIL's max image pixels limit to handle large video frames
 Image.MAX_IMAGE_PIXELS = 300000000  # 300 million pixels
 
 from ..base_processor import FileProcessor
 from ..config import AnonymizerConfig
 from ..prompt_config import PromptConfig, DEFAULT_PROMPT_CONFIG
+from ..llm_factory import create_chat_llm
+from ..retry_utils import retry_with_backoff, RetryConfig, create_retry_callback
 from .png_vision_ocr_processor import PNGVisionOCRProcessor
+from ..tools.face_detection_tool import detect_faces_in_image, redact_faces_in_pil_image
+from .dicom_face_redaction_processor import redact_faces_in_dicom_frames as unet_deface_frames
 
 
 class VideoVisionOCRProcessor(FileProcessor):
@@ -68,9 +76,124 @@ class VideoVisionOCRProcessor(FileProcessor):
             prompt_config=self.prompt_config
         )
 
+        # Vision LLM for head scan classification
+        self.retry_config = RetryConfig(
+            max_retries=3,
+            initial_delay=2.0,
+            max_delay=60.0,
+            exponential_base=2.0,
+            jitter=True,
+        )
+        self.llm_vision = create_chat_llm(
+            config=config,
+            timeout=120,
+            max_tokens=256,
+            use_vision_model=True,
+        )
+
+    def _is_head_scan(self, image: Image.Image) -> bool:
+        """
+        Ask the vision LLM whether an image is a CT or MRI scan of the head/face.
+
+        Args:
+            image: A representative frame from the video (first frame).
+
+        Returns:
+            True if the LLM determines this is a CT/MRI head scan showing the face.
+        """
+        import base64
+        import io
+
+        # Convert image to base64 PNG for the vision model
+        rgb_image = image.convert("RGB")
+        buffer = io.BytesIO()
+        rgb_image.save(buffer, format="PNG")
+        base64_image = base64.b64encode(buffer.getvalue()).decode("utf-8")
+
+        prompt = (
+            "You are a medical imaging expert. Look at this image and determine "
+            "whether it is a CT or MRI scan of the head/face region.\n\n"
+            "Answer ONLY with 'YES' or 'NO'.\n"
+            "- Answer 'YES' if this is a CT or MRI scan of the head or face, or skull\n"
+            "- Answer 'NO' for all other types of images (photos, regular videos, chest CT, "
+            "abdominal scans, X-rays, ultrasounds, etc.).\n\n"
+            "Your answer (YES or NO):"
+        )
+
+        message = HumanMessage(
+            content=[
+                {"type": "text", "text": prompt},
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/png;base64,{base64_image}"},
+                },
+            ]
+        )
+
+        try:
+            response = retry_with_backoff(
+                lambda: self.llm_vision.invoke([message]),
+                config=self.retry_config,
+                on_retry=create_retry_callback(prefix="    [Head scan detection] "),
+            )
+            answer = response.content.strip().upper()
+            is_head = answer.startswith("YES")
+            print(f"  Head scan detection: LLM answered '{answer}' -> {'head scan' if is_head else 'not a head scan'}")
+            return is_head
+        except Exception as e:
+            print(f"  Head scan detection failed: {e}. Falling back to standard processing (assuming not a head scan).")
+            return False
+
     def can_process(self, file_path: Path) -> bool:
         """Check if file is a video file (MP4)."""
         return file_path.suffix.lower() in ['.mp4', '.avi', '.mov', '.mkv']
+
+    def _redact_faces_in_frames(
+        self,
+        frames: list[Image.Image],
+        score_threshold: float = 0.5,
+        min_face_size: int = 30,
+        padding: int = 10
+    ) -> list[Image.Image]:
+        """
+        Detect and redact faces in video frames using RetinaNet.
+
+        This preserves colors and only blacks out the detected face regions.
+
+        Args:
+            frames: List of PIL Images (video frames)
+            score_threshold: Confidence threshold for face detections
+            min_face_size: Minimum face size in pixels
+            padding: Extra padding around detected faces
+
+        Returns:
+            List of PIL Images with faces redacted
+        """
+        redacted_frames = []
+        total_faces_detected = 0
+
+        for i, frame in enumerate(frames):
+            if i % 50 == 0 or i == len(frames) - 1:
+                print(f"  Detecting faces in frame {i + 1}/{len(frames)}...")
+
+            # Detect faces using RetinaNet
+            faces = detect_faces_in_image(
+                frame,
+                score_threshold=score_threshold,
+                min_face_size=min_face_size
+            )
+
+            if faces:
+                total_faces_detected += len(faces)
+                # Redact detected faces (blacks out the regions)
+                redacted_frame = redact_faces_in_pil_image(frame, faces, padding=padding)
+                redacted_frames.append(redacted_frame)
+            else:
+                # No faces detected, keep original frame
+                redacted_frames.append(frame)
+
+        print(f"  Total faces detected and redacted: {total_faces_detected}")
+        return redacted_frames
 
     def extract_content(self, file_path: Path) -> str:
         """Extract content description from video file."""
@@ -170,6 +293,8 @@ class VideoVisionOCRProcessor(FileProcessor):
         - False (default): PHI detection on first frame only, bboxes applied to all frames
         - True: PHI detection on every frame individually (resource-intensive)
 
+        Face redaction is applied when the video is NOT a head/face CT/MRI scan.
+
         Args:
             input_path: Path to input video file
             output_path: Path to save anonymized video file
@@ -185,12 +310,30 @@ class VideoVisionOCRProcessor(FileProcessor):
         if num_frames == 0:
             raise ValueError("No frames extracted from video")
 
+        # ── Head scan detection: ask LLM if this is a CT/MRI head scan ──
+        print("Checking if video is a CT/MRI head scan...")
+        is_head_scan = self._is_head_scan(frames[0])
+
+        # Apply appropriate face/defacing based on scan type:
+        # - Head scan (CT/MRI): Use U-Net defacing model (trained for medical imaging)
+        # - Not head scan: Use RetinaNet face detection (for photos/videos with faces)
+        face_redaction_applied = True
+
+        if is_head_scan:
+            print("Head scan detected - applying U-Net defacing model...")
+            frames = unet_deface_frames(frames)
+            print(f"U-Net defacing complete on {num_frames} frames")
+        else:
+            print("Not a head scan - applying RetinaNet face detection and redaction...")
+            frames = self._redact_faces_in_frames(frames)
+            print(f"RetinaNet face redaction complete on {num_frames} frames")
+
         if self.process_all_frames:
             print(f"Frame-by-frame processing: Analyzing all {num_frames} frames")
-            redacted_frames = self._anonymize_all_frames(frames, input_path, output_path)
+            redacted_frames = self._anonymize_all_frames(frames, input_path, output_path, is_head_scan, face_redaction_applied)
         else:
             print(f"First-frame-only processing: Analyzing first frame, applying to all {num_frames} frames")
-            redacted_frames = self._anonymize_first_frame_only(frames, input_path, output_path)
+            redacted_frames = self._anonymize_first_frame_only(frames, input_path, output_path, is_head_scan, face_redaction_applied)
 
         # Save intermediate frames if enabled
         if self.save_intermediate:
@@ -213,7 +356,9 @@ class VideoVisionOCRProcessor(FileProcessor):
         self,
         frames: list[Image.Image],
         input_path: Path,
-        output_path: Path
+        output_path: Path,
+        is_head_scan: bool = False,
+        face_redaction_applied: bool = False
     ) -> list[Image.Image]:
         """
         Anonymize video using first-frame-only detection.
@@ -222,9 +367,11 @@ class VideoVisionOCRProcessor(FileProcessor):
         bounding boxes are applied to all frames.
 
         Args:
-            frames: List of all frame images
+            frames: List of all frame images (possibly already face-redacted)
             input_path: Original input path
             output_path: Output path
+            is_head_scan: Whether the video was detected as a head scan
+            face_redaction_applied: Whether face redaction was applied
 
         Returns:
             List of all redacted images
@@ -272,7 +419,9 @@ class VideoVisionOCRProcessor(FileProcessor):
                 additional_elements,
                 verification_result,
                 num_frames,
-                processing_method="vision_ocr_video_first_frame_only"
+                processing_method="vision_ocr_video_first_frame_only",
+                is_head_scan=is_head_scan,
+                face_redaction_applied=face_redaction_applied
             )
 
         return redacted_frames
@@ -281,7 +430,9 @@ class VideoVisionOCRProcessor(FileProcessor):
         self,
         frames: list[Image.Image],
         input_path: Path,
-        output_path: Path
+        output_path: Path,
+        is_head_scan: bool = False,
+        face_redaction_applied: bool = False
     ) -> list[Image.Image]:
         """
         Anonymize video using frame-by-frame detection.
@@ -290,9 +441,11 @@ class VideoVisionOCRProcessor(FileProcessor):
         resource-intensive but can catch PHI that only appears in certain frames.
 
         Args:
-            frames: List of all frame images
+            frames: List of all frame images (possibly already face-redacted)
             input_path: Original input path
             output_path: Output path
+            is_head_scan: Whether the video was detected as a head scan
+            face_redaction_applied: Whether face redaction was applied
 
         Returns:
             List of all redacted images
@@ -339,7 +492,9 @@ class VideoVisionOCRProcessor(FileProcessor):
                 output_path,
                 input_path,
                 all_frame_bboxes,
-                num_frames
+                num_frames,
+                is_head_scan=is_head_scan,
+                face_redaction_applied=face_redaction_applied
             )
 
         return redacted_frames
@@ -353,7 +508,9 @@ class VideoVisionOCRProcessor(FileProcessor):
         additional_elements: list,
         verification_result,
         num_frames: int,
-        processing_method: str
+        processing_method: str,
+        is_head_scan: bool = False,
+        face_redaction_applied: bool = False
     ) -> None:
         """Save debug JSON file for first-frame-only processing."""
         json_dest = output_path.with_suffix(".json")
@@ -364,6 +521,8 @@ class VideoVisionOCRProcessor(FileProcessor):
                 "timestamp": datetime.now().isoformat(),
                 "processing_method": processing_method,
                 "verification_enabled": self.enable_verification,
+                "is_head_scan": is_head_scan,
+                "face_redaction_applied": face_redaction_applied,
                 "total_frames": num_frames,
                 "analyzed_frames": 1,
                 "total_pii_elements": len(all_bboxes),
@@ -409,7 +568,9 @@ class VideoVisionOCRProcessor(FileProcessor):
         output_path: Path,
         input_path: Path,
         all_frame_bboxes: list,
-        num_frames: int
+        num_frames: int,
+        is_head_scan: bool = False,
+        face_redaction_applied: bool = False
     ) -> None:
         """Save debug JSON file for frame-by-frame processing."""
         json_dest = output_path.with_suffix(".json")
@@ -425,6 +586,8 @@ class VideoVisionOCRProcessor(FileProcessor):
                 "timestamp": datetime.now().isoformat(),
                 "processing_method": "vision_ocr_video_all_frames",
                 "verification_enabled": self.enable_verification,
+                "is_head_scan": is_head_scan,
+                "face_redaction_applied": face_redaction_applied,
                 "total_frames": num_frames,
                 "analyzed_frames": num_frames,
                 "total_pii_elements": total_pii,
