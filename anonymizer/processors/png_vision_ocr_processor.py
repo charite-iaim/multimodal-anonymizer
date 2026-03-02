@@ -43,6 +43,7 @@ from pydantic import BaseModel, Field
 
 from ..base_processor import FileProcessor
 from ..retry_utils import retry_with_backoff, RetryConfig, create_retry_callback
+from ..llm_response_utils import strip_thinking_content
 from ..config import AnonymizerConfig
 from ..llm_factory import create_chat_llm
 from ..models import PIIDetectionResult, PIIElement, BoundingBox
@@ -72,6 +73,9 @@ def _parse_pii_from_text(text: str) -> List["PIITextItem"]:
         List of PIITextItem objects
     """
     pii_items = []
+
+    # Strip reasoning/chain-of-thought content from thinking models
+    text = strip_thinking_content(text)
 
     # Try to find JSON in the response first
     json_patterns = [

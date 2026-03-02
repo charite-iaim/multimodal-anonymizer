@@ -26,6 +26,7 @@ from ..config import AnonymizerConfig
 from ..prompt_config import PromptConfig, DEFAULT_PROMPT_CONFIG
 from ..llm_factory import create_chat_llm
 from ..retry_utils import retry_with_backoff, RetryConfig, create_retry_callback
+from ..llm_response_utils import extract_content_from_response, get_reasoning_content_from_response
 from .png_vision_ocr_processor import PNGVisionOCRProcessor
 from ..tools.face_detection_tool import detect_faces_in_image, redact_faces_in_pil_image
 from .dicom_face_redaction_processor import redact_faces_in_dicom_frames as unet_deface_frames
@@ -87,7 +88,7 @@ class VideoVisionOCRProcessor(FileProcessor):
         self.llm_vision = create_chat_llm(
             config=config,
             timeout=120,
-            max_tokens=256,
+            max_tokens=2048,
             use_vision_model=True,
         )
 
@@ -136,9 +137,18 @@ class VideoVisionOCRProcessor(FileProcessor):
                 config=self.retry_config,
                 on_retry=create_retry_callback(prefix="    [Head scan detection] "),
             )
-            answer = response.content.strip().upper()
-            is_head = answer.startswith("YES")
-            print(f"  Head scan detection: LLM answered '{answer}' -> {'head scan' if is_head else 'not a head scan'}")
+            import re
+            raw_answer = response.content.strip()
+            cleaned = extract_content_from_response(response).upper()
+            yes_no_matches = re.findall(r'\b(YES|NO)\b', cleaned)
+            if yes_no_matches:
+                final_answer = yes_no_matches[-1]
+            else:
+                # No clear YES/NO found — default to NO (safe: triggers face detection)
+                final_answer = "NO"
+                print(f"  Head scan detection: WARNING - could not parse YES/NO from response")
+            is_head = final_answer == "YES"
+            print(f"  Head scan detection: LLM answered '{raw_answer[:200]}{'...' if len(raw_answer) > 200 else ''}' -> final='{final_answer}' -> {'head scan' if is_head else 'not a head scan'}")
             return is_head
         except Exception as e:
             print(f"  Head scan detection failed: {e}. Falling back to standard processing (assuming not a head scan).")

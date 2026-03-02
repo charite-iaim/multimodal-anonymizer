@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 
 from .config import AnonymizerConfig
 from .llm_factory import create_chat_llm
+from .llm_response_utils import strip_thinking_content
 
 
 class PHIDetection(BaseModel):
@@ -365,9 +366,13 @@ class FilenameAnonymizer:
 
         Some models (e.g., kimi-k2.5) return JSON with literal newlines/control characters
         inside string values, which is invalid JSON. This method strips them before parsing.
+        Reasoning models (e.g., DeepSeek, QwQ) may wrap chain-of-thought in <think> tags.
         """
+        # Strip reasoning/chain-of-thought content from thinking models
+        cleaned_text = strip_thinking_content(raw_text)
+
         # Extract JSON object from the response (model may include extra text)
-        json_match = re.search(r'\{.*\}', raw_text, re.DOTALL)
+        json_match = re.search(r'\{.*\}', cleaned_text, re.DOTALL)
         if not json_match:
             raise ValueError(f"No JSON object found in LLM response: {raw_text[:200]}")
 
@@ -459,10 +464,30 @@ IMPORTANT: Respond with ONLY a valid JSON object (no markdown, no extra text). T
 """
 
         try:
-            # Call LLM to detect PII in filename and get anonymized version
+            # Call LLM to detect PII in filename and get anonymized version.
+            # Retry up to 2 times if the model returns reasoning without JSON
+            # (common with thinking models like Qwen3-Thinking).
             message = HumanMessage(content=prompt)
-            raw_response = self.llm.invoke([message])
-            result = self._sanitize_and_parse_json(raw_response.content)
+            result = None
+            last_error = None
+            for attempt in range(3):
+                raw_response = self.llm.invoke([message])
+                try:
+                    result = self._sanitize_and_parse_json(raw_response.content)
+                    break
+                except ValueError as e:
+                    last_error = e
+                    if attempt < 2:
+                        print(f"  Filename anonymization: retrying ({attempt + 1}/3) - model returned no JSON")
+                        # Re-prompt with a stronger instruction to nudge the model
+                        message = HumanMessage(
+                            content=f"Your previous response did not contain valid JSON. "
+                            f"Please respond with ONLY a JSON object, no reasoning or explanation.\n\n"
+                            f"Reminder - analyze this filename: {filename}\n"
+                            f"Return JSON with: original_filename, anonymized_filename, phi_detections"
+                        )
+            if result is None:
+                raise last_error
 
             # Ensure the original file extension is preserved even if the LLM strips it
             if not is_directory:
