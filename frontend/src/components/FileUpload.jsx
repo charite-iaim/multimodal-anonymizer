@@ -3,6 +3,13 @@ import './FileUpload.css'
 import { BsUpload, BsFolder, BsCameraVideo, BsExclamationTriangle } from 'react-icons/bs'
 import PromptSettings from './PromptSettings'
 
+const FUN_MESSAGES = [
+  "Time to grab a coffee ☕",
+  "Still watching? 👀",
+  "Anonymization in progress... almost there!",
+  "Good things come to those who wait..."
+]
+
 // Files to ignore when uploading folders (system files, hidden files, etc.)
 const IGNORED_FILES = ['.DS_Store', 'Thumbs.db', '.gitkeep', '.gitignore']
 const shouldIgnoreFile = (file) => {
@@ -41,6 +48,7 @@ function FileUpload({ backendUrl }) {
   const [error, setError] = useState(null)
   const [fileInfo, setFileInfo] = useState(null)  // Info about the selected file (e.g., DICOM video detection)
   const [checkingFileInfo, setCheckingFileInfo] = useState(false)
+  const [funMessage, setFunMessage] = useState('')
   const fileInputRef = useRef(null)
   const folderInputRef = useRef(null)
 
@@ -53,6 +61,18 @@ function FileUpload({ backendUrl }) {
     if (file && fileInfo?.is_video && fileInfo?.supports_frame_by_frame) return true
     return false
   })()
+
+  // Rotate fun messages while processing
+  useEffect(() => {
+    if (!processing) {
+      setFunMessage('')
+      return
+    }
+    const pick = () => FUN_MESSAGES[Math.floor(Math.random() * FUN_MESSAGES.length)]
+    setFunMessage(pick())
+    const interval = setInterval(() => setFunMessage(pick()), 60_000)
+    return () => clearInterval(interval)
+  }, [processing])
 
   // Fetch video settings on mount and when backend URL changes
   useEffect(() => {
@@ -760,9 +780,9 @@ function FileUpload({ backendUrl }) {
               )}
             </>
           )}
-          <p className="processing-subtext">
-            This may take a few moments depending on {files.length > 0 ? 'the number of files and their sizes' : 'file size'}
-          </p>
+          {funMessage && (
+            <p className="processing-fun-message">{funMessage}</p>
+          )}
         </div>
       )}
     </div>

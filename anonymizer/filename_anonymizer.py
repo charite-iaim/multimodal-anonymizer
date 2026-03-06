@@ -364,9 +364,8 @@ class FilenameAnonymizer:
     def _sanitize_and_parse_json(raw_text: str) -> FilenameAnonymizationResult:
         """Parse LLM response text into FilenameAnonymizationResult, sanitizing control characters.
 
-        Some models (e.g., kimi-k2.5) return JSON with literal newlines/control characters
+        Some models return JSON with literal newlines/control characters or chain-of-thought in <think> tags
         inside string values, which is invalid JSON. This method strips them before parsing.
-        Reasoning models (e.g., DeepSeek, QwQ) may wrap chain-of-thought in <think> tags.
         """
         # Strip reasoning/chain-of-thought content from thinking models
         cleaned_text = strip_thinking_content(raw_text)

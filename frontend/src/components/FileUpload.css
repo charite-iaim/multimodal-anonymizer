@@ -799,6 +799,13 @@
   opacity: 0.8;
 }
 
+.processing-fun-message {
+  font-size: 0.9rem !important;
+  font-style: italic;
+  opacity: 0.7;
+  margin-top: 1rem !important;
+}
+
 /* Feature Warning Styles */
 .feature-warning {
   margin-bottom: 1.5rem;
