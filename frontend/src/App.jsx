@@ -57,6 +57,12 @@ function App() {
           This tool uses AI to detect and redact Personally Identifiable Information from medical records.
           Files are processed locally and not stored permanently.
         </p>
+        <div className="footer-contact">
+          <span>Developed by</span>
+          <a href="mailto:jane.doe@example.com">Jane Doe</a>
+          <span>&</span>
+          <a href="mailto:john.smith@example.com">John Smith</a>
+        </div>
       </footer>
     </div>
   )

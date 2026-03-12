@@ -16,6 +16,7 @@ from dotenv import load_dotenv
 import traceback
 import ssl
 import certifi
+import random
 
 # Fix SSL certificate verification on macOS
 # This is necessary because Python on macOS doesn't always have proper SSL certificates
@@ -49,6 +50,13 @@ from anonymizer.config import AnonymizerConfig
 from anonymizer.filename_anonymizer import FilenameAnonymizer
 from anonymizer.prompt_config import PromptConfig, DEFAULT_PROMPT_CONFIG, get_prompt_descriptions, get_template_variables, validate_all_prompts
 
+def generate_patient_time_offset() -> int:
+    """Generate a random time offset (1-3 years, positive or negative) for a patient."""
+    days = random.randint(365, 1095)
+    if random.random() < 0.5:
+        days = -days
+    return days
+
 app = FastAPI(title="PHI Anonymization API", version="1.0.0")
 
 # Global exception handler to log errors
@@ -75,9 +83,11 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:3000",
-        "http://localhost:5173",  # Vite default port
+        "http://localhost:5173",  # Vite dev server
+        "http://localhost:4173",  # Vite preview server
         "http://127.0.0.1:3000",
         "http://127.0.0.1:5173",
+        "http://127.0.0.1:4173",
         "https://*.github.io",  # GitHub Pages domains
     ],
     allow_credentials=True,
@@ -778,6 +788,20 @@ async def process_folder(
 
             saved_files.append((file_input_path, rel_path))
 
+        # Generate per-patient (top-level folder) time offsets for consistent shifting
+        patient_time_offsets = {}
+        for _, rel_path in saved_files:
+            rel_path_obj = Path(rel_path)
+            if rel_path_obj.parent.parts:
+                # Top-level folder = patient folder
+                patient_folder = rel_path_obj.parent.parts[0]
+            else:
+                # File is at root level, use filename stem as "patient"
+                patient_folder = rel_path_obj.stem
+            if patient_folder not in patient_time_offsets:
+                patient_time_offsets[patient_folder] = generate_patient_time_offset()
+                print(f"  Patient '{patient_folder}': time offset = {patient_time_offsets[patient_folder]} days")
+
         # Pre-anonymize all folder names
         unique_folders = set()
         for _, rel_path in saved_files:
@@ -841,12 +865,20 @@ async def process_folder(
                     phi_detections=filename_result.phi_detections
                 )
 
+                # Get per-patient time offset for this file
+                rel_path_obj_for_offset = Path(rel_path)
+                if rel_path_obj_for_offset.parent.parts:
+                    patient_folder_key = rel_path_obj_for_offset.parent.parts[0]
+                else:
+                    patient_folder_key = rel_path_obj_for_offset.stem
+                time_offset = patient_time_offsets.get(patient_folder_key)
+
                 # Determine processor based on file extension (always use agentic/vision processors)
                 processor = None
                 file_extension = input_path.suffix.lower()
 
                 if file_extension in ['.dcm', '.dicom']:
-                    processor = DICOMProcessor(config, save_intermediate=False, prompt_config=prompt_config, process_all_frames=video_process_all_frames)
+                    processor = DICOMProcessor(config, save_intermediate=False, prompt_config=prompt_config, process_all_frames=video_process_all_frames, time_offset_days=time_offset)
                 elif file_extension in ['.mp4', '.avi', '.mov', '.mkv']:
                     processor = VideoVisionOCRProcessor(config, save_intermediate=False, prompt_config=prompt_config, process_all_frames=video_process_all_frames)
                 elif file_extension == '.pdf':
@@ -854,18 +886,18 @@ async def process_folder(
                 elif file_extension in ['.png', '.jpg', '.jpeg']:
                     processor = ImageProcessor(config, prompt_config=prompt_config)
                 elif file_extension in ['.txt', '.hea']:
-                    processor = TextProcessor(config, prompt_config=prompt_config)
+                    processor = TextProcessor(config, prompt_config=prompt_config, time_offset_days=time_offset)
                 elif file_extension == '.csv':
-                    processor = CSVProcessor(config, prompt_config=prompt_config)
+                    processor = CSVProcessor(config, prompt_config=prompt_config, time_offset_days=time_offset)
                 elif file_extension in ['.xlsx', '.xls']:
-                    processor = ExcelProcessor(config, prompt_config=prompt_config)
+                    processor = ExcelProcessor(config, prompt_config=prompt_config, time_offset_days=time_offset)
                 elif file_extension == '.docx':
-                    processor = DocxProcessor(config, prompt_config=prompt_config)
+                    processor = DocxProcessor(config, prompt_config=prompt_config, time_offset_days=time_offset)
                 elif file_extension in ['.wav', '.mp3']:
-                    processor = AudioProcessor(config, prompt_config=prompt_config)
+                    processor = AudioProcessor(config, prompt_config=prompt_config, time_offset_days=time_offset)
                 else:
                     # Fallback: try DICOM processor for files without extension (common in MIMIC)
-                    test_processor = DICOMProcessor(config, save_intermediate=False, prompt_config=prompt_config, process_all_frames=video_process_all_frames)
+                    test_processor = DICOMProcessor(config, save_intermediate=False, prompt_config=prompt_config, process_all_frames=video_process_all_frames, time_offset_days=time_offset)
                     if test_processor.can_process(input_path):
                         processor = test_processor
 

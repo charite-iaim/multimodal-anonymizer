@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from 'react'
 import './FileUpload.css'
-import { BsUpload, BsFolder, BsCameraVideo, BsExclamationTriangle } from 'react-icons/bs'
+import { BsUpload, BsFolder, BsCameraVideo, BsExclamationTriangle, BsFileEarmark, BsX, BsChevronUp, BsChevronDown } from 'react-icons/bs'
 import PromptSettings from './PromptSettings'
 
 const FUN_MESSAGES = [
@@ -23,6 +23,12 @@ const VIDEO_EXTENSIONS = ['.mp4', '.avi', '.mov', '.mkv']
 // DICOM file extensions
 const DICOM_EXTENSIONS = ['.dcm', '.dicom']
 
+const formatFileSize = (bytes) => {
+  if (bytes < 1024) return bytes + ' B'
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB'
+  return (bytes / (1024 * 1024)).toFixed(1) + ' MB'
+}
+
 const isVideoExtension = (file) => {
   const ext = '.' + file.name.split('.').pop().toLowerCase()
   return VIDEO_EXTENSIONS.includes(ext)
@@ -34,9 +40,7 @@ const isDicomExtension = (file) => {
 }
 
 function FileUpload({ backendUrl }) {
-  const [file, setFile] = useState(null)
-  const [files, setFiles] = useState([])  // For folder uploads
-  const [uploadMode, setUploadMode] = useState('file')  // 'file' or 'folder'
+  const [files, setFiles] = useState([])
   const [dragActive, setDragActive] = useState(false)
   const [processing, setProcessing] = useState(false)
   const [processingProgress, setProcessingProgress] = useState({ current: 0, total: 0 })
@@ -49,16 +53,15 @@ function FileUpload({ backendUrl }) {
   const [fileInfo, setFileInfo] = useState(null)  // Info about the selected file (e.g., DICOM video detection)
   const [checkingFileInfo, setCheckingFileInfo] = useState(false)
   const [funMessage, setFunMessage] = useState('')
+  const [fileListExpanded, setFileListExpanded] = useState(true)
   const fileInputRef = useRef(null)
   const folderInputRef = useRef(null)
 
   // Check if any selected files are videos (either by extension or by DICOM video detection)
   const hasVideoFiles = (() => {
-    // Check regular video files by extension
-    if (file && isVideoExtension(file)) return true
     if (files.some(f => isVideoExtension(f))) return true
     // Check if single DICOM file was detected as video
-    if (file && fileInfo?.is_video && fileInfo?.supports_frame_by_frame) return true
+    if (fileInfo?.is_video && fileInfo?.supports_frame_by_frame) return true
     return false
   })()
 
@@ -194,20 +197,17 @@ function FileUpload({ backendUrl }) {
     }
 
     const hasDirectory = entries.some(entry => entry.isDirectory)
+    const newFiles = []
 
     if (hasDirectory) {
       // Recursively read all files from dropped directories (and include loose files)
-      const allFiles = []
-
       const readEntry = (entry, path) => {
         return new Promise((resolve) => {
           if (entry.isFile) {
             entry.file((file) => {
               if (!shouldIgnoreFile(file)) {
-                // Attach relative path so the backend can reconstruct folder structure
-                // webkitRelativePath is read-only on File, so use a custom property
                 file._relativePath = path + file.name
-                allFiles.push(file)
+                newFiles.push(file)
               }
               resolve()
             }, () => resolve())
@@ -222,7 +222,6 @@ function FileUpload({ backendUrl }) {
                 await Promise.all(
                   dirEntries.map(child => readEntry(child, path + entry.name + '/'))
                 )
-                // readEntries may not return all entries at once, keep reading
                 readBatch()
               }, () => resolve())
             }
@@ -234,60 +233,49 @@ function FileUpload({ backendUrl }) {
       }
 
       await Promise.all(entries.map(entry => readEntry(entry, '')))
-
-      if (allFiles.length > 0) {
-        setFiles(allFiles)
-        setFile(null)
-        setUploadMode('folder')
-      }
     } else if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
-      if (uploadMode === 'folder' || e.dataTransfer.files.length > 1) {
-        const fileList = Array.from(e.dataTransfer.files).filter(f => !shouldIgnoreFile(f))
-        if (fileList.length > 0) {
-          setFiles(fileList)
-          setFile(null)
-          setUploadMode('folder')
-        }
-      } else {
-        const droppedFile = e.dataTransfer.files[0]
-        if (!shouldIgnoreFile(droppedFile)) {
-          setFile(droppedFile)
-          setFiles([])
-          setFileInfo(null)
-          // Check if DICOM file is a video
-          checkFileInfo(droppedFile)
-        }
-      }
+      Array.from(e.dataTransfer.files).filter(f => !shouldIgnoreFile(f)).forEach(f => newFiles.push(f))
+    }
+
+    if (newFiles.length > 0) {
+      // Append to existing files
+      setFiles(prev => [...prev, ...newFiles])
     }
     setResult(null)
     setError(null)
   }
 
   const handleFileChange = (e) => {
-    if (e.target.files && e.target.files[0]) {
-      const selectedFile = e.target.files[0]
-      setFile(selectedFile)
-      setFiles([])
-      setUploadMode('file')
-      setResult(null)
-      setError(null)
-      setFileInfo(null)
-      // Check if DICOM file is a video
-      checkFileInfo(selectedFile)
+    if (e.target.files && e.target.files.length > 0) {
+      const newFiles = Array.from(e.target.files).filter(f => !shouldIgnoreFile(f))
+      if (newFiles.length > 0) {
+        // Append to existing files
+        setFiles(prev => [...prev, ...newFiles])
+
+        setResult(null)
+        setError(null)
+        // Check if any new DICOM file is a video
+        if (newFiles.length === 1 && isDicomExtension(newFiles[0])) {
+          checkFileInfo(newFiles[0])
+        }
+      }
+      // Reset input so the same file can be selected again
+      e.target.value = ''
     }
   }
 
   const handleFolderChange = (e) => {
     if (e.target.files && e.target.files.length > 0) {
-      const fileList = Array.from(e.target.files).filter(f => !shouldIgnoreFile(f))
-      if (fileList.length > 0) {
-        setFiles(fileList)
-        setFile(null)
-        setUploadMode('folder')
+      const newFiles = Array.from(e.target.files).filter(f => !shouldIgnoreFile(f))
+      if (newFiles.length > 0) {
+        // Append to existing files
+        setFiles(prev => [...prev, ...newFiles])
+
         setResult(null)
         setError(null)
-        setFileInfo(null)  // Clear file info for folder uploads
       }
+      // Reset input so the same folder can be selected again
+      e.target.value = ''
     }
   }
 
@@ -300,7 +288,7 @@ function FileUpload({ backendUrl }) {
   }
 
   const handleProcess = async () => {
-    if (!file && files.length === 0) {
+    if (files.length === 0) {
       setError('Please select a file or folder first')
       return
     }
@@ -319,11 +307,28 @@ function FileUpload({ backendUrl }) {
     setProcessing(true)
     setError(null)
     setResult(null)
-    setProcessingProgress({ current: 0, total: uploadMode === 'folder' ? files.length : 1 })
+    setProcessingProgress({ current: 0, total: files.length })
 
     try {
-      if (uploadMode === 'folder' && files.length > 0) {
-        // Generate a job ID for progress tracking
+      if (files.length === 1) {
+        // Single file upload
+        const formData = new FormData()
+        formData.append('file', files[0])
+
+        const response = await fetch(`${backendUrl}/api/process`, {
+          method: 'POST',
+          body: formData,
+        })
+
+        if (!response.ok) {
+          const errorData = await response.json()
+          throw new Error(errorData.detail || 'Processing failed')
+        }
+
+        const data = await response.json()
+        setResult(data)
+      } else {
+        // Multiple files upload
         const jobId = crypto.randomUUID()
 
         // Start listening to progress updates via SSE
@@ -343,10 +348,8 @@ function FileUpload({ backendUrl }) {
           eventSource.close()
         }
 
-        // Folder upload - send multiple files
         const formData = new FormData()
         files.forEach((f) => {
-          // Preserve relative path if available
           const relativePath = f.webkitRelativePath || f._relativePath || f.name
           formData.append('files', f)
           formData.append('paths', relativePath)
@@ -359,23 +362,6 @@ function FileUpload({ backendUrl }) {
         })
 
         eventSource.close()
-
-        if (!response.ok) {
-          const errorData = await response.json()
-          throw new Error(errorData.detail || 'Processing failed')
-        }
-
-        const data = await response.json()
-        setResult(data)
-      } else {
-        // Single file upload
-        const formData = new FormData()
-        formData.append('file', file)
-
-        const response = await fetch(`${backendUrl}/api/process`, {
-          method: 'POST',
-          body: formData,
-        })
 
         if (!response.ok) {
           const errorData = await response.json()
@@ -414,6 +400,19 @@ function FileUpload({ backendUrl }) {
     }
   }
 
+  const clearSelection = () => {
+    setFiles([])
+    setResult(null)
+    setError(null)
+    setFileInfo(null)
+    if (fileInputRef.current) {
+      fileInputRef.current.value = ''
+    }
+    if (folderInputRef.current) {
+      folderInputRef.current.value = ''
+    }
+  }
+
   const handleReset = async () => {
     // Check if backend config is still valid before resetting
     try {
@@ -443,19 +442,7 @@ function FileUpload({ backendUrl }) {
       }
     }
 
-    // Config is still valid, just reset the file upload state
-    setFile(null)
-    setFiles([])
-    setUploadMode('file')
-    setResult(null)
-    setError(null)
-    setFileInfo(null)
-    if (fileInputRef.current) {
-      fileInputRef.current.value = ''
-    }
-    if (folderInputRef.current) {
-      folderInputRef.current.value = ''
-    }
+    clearSelection()
   }
 
   return (
@@ -534,7 +521,7 @@ function FileUpload({ backendUrl }) {
       )}
 
       <div
-        className={`drop-zone ${dragActive ? 'active' : ''} ${file || files.length > 0 ? 'has-file' : ''}`}
+        className={`drop-zone ${dragActive ? 'active' : ''}`}
         onDragEnter={handleDrag}
         onDragLeave={handleDrag}
         onDragOver={handleDrag}
@@ -546,6 +533,7 @@ function FileUpload({ backendUrl }) {
           className="file-input"
           onChange={handleFileChange}
           accept=".png,.jpg,.jpeg,.csv,.txt,.dcm,.dicom,.pdf,.hea,.docx,.xlsx,.xls,.mp4,.avi,.mov,.mkv,.wav,.mp3"
+          multiple
         />
         <input
           ref={folderInputRef}
@@ -557,100 +545,113 @@ function FileUpload({ backendUrl }) {
           multiple
         />
 
-        {file ? (
-          <div className="file-info">
-            <div className="file-icon">📄</div>
-            <div className="file-details">
-              <p className="file-name">{file.name}</p>
-              <p className="file-size">
-                {(file.size / 1024).toFixed(2)} KB
-              </p>
-            </div>
+        <div className="drop-zone-content">
+          <div className="upload-icon"><BsUpload /></div>
+          <p className="drop-zone-text">
+            Drag and drop files or folders
+          </p>
+          <p className="drop-zone-subtext">or choose from your computer</p>
+          <p className="supported-formats">
+            Supports CSV, Excel, Word, Text, PDF, Images, DICOM, Video, Audio, and HEA files.
+          </p>
+          <div className="browse-buttons">
             <button
-              className="remove-file"
-              onClick={handleReset}
+              type="button"
+              className="browse-button browse-folder"
+              onClick={handleFolderButtonClick}
               disabled={processing}
             >
-              ✕
+              <BsFolder /> {files.length > 0 ? 'Add Folder' : 'Select Folder'}
+            </button>
+            <button
+              type="button"
+              className="browse-button"
+              onClick={handleButtonClick}
+              disabled={processing}
+            >
+              <BsFileEarmark /> {files.length > 0 ? 'Add Files' : 'Select Files'}
             </button>
           </div>
-        ) : files.length > 0 ? (
-          <div className="folder-info">
-            <div className="folder-header">
-              <div className="file-icon"><BsFolder /></div>
-              <div className="file-details">
-                <p className="file-name">
-                  {(files[0].webkitRelativePath || files[0]._relativePath) ? (files[0].webkitRelativePath || files[0]._relativePath).split('/')[0] : 'Selected Files'}
-                </p>
-                <p className="file-size">
-                  {files.length} files ({(files.reduce((sum, f) => sum + f.size, 0) / 1024).toFixed(2)} KB total)
-                </p>
-              </div>
+        </div>
+
+        {files.length > 0 && (
+          <div className="file-list-section">
+            <div className="file-list-header">
+              <span className="file-list-summary">
+                {files.length} file{files.length !== 1 ? 's' : ''} ({formatFileSize(files.reduce((sum, f) => sum + f.size, 0))})
+              </span>
               <button
-                className="remove-file"
-                onClick={handleReset}
-                disabled={processing}
+                className="file-list-toggle"
+                onClick={(e) => {
+                  e.stopPropagation()
+                  setFileListExpanded(prev => !prev)
+                }}
+                type="button"
               >
-                ✕
+                {fileListExpanded ? <BsChevronUp /> : <BsChevronDown />}
               </button>
             </div>
-            <div className="folder-file-list">
-              {files.slice(0, 10).map((f, idx) => (
-                <div key={idx} className="folder-file-item">
-                  <span className="folder-file-name">{f.webkitRelativePath || f._relativePath || f.name}</span>
-                  <span className="folder-file-size">{(f.size / 1024).toFixed(1)} KB</span>
-                </div>
-              ))}
-              {files.length > 10 && (
-                <div className="folder-file-more">
-                  ... and {files.length - 10} more files
-                </div>
+            {fileListExpanded && (
+              <div className="file-list-items">
+                {files.map((f, idx) => (
+                  <div key={idx} className="file-list-item">
+                    <span className="file-list-icon"><BsFileEarmark /></span>
+                    <span className="file-list-name">{f.webkitRelativePath || f._relativePath || f.name}</span>
+                    <span className="file-list-size">{formatFileSize(f.size)}</span>
+                    <button
+                      className="file-list-remove"
+                      onMouseDown={(e) => {
+                        e.stopPropagation()
+                        e.preventDefault()
+                        const newFiles = files.filter((_, i) => i !== idx)
+                        if (newFiles.length === 0) {
+                          clearSelection()
+                        } else {
+                          setFiles(newFiles)
+                        }
+                      }}
+                      disabled={processing}
+                      type="button"
+                      title="Remove file"
+                      tabIndex={-1}
+                    >
+                      <BsX />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+            <div className="file-list-actions">
+              <button
+                className="remove-files-button"
+                onClick={(e) => {
+                  e.stopPropagation()
+                  clearSelection()
+                }}
+                disabled={processing}
+                type="button"
+              >
+                Remove Files
+              </button>
+              {!result && (
+                <button
+                  className="upload-button"
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    handleProcess()
+                  }}
+                  disabled={processing}
+                  type="button"
+                >
+                  {processing
+                    ? `Processing${processingProgress.total > 1 && processingProgress.current > 0 ? ` (${processingProgress.current}/${processingProgress.total})` : ''}...`
+                    : 'Process Files'}
+                </button>
               )}
             </div>
           </div>
-        ) : (
-          <div className="drop-zone-content">
-            <div className="upload-icon"><BsUpload /></div>
-            <p className="drop-zone-text">
-              Drag and drop your files here
-            </p>
-            <p className="drop-zone-subtext">or</p>
-            <div className="browse-buttons">
-              <button
-                type="button"
-                className="browse-button"
-                onClick={handleButtonClick}
-              >
-                Browse Files
-              </button>
-              <button
-                type="button"
-                className="browse-button browse-folder"
-                onClick={handleFolderButtonClick}
-              >
-                <BsFolder /> Browse Folder
-              </button>
-            </div>
-            <p className="supported-formats">
-              Supported: PNG, JPG, JPEG, CSV, TXT, DOCX, DICOM, PDF, HEA, Excel, MP4, AVI, MOV, WAV, MP3
-            </p>
-          </div>
         )}
       </div>
-
-      {(file || files.length > 0) && !result && (
-        <button
-          className="process-button"
-          onClick={handleProcess}
-          disabled={processing}
-        >
-          {processing
-            ? `Processing${processingProgress.total > 1 && processingProgress.current > 0 ? ` (${processingProgress.current}/${processingProgress.total})` : ''}...`
-            : files.length > 0
-              ? `Anonymize ${files.length} Files`
-              : 'Anonymize File'}
-        </button>
-      )}
 
       {error && (
         <div className="error-message">
