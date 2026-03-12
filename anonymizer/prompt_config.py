@@ -359,6 +359,57 @@ IMPORTANT:
 - If a tag value contains no PII, skip it entirely
 """)
 
+    # Audio transcript anonymization prompt
+    audio_anonymization_prompt: str = field(default="""You are an anonymization specialist for medical audio transcripts.
+
+Your task is to identify and redact all Personal Identifiable Information (PII) in this transcript.
+
+TRANSCRIPT:
+{transcript}
+
+Use the `redact_text` tool to replace each PII item with appropriate placeholders.
+
+PII to redact includes:
+- Patient names, doctor names, staff names
+- Hospital names, clinic names, facility names
+- Street addresses, city names, specific locations
+- Phone numbers, fax numbers
+- Email addresses
+- Social Security numbers, medical record numbers, patient IDs
+- Dates of birth (if specific dates, shift them; if "date of birth" as phrase, keep as placeholder)
+- Ages (if combined with other identifying information)
+- Any other information that could identify a specific individual
+
+IMPORTANT:
+- Keep medical terms, diagnoses, treatments, medications intact
+- Replace names with [NAME], [DOCTOR], [HOSPITAL], etc.
+- Replace specific numbers/IDs with [ID], [PHONE], [MRN], etc.
+- Preserve sentence structure and natural language flow
+
+Call the `redact_text` tool for each PII item found. When done, respond with "ANONYMIZATION COMPLETE".
+""")
+
+    # Audio transcript verification prompt
+    audio_verification_prompt: str = field(default="""You are a verification agent for medical transcript anonymization.
+
+Compare the original and anonymized transcripts below. Look for ANY remaining PII that was missed.
+
+ORIGINAL TRANSCRIPT:
+{original_text}
+
+ANONYMIZED TRANSCRIPT:
+{anonymized_text}
+
+TIME OFFSET USED: {time_offset} days
+
+Your task:
+1. Check if any names, locations, IDs, or other PII remain in the anonymized version
+2. Check if any dates were not properly shifted
+3. Use `redact_text` or `shift_datetime` tools to fix any issues found
+
+When verification is complete and no more issues found, respond with "VERIFICATION COMPLETE".
+""")
+
     # Additional instructions that get appended to all prompts
     additional_instructions: str = field(default="")
 
@@ -375,6 +426,8 @@ IMPORTANT:
             "pdf_anonymization_prompt": self.pdf_anonymization_prompt,
             "pdf_verification_prompt": self.pdf_verification_prompt,
             "dicom_metadata_anonymization_prompt": self.dicom_metadata_anonymization_prompt,
+            "audio_anonymization_prompt": self.audio_anonymization_prompt,
+            "audio_verification_prompt": self.audio_verification_prompt,
             "additional_instructions": self.additional_instructions,
         }
 
@@ -394,6 +447,8 @@ IMPORTANT:
             pdf_anonymization_prompt=data.get("pdf_anonymization_prompt", defaults.pdf_anonymization_prompt),
             pdf_verification_prompt=data.get("pdf_verification_prompt", defaults.pdf_verification_prompt),
             dicom_metadata_anonymization_prompt=data.get("dicom_metadata_anonymization_prompt", defaults.dicom_metadata_anonymization_prompt),
+            audio_anonymization_prompt=data.get("audio_anonymization_prompt", defaults.audio_anonymization_prompt),
+            audio_verification_prompt=data.get("audio_verification_prompt", defaults.audio_verification_prompt),
             additional_instructions=data.get("additional_instructions", ""),
         )
 
@@ -497,6 +552,29 @@ IMPORTANT:
             prompt += f"\n\nAdditional Instructions:\n{self.additional_instructions}"
         return prompt
 
+    def get_audio_anonymization_prompt(self, transcript: str) -> str:
+        """Get formatted audio transcript anonymization prompt."""
+        prompt = self.audio_anonymization_prompt.format(transcript=transcript)
+        if self.additional_instructions:
+            prompt += f"\n\nAdditional Instructions:\n{self.additional_instructions}"
+        return prompt
+
+    def get_audio_verification_prompt(
+        self,
+        original_text: str,
+        anonymized_text: str,
+        time_offset: int
+    ) -> str:
+        """Get formatted audio transcript verification prompt."""
+        prompt = self.audio_verification_prompt.format(
+            original_text=original_text,
+            anonymized_text=anonymized_text,
+            time_offset=time_offset
+        )
+        if self.additional_instructions:
+            prompt += f"\n\nAdditional Instructions:\n{self.additional_instructions}"
+        return prompt
+
 
 # Default prompt configuration instance
 DEFAULT_PROMPT_CONFIG = PromptConfig()
@@ -515,6 +593,8 @@ def get_prompt_descriptions() -> Dict[str, str]:
         "pdf_anonymization_prompt": "Finds PII in PDF pages by combining Vision AI with OCR-detected text.",
         "pdf_verification_prompt": "Checks redacted PDF pages to verify that all PII has been properly covered by black boxes.",
         "dicom_metadata_anonymization_prompt": "Anonymizes free-text fields in DICOM file headers (e.g. physician names, hospital names embedded in metadata).",
+        "audio_anonymization_prompt": "Finds and redacts PII in audio transcripts (names, locations, IDs, etc.) after speech-to-text conversion.",
+        "audio_verification_prompt": "Quality check for audio transcripts. Compares original with anonymized transcript to catch missed PII.",
         "additional_instructions": "Extra instructions appended to ALL prompts. Use this to add domain-specific rules or exceptions.",
     }
 
@@ -532,6 +612,8 @@ REQUIRED_TEMPLATE_VARIABLES: Dict[str, list] = {
     "pdf_anonymization_prompt": ["{ocr_text_list}"],
     "pdf_verification_prompt": [],
     "dicom_metadata_anonymization_prompt": ["{tag_data}"],
+    "audio_anonymization_prompt": ["{transcript}"],
+    "audio_verification_prompt": ["{original_text}", "{anonymized_text}", "{time_offset}"],
     "additional_instructions": [],
 }
 

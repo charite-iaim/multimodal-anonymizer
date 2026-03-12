@@ -26,7 +26,8 @@ from ..base_processor import FileProcessor
 from ..config import AnonymizerConfig
 from ..prompt_config import PromptConfig, DEFAULT_PROMPT_CONFIG
 from ..llm_factory import create_chat_llm
-from ..tools.time_shift_tool import shift_datetime_value, redact_text
+from ..tools.time_shift_tool import shift_datetime_value
+from ..tools.redact_tool import redact_text
 from ..retry_utils import retry_with_backoff, RetryConfig, create_retry_callback
 from ..llm_response_utils import extract_content_from_response, get_reasoning_content_from_response
 from .png_vision_ocr_processor import PNGVisionOCRProcessor

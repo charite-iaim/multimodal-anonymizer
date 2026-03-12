@@ -25,7 +25,8 @@ from pydantic import BaseModel, Field
 from ..base_processor import FileProcessor
 from ..config import AnonymizerConfig
 from ..llm_factory import create_chat_llm
-from ..tools.time_shift_tool import shift_datetime, redact_text
+from ..tools.time_shift_tool import shift_datetime
+from ..tools.redact_tool import redact_text
 from ..retry_utils import retry_with_backoff, RetryConfig, create_retry_callback
 from ..prompt_config import PromptConfig, DEFAULT_PROMPT_CONFIG
 
@@ -36,7 +37,7 @@ try:
 except ImportError:
     WHISPER_AVAILABLE = False
 
-# Kokoro TTS import (lightweight ONNX-based TTS, ~80MB, Python 3.13 compatible)
+# Kokoro TTS import
 try:
     from kokoro_onnx import Kokoro
     import soundfile as sf
@@ -66,11 +67,6 @@ class AgenticAudioProcessor(FileProcessor):
     2. LLM anonymizes the transcript (removes PII, shifts dates)
     3. Kokoro TTS converts anonymized text back to speech
     4. Audio is saved in the original format
-
-    All processing runs locally except for LLM anonymization.
-
-    Kokoro TTS is a lightweight ONNX-based TTS (~300MB) with good quality output.
-    Multiple voices are available (af_heart, af_bella, am_adam, am_michael, bf_emma, etc.).
     """
 
     # Supported audio formats
@@ -430,34 +426,7 @@ class AgenticAudioProcessor(FileProcessor):
         redaction_count = 0
 
         # Build prompt for audio transcript anonymization
-        prompt = f"""You are an anonymization specialist for medical audio transcripts.
-
-Your task is to identify and redact all Personal Identifiable Information (PII) in this transcript.
-
-TRANSCRIPT:
-{text}
-
-Use the `redact_text` tool to replace each PII item with appropriate placeholders.
-
-PII to redact includes:
-- Patient names, doctor names, staff names
-- Hospital names, clinic names, facility names
-- Street addresses, city names, specific locations
-- Phone numbers, fax numbers
-- Email addresses
-- Social Security numbers, medical record numbers, patient IDs
-- Dates of birth (if specific dates, shift them; if "date of birth" as phrase, keep as placeholder)
-- Ages (if combined with other identifying information)
-- Any other information that could identify a specific individual
-
-IMPORTANT:
-- Keep medical terms, diagnoses, treatments, medications intact
-- Replace names with [NAME], [DOCTOR], [HOSPITAL], etc.
-- Replace specific numbers/IDs with [ID], [PHONE], [MRN], etc.
-- Preserve sentence structure and natural language flow
-
-Call the `redact_text` tool for each PII item found. When done, respond with "ANONYMIZATION COMPLETE".
-"""
+        prompt = self.prompt_config.get_audio_anonymization_prompt(transcript=text)
 
         messages = [HumanMessage(content=prompt)]
 
@@ -536,25 +505,11 @@ Call the `redact_text` tool for each PII item found. When done, respond with "AN
         modified_text = anonymized_text
         fixes = 0
 
-        prompt = f"""You are a verification agent for medical transcript anonymization.
-
-Compare the original and anonymized transcripts below. Look for ANY remaining PII that was missed.
-
-ORIGINAL TRANSCRIPT:
-{original_text}
-
-ANONYMIZED TRANSCRIPT:
-{anonymized_text}
-
-TIME OFFSET USED: {self.time_offset_days} days
-
-Your task:
-1. Check if any names, locations, IDs, or other PII remain in the anonymized version
-2. Check if any dates were not properly shifted
-3. Use `redact_text` or `shift_datetime` tools to fix any issues found
-
-When verification is complete and no more issues found, respond with "VERIFICATION COMPLETE".
-"""
+        prompt = self.prompt_config.get_audio_verification_prompt(
+            original_text=original_text,
+            anonymized_text=anonymized_text,
+            time_offset=self.time_offset_days
+        )
 
         messages = [HumanMessage(content=prompt)]
         max_iterations = 30

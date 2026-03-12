@@ -6,8 +6,12 @@ from .time_shift_tool import (
     shift_datetime,
     shift_datetime_value,
     find_and_shift_all_dates,
+)
+
+from .redact_tool import (
     redact_text,
     redact_text_value,
+    redact_column,
 )
 
 from .face_detection_tool import (
@@ -25,6 +29,7 @@ __all__ = [
     "find_and_shift_all_dates",
     "redact_text",
     "redact_text_value",
+    "redact_column",
     # Face detection tools
     "detect_faces",
     "detect_faces_from_pil",

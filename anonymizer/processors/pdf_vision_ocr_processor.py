@@ -13,8 +13,6 @@ from PIL import Image
 from datetime import datetime
 from typing import List
 
-# Increase PIL's max image pixels limit to handle high-DPI PDF conversions
-# Default limit is ~178M pixels which can be exceeded by large PDFs at 300 DPI
 Image.MAX_IMAGE_PIXELS = 300000000  # 300 million pixels
 
 try:
