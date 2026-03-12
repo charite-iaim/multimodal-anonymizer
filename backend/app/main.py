@@ -129,44 +129,6 @@ async def root():
     }
 
 
-@app.post("/api/config/dev")
-async def use_dev_config():
-    """Use development configuration from environment variables."""
-    global config
-
-    try:
-        # Try to load from environment variables
-        azure_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
-        azure_api_key = os.getenv("AZURE_OPENAI_API_KEY")
-        azure_deployment = os.getenv("AZURE_DEPLOYMENT_NAME")
-
-        if not all([azure_endpoint, azure_api_key, azure_deployment]):
-            raise HTTPException(
-                status_code=400,
-                detail="Development credentials not found in environment variables. "
-                       "Please set AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_API_KEY, and AZURE_DEPLOYMENT_NAME"
-            )
-
-        config = AnonymizerConfig(
-            llm_provider="azure",
-            azure_endpoint=azure_endpoint,
-            azure_api_key=azure_api_key,
-            azure_deployment_name=azure_deployment,
-            azure_api_version=os.getenv("AZURE_API_VERSION", "2024-08-01-preview"),
-            model_name=os.getenv("MODEL_NAME", "gpt-4o-mini"),
-        )
-
-        return {
-            "status": "success",
-            "message": "Using development configuration",
-            "mode": "dev"
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Invalid configuration: {str(e)}")
-
-
 @app.post("/api/config/custom")
 async def set_custom_llm(llm_config: CustomLLMConfig):
     """
@@ -178,25 +140,76 @@ async def set_custom_llm(llm_config: CustomLLMConfig):
     - vLLM: http://localhost:8000/v1
     - LocalAI: http://localhost:8080/v1
     - Any other OpenAI-compatible server
+
+    Validates the connection by sending a test message to the LLM.
     """
     global config
 
     try:
-        config = AnonymizerConfig(
+        test_config = AnonymizerConfig(
             llm_provider="local",
             local_base_url=llm_config.llm_url,
             local_model=llm_config.model_name,
             local_api_key=llm_config.api_key,
         )
-
-        return {
-            "status": "success",
-            "message": f"Connected to local LLM at {llm_config.llm_url} using model '{llm_config.model_name}'",
-            "mode": "custom",
-            "model": llm_config.model_name
-        }
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Invalid configuration: {str(e)}")
+
+    # Test the connection by sending a simple message to the LLM
+    try:
+        from anonymizer.llm_factory import create_chat_llm
+        llm = create_chat_llm(test_config, temperature=0.0, timeout=15, max_tokens=50)
+        response = await asyncio.to_thread(llm.invoke, "Reply with OK.")
+        if not response or not response.content:
+            raise HTTPException(
+                status_code=502,
+                detail=f"LLM at {llm_config.llm_url} returned an empty response. "
+                       f"Please check that the model '{llm_config.model_name}' is available."
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        error_msg = str(e)
+        # Provide user-friendly error messages for common failures
+        if "Connection refused" in error_msg or "ConnectError" in error_msg:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Could not connect to LLM server at {llm_config.llm_url}. "
+                       f"Make sure the server is running and the URL is correct."
+            )
+        elif "404" in error_msg or "Not Found" in error_msg:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Model '{llm_config.model_name}' not found at {llm_config.llm_url}. "
+                       f"Check that the model name is correct and the model is downloaded/loaded."
+            )
+        elif "401" in error_msg or "Unauthorized" in error_msg or "403" in error_msg:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Authentication failed for {llm_config.llm_url}. "
+                       f"Please provide a valid API key."
+            )
+        elif "timeout" in error_msg.lower() or "timed out" in error_msg.lower():
+            raise HTTPException(
+                status_code=504,
+                detail=f"Connection to {llm_config.llm_url} timed out. "
+                       f"The server may be starting up or the model may be loading. Please try again."
+            )
+        else:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Failed to connect to LLM: {error_msg}"
+            )
+
+    # Connection test passed — save the config
+    config = test_config
+
+    return {
+        "status": "success",
+        "message": f"Connected to local LLM at {llm_config.llm_url} using model '{llm_config.model_name}'",
+        "mode": "custom",
+        "model": llm_config.model_name
+    }
 
 
 @app.get("/api/config/status")
