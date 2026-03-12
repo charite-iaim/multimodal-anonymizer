@@ -36,15 +36,15 @@ load_dotenv()
 # Add parent directory to path to import anonymizer package
 sys.path.append(str(Path(__file__).parent.parent.parent))
 
-from anonymizer.processors.png_vision_ocr_processor import PNGVisionOCRProcessor
-from anonymizer.processors.dicom_vision_ocr_processor import DICOMVisionOCRProcessor, get_dicom_info
-from anonymizer.processors.pdf_vision_ocr_processor import PDFVisionOCRProcessor
-from anonymizer.processors.video_vision_ocr_processor import VideoVisionOCRProcessor
-from anonymizer.processors.agentic_csv_processor import AgenticCSVProcessor
-from anonymizer.processors.agentic_excel_processor import AgenticExcelProcessor
-from anonymizer.processors.agentic_text_processor import AgenticTextProcessor
-from anonymizer.processors.agentic_docx_processor import AgenticDocxProcessor
-from anonymizer.processors.agentic_audio_processor import AgenticAudioProcessor
+from anonymizer.processors.image_processor import PNGVisionOCRProcessor
+from anonymizer.processors.dicom_processor import DICOMVisionOCRProcessor, get_dicom_info
+from anonymizer.processors.pdf_processor import PDFVisionOCRProcessor
+from anonymizer.processors.video_processor import VideoVisionOCRProcessor
+from anonymizer.processors.csv_processor import AgenticCSVProcessor
+from anonymizer.processors.excel_processor import AgenticExcelProcessor
+from anonymizer.processors.text_processor import AgenticTextProcessor
+from anonymizer.processors.docx_processor import AgenticDocxProcessor
+from anonymizer.processors.audio_processor import AgenticAudioProcessor
 from anonymizer.config import AnonymizerConfig
 from anonymizer.filename_anonymizer import FilenameAnonymizer
 from anonymizer.prompt_config import PromptConfig, DEFAULT_PROMPT_CONFIG, get_prompt_descriptions, get_template_variables, validate_all_prompts

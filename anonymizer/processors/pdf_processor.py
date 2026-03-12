@@ -23,7 +23,7 @@ except ImportError:
 
 from ..base_processor import FileProcessor
 from ..config import AnonymizerConfig
-from .png_vision_ocr_processor import PNGVisionOCRProcessor
+from .image_processor import PNGVisionOCRProcessor
 from ..models import PIIDetectionResult
 from ..prompt_config import PromptConfig, DEFAULT_PROMPT_CONFIG
 

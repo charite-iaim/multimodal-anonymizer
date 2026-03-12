@@ -30,7 +30,7 @@ from ..tools.time_shift_tool import shift_datetime_value
 from ..tools.redact_tool import redact_text
 from ..retry_utils import retry_with_backoff, RetryConfig, create_retry_callback
 from ..llm_response_utils import extract_content_from_response, get_reasoning_content_from_response
-from .png_vision_ocr_processor import PNGVisionOCRProcessor
+from .image_processor import PNGVisionOCRProcessor
 from ..tools.face_detection_tool import detect_faces_in_image, redact_faces_in_pil_image
 from .dicom_face_redaction_processor import get_face_redaction_masks_for_frames
 

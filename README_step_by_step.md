@@ -47,17 +47,6 @@ cd mimiciv-anonymization-pipeline
 load models from git lfs
 brew install git-lfs
 
-### 2. Configure Azure Credentials
-
-Create a `.env` file in the project root with your Azure OpenAI credentials:
-
-```bash
-AZURE_OPENAI_API_KEY=your_azure_openai_api_key
-AZURE_OPENAI_ENDPOINT=your_azure_openai_endpoint
-AZURE_OPENAI_API_VERSION=your_azure_openai_api_version
-AZURE_DEPLOYMENT_NAME=your_azure_deployment_name
-```
-
 ### 3. Set Up Python Virtual Environment
 
 ```bash
@@ -69,7 +58,7 @@ source .venv/bin/activate
 
 # Install Python dependencies
 pip install -r requirements.txt
-pip install -r backend/requirements.txt
+# pip install -r backend/requirements.txt
 ```
 
 ### 4. Install Frontend Dependencies

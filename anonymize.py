@@ -3,15 +3,15 @@
 Main script for anonymizing files using LLM-based processors.
 
 Processors:
-- AgenticCSVProcessor for CSV files (tool-calling approach)
-- AgenticExcelProcessor for Excel files (tool-calling approach)
-- AgenticTextProcessor for text files (tool-calling approach)
-- AgenticDocxProcessor for Word documents (tool-calling approach)
-- AgenticAudioProcessor for audio files .wav/.mp3 (Whisper + LLM + TTS)
-- DICOMVisionOCRProcessor for DICOM images (Vision LLM + OCR)
-- PDFVisionOCRProcessor for PDF files (Vision LLM + OCR)
-- PNGVisionOCRProcessor for PNG/JPG images (Vision LLM + OCR)
-- VideoVisionOCRProcessor for video files like MP4 (Vision LLM + OCR, first-frame detection)
+- CSVProcessor for CSV files (tool-calling approach)
+- ExcelProcessor for Excel files (tool-calling approach)
+- TextProcessor for text files (tool-calling approach)
+- DocxProcessor for Word documents (tool-calling approach)
+- AudioProcessor for audio files .wav/.mp3 (Whisper + LLM + TTS)
+- DICOMProcessor for DICOM images (Vision LLM + OCR)
+- PDFProcessor for PDF files (Vision LLM + OCR)
+- ImageProcessor for images (Vision LLM + OCR)
+- VideoProcessor for video files (Vision LLM + OCR, first-frame detection)
 """
 
 import argparse
@@ -23,15 +23,15 @@ from anonymizer import (
     FileTypeDetector,
     DataType,
 )
-from anonymizer.processors.agentic_csv_processor import AgenticCSVProcessor
-from anonymizer.processors.agentic_excel_processor import AgenticExcelProcessor
-from anonymizer.processors.agentic_text_processor import AgenticTextProcessor
-from anonymizer.processors.agentic_docx_processor import AgenticDocxProcessor
-from anonymizer.processors.agentic_audio_processor import AgenticAudioProcessor
-from anonymizer.processors.dicom_vision_ocr_processor import DICOMVisionOCRProcessor
-from anonymizer.processors.pdf_vision_ocr_processor import PDFVisionOCRProcessor
-from anonymizer.processors.png_vision_ocr_processor import PNGVisionOCRProcessor
-from anonymizer.processors.video_vision_ocr_processor import VideoVisionOCRProcessor
+from anonymizer.processors.csv_processor import AgenticCSVProcessor
+from anonymizer.processors.excel_processor import AgenticExcelProcessor
+from anonymizer.processors.text_processor import AgenticTextProcessor
+from anonymizer.processors.docx_processor import AgenticDocxProcessor
+from anonymizer.processors.audio_processor import AgenticAudioProcessor
+from anonymizer.processors.dicom_processor import DICOMVisionOCRProcessor
+from anonymizer.processors.pdf_processor import PDFVisionOCRProcessor
+from anonymizer.processors.image_processor import PNGVisionOCRProcessor
+from anonymizer.processors.video_processor import VideoVisionOCRProcessor
 from anonymizer.filename_anonymizer import FilenameAnonymizer
 from anonymizer.processing_tracker import ProcessingTracker
 from anonymizer.parallel_processor import (
@@ -74,10 +74,9 @@ def generate_patient_time_offset() -> int:
         int: Time offset in days (between 365-1095 or -1095 to -365)
     """
     import random
-    # Random offset between 1-3 years (365-1095 days)
-    # This gives us a truly random value, e.g., 1 year 2 months, 2 years 7 months, etc.
+    # Random offset between 1-3 years in days
     days = random.randint(365, 1095)
-    # Random sign (positive or negative)
+    # Random sign (+/-)
     if random.random() < 0.5:
         days = -days
     return days
@@ -91,7 +90,7 @@ def get_processor(
     prompt_config = None
 ):
     """
-    Get appropriate agentic processor for the file type.
+    Get appropriate processor for the file type.
 
     Args:
         file_path: Path to the file
@@ -115,23 +114,23 @@ def get_processor(
             if detection_result.suggested_processor == "text":
                 processor = AgenticTextProcessor(config, time_offset_days=time_offset_days, prompt_config=prompt_config)
                 if processor.can_process(file_path):
-                    print(f"Using Agentic Text processor based on LLM detection")
+                    print(f"Using Text processor based on LLM detection")
                     return processor
             elif detection_result.suggested_processor == "csv":
                 processor = AgenticCSVProcessor(config, time_offset_days=time_offset_days, prompt_config=prompt_config)
                 if processor.can_process(file_path):
-                    print(f"Using Agentic CSV processor based on LLM detection")
+                    print(f"Using CSV processor based on LLM detection")
                     return processor
 
             # Fallback: try both processors
             text_processor = AgenticTextProcessor(config, time_offset_days=time_offset_days, prompt_config=prompt_config)
             if text_processor.can_process(file_path):
-                print(f"Using Agentic Text processor (fallback)")
+                print(f"Using Text processor (fallback)")
                 return text_processor
 
             csv_processor = AgenticCSVProcessor(config, time_offset_days=time_offset_days, prompt_config=prompt_config)
             if csv_processor.can_process(file_path):
-                print(f"Using Agentic CSV processor (fallback)")
+                print(f"Using CSV processor (fallback)")
                 return csv_processor
 
         elif detection_result.data_type == DataType.IMAGE:
