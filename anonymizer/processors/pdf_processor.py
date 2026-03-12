@@ -1,6 +1,6 @@
 """
 PDF processor for anonymization using Vision LLM + OCR.
-Converts PDF pages to images, processes with PNGVisionOCRProcessor, then saves back as PDF.
+Converts PDF pages to images, processes with ImageProcessor, then saves back as PDF.
 
 This approach combines:
 - Vision LLM to identify PII (understands context and image content)
@@ -13,7 +13,7 @@ from PIL import Image
 from datetime import datetime
 from typing import List
 
-Image.MAX_IMAGE_PIXELS = 300000000  # 300 million pixels
+Image.MAX_IMAGE_PIXELS = 300000000
 
 try:
     from pdf2image import convert_from_path
@@ -23,12 +23,11 @@ except ImportError:
 
 from ..base_processor import FileProcessor
 from ..config import AnonymizerConfig
-from .image_processor import PNGVisionOCRProcessor
-from ..models import PIIDetectionResult
+from .image_processor import ImageProcessor
 from ..prompt_config import PromptConfig, DEFAULT_PROMPT_CONFIG
 
 
-class PDFVisionOCRProcessor(FileProcessor):
+class PDFProcessor(FileProcessor):
     """Processor for PDF files using Vision LLM + OCR approach."""
 
     def __init__(
@@ -64,7 +63,7 @@ class PDFVisionOCRProcessor(FileProcessor):
             raise ImportError(
                 "pdf2image is required for PDFVisionOCRProcessor. "
                 "Install it with: pip install pdf2image\n"
-                "Also requires poppler: brew install poppler (macOS) or apt-get install poppler-utils (Linux)"
+                "Also requires poppler: brew install poppler (macOS), apt-get install poppler-utils (Linux) or download from https://poppler.freedesktop.org/ (Windows)"
             )
 
         self.save_intermediate = save_intermediate if save_intermediate is not None else config.save_debug_files
@@ -82,7 +81,7 @@ class PDFVisionOCRProcessor(FileProcessor):
         def pdf_verification_prompt_getter() -> str:
             return self.prompt_config.get_pdf_verification_prompt()
 
-        self.png_processor = PNGVisionOCRProcessor(
+        self.png_processor = ImageProcessor(
             config,
             similarity_threshold=similarity_threshold,
             enable_verification=enable_verification,
@@ -131,7 +130,7 @@ class PDFVisionOCRProcessor(FileProcessor):
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # Convert images to RGB if necessary (PDF doesn't support all modes)
+        # Convert images to RGB if necessary
         rgb_images = []
         for img in images:
             if img.mode != 'RGB':

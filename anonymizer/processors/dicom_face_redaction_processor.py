@@ -25,23 +25,20 @@ import pydicom
 
 logger = logging.getLogger(__name__)
 
-# Default model path (relative to project root)
+# Default model path
 DEFAULT_MODEL_PATH = Path(__file__).parent.parent / "models" / "redact-faces-ct-mri.pth"
 
 # Image size expected by the model
 MODEL_IMAGE_SIZE = 256
 
-
-# ── ResNet U-Net Model Architecture ──
-# Must match the architecture used during training exactly.
-
+# Model Definition
 class ResNetUNet(nn.Module):
     """U-Net with ResNet-18 encoder for face redaction in CT/MRI images."""
 
     def __init__(self):
         super().__init__()
 
-        resnet = models.resnet18(weights=None)  # No pretrained weights needed for inference
+        resnet = models.resnet18(weights=None)
 
         # Encoder layers from ResNet
         self.encoder1 = nn.Sequential(resnet.conv1, resnet.bn1, resnet.relu)  # 64 channels
@@ -121,7 +118,7 @@ class ResNetUNet(nn.Module):
         return out
 
 
-# ── Model Loading (singleton) ──
+#  Model Loading (singleton)
 
 _loaded_model = None
 _loaded_device = None
@@ -178,7 +175,7 @@ def load_face_redaction_model(model_path: Path = None) -> tuple[ResNetUNet, torc
     return model, device
 
 
-# ── Preprocessing / Postprocessing ──
+# Preprocessing / Postprocessing
 
 _preprocess_transform = transforms.Compose([
     transforms.Resize((MODEL_IMAGE_SIZE, MODEL_IMAGE_SIZE)),
@@ -199,8 +196,7 @@ def redact_face_in_image(
     The output is then resized back to the original image dimensions.
 
     For grayscale inputs, the output is converted back to grayscale by averaging
-    the RGB channels (not using luminance formula) to avoid color tinting issues
-    from the model.
+    the RGB channels to avoid color tinting issues from the model.
 
     Args:
         image: Input PIL image (any mode, any size)
@@ -211,13 +207,13 @@ def redact_face_in_image(
     Returns:
         PIL image with face redacted, same size as input
     """
-    original_size = image.size  # (width, height)
+    original_size = image.size
     original_mode = image.mode
 
     # Convert to RGB for the model
     rgb_image = image.convert("RGB")
 
-    # Save debug input if requested
+    # Save debug input
     if debug_save_path:
         debug_dir = debug_save_path.parent / "face_redaction_debug"
         debug_dir.mkdir(parents=True, exist_ok=True)
@@ -233,15 +229,13 @@ def redact_face_in_image(
     # Convert output tensor to numpy array
     output_array = output_tensor[0].cpu().numpy()  # (3, 256, 256)
 
-    # Save debug raw RGB output if requested
+    # Save debug raw RGB
     if debug_save_path:
         raw_rgb_output = (output_array * 255).clip(0, 255).astype(np.uint8)
         raw_rgb_output = np.transpose(raw_rgb_output, (1, 2, 0))
         raw_rgb_image = Image.fromarray(raw_rgb_output, mode="RGB")
         raw_rgb_image.save(debug_dir / f"{debug_save_path.stem}_model_output_raw_rgb.png")
 
-    # For grayscale inputs, average the RGB channels to avoid color tinting
-    # The model may output slightly different values in R, G, B even for grayscale input
     if original_mode == "L":
         # Average across RGB channels to get clean grayscale
         grayscale_array = output_array.mean(axis=0)  # (256, 256)
@@ -257,7 +251,7 @@ def redact_face_in_image(
     if redacted_image.size != original_size:
         redacted_image = redacted_image.resize(original_size, Image.LANCZOS)
 
-    # Save debug final output if requested
+    # Save debug final output
     if debug_save_path:
         redacted_image.save(debug_dir / f"{debug_save_path.stem}_model_output_final.png")
 
@@ -279,7 +273,7 @@ def redact_faces_in_dicom_frames(
     Args:
         images: List of PIL images (frames from a DICOM file)
         model_path: Optional path to the model checkpoint
-        debug_output_path: Optional path for saving debug images (e.g., output_path from processor)
+        debug_output_path: Optional path for saving debug images
 
     Returns:
         List of redacted PIL images

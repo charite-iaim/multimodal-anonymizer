@@ -155,9 +155,9 @@ class OCRText(BaseModel):
     confidence: float = 0.0
 
 
-class PNGVisionOCRProcessor(FileProcessor):
+class ImageProcessor(FileProcessor):
     """
-    Processor for PNG/JPEG/DICOM images using Vision LLM + OCR.
+    Processor for images using Vision LLM + OCR.
 
     This processor combines the best of both approaches:
     1. Vision LLM identifies which text in the image contains PII
@@ -209,7 +209,7 @@ class PNGVisionOCRProcessor(FileProcessor):
 
         if not EASYOCR_AVAILABLE:
             raise ImportError(
-                "EasyOCR is required for PNGVisionOCRProcessor. "
+                "EasyOCR is required for ImageProcessor. "
                 "Install it with: pip install easyocr"
             )
 
@@ -240,7 +240,7 @@ class PNGVisionOCRProcessor(FileProcessor):
             use_vision_model=True,
         )
 
-        # Initialize Verification Agent (lazy - only if enabled)
+        # Initialize Verification Agent (if enabled)
         self._verification_agent = None
         if self.enable_verification:
             self._verification_agent = ImageVerificationAgent(
@@ -338,7 +338,7 @@ class PNGVisionOCRProcessor(FileProcessor):
             )
             pii_elements.extend(additional_elements)
 
-            # Check if verification failed due to an error (e.g. deployment not found)
+            # Check if verification failed due to an error
             if (verification_result is not None
                     and verification_result.confidence == 0.0
                     and verification_result.notes.startswith("Verification failed with error:")):
@@ -351,7 +351,7 @@ class PNGVisionOCRProcessor(FileProcessor):
         image.save(output_path)
         print(f"Saved anonymized image to: {output_path}")
 
-        # Save JSON with detection results (only if debug mode is enabled)
+        # Save JSON with detection results (if enabled)
         if self.config.save_debug_files:
             json_output_path = output_path.with_suffix(".json")
             pii_result = PIIDetectionResult(pii_elements=pii_elements)
@@ -435,7 +435,7 @@ class PNGVisionOCRProcessor(FileProcessor):
         Returns:
             List of PIITextItem objects identifying PII
         """
-        # Prepare image for LLM (resize if needed for efficiency)
+        # Prepare image for LLM (resize if needed)
         max_dimension = 1024
         width, height = image.size
 
@@ -492,7 +492,6 @@ RESPOND ONLY WITH A JSON OBJECT in the following format (no other text):
             jitter=True,
         )
 
-        # Try structured output first
         try:
             result: VisionPIIResult = retry_with_backoff(
                 lambda: self.vision_llm.invoke([message]),
@@ -613,7 +612,7 @@ RESPOND ONLY WITH A JSON OBJECT in the following format (no other text):
                 # Strategy 2: Substring match
                 # Require the shorter string to be at least 3 chars and at least
                 # 30% of the longer string's length to avoid single-character OCR
-                # results matching everything (e.g. "a" in "daniel martinez")
+                # results matching everything
                 if pii_lower in ocr_lower or ocr_lower in pii_lower:
                     shorter = min(len(pii_lower), len(ocr_lower))
                     longer = max(len(pii_lower), len(ocr_lower))
@@ -650,7 +649,7 @@ RESPOND ONLY WITH A JSON OBJECT in the following format (no other text):
     def detect_pii_bboxes(self, image: Image.Image) -> List[PIIElement]:
         """
         Detect PII in an image and return bounding boxes without applying redactions.
-        Useful for multi-frame processing (e.g., DICOM videos).
+        Useful for multi-frame processing.
 
         Args:
             image: PIL Image object
@@ -716,9 +715,6 @@ RESPOND ONLY WITH A JSON OBJECT in the following format (no other text):
         """
         Run verification agent to check for remaining PII and apply additional redactions.
 
-        Note: Face detection is now performed BEFORE OCR in the main anonymize() method,
-        so this verification phase only checks for remaining text PII.
-
         Args:
             redacted_image: Image after initial redaction (including face redaction)
             original_image: Original image (optional, for over-redaction check)
@@ -730,7 +726,7 @@ RESPOND ONLY WITH A JSON OBJECT in the following format (no other text):
         all_additional_elements = []
         final_result = None
 
-        # PII Verification Rounds (face detection already done before OCR)
+        # PII Verification Rounds
         for round_num in range(self.max_verification_rounds):
             print(f"\n  --- Verification Round {round_num + 1}/{self.max_verification_rounds} ---")
 
@@ -741,7 +737,6 @@ RESPOND ONLY WITH A JSON OBJECT in the following format (no other text):
             )
             final_result = result
 
-            # If clean, we're done
             if result.is_clean:
                 print(f"  Verification passed after {round_num + 1} round(s)")
                 break
@@ -755,7 +750,7 @@ RESPOND ONLY WITH A JSON OBJECT in the following format (no other text):
                 )
                 all_additional_elements.extend(additional)
 
-                # If we couldn't redact anything new, stop
+                # Stop if no additional elements were found to redact
                 if not additional:
                     print("  Warning: Could not locate remaining PII for redaction")
                     break

@@ -33,11 +33,11 @@ class DateTimeShift(BaseModel):
     context: str = Field(description="Brief context where this date was found")
 
 
-class AgenticTextProcessor(FileProcessor):
+class TextProcessor(FileProcessor):
     """
-    Agentic processor for text files using LLM with tool-calling.
+    Processor for text files using LLM with tool-calling.
 
-    This processor implements a three-phase approach (matching CSV processor):
+    This processor implements a three-phase approach:
     1. Time-Shift Phase: Regex extraction + shift_datetime tool for all dates
     2. Anonymization Phase: LLM uses redact_text tool for PII
     3. Verification Phase: LLM verifies and fixes any issues
@@ -50,7 +50,7 @@ class AgenticTextProcessor(FileProcessor):
         prompt_config: Optional[PromptConfig] = None
     ):
         """
-        Initialize agentic text processor.
+        Initialize text processor.
 
         Args:
             config: Configuration object with LLM settings
@@ -62,9 +62,14 @@ class AgenticTextProcessor(FileProcessor):
         # Prompt configuration
         self.prompt_config = prompt_config or DEFAULT_PROMPT_CONFIG
 
-        # Generate random offset if not provided (between -365 and +365 days)
+        # Generate random offset if not provided
         if time_offset_days is None:
-            self.time_offset_days = random.randint(-365, 365)
+            # Random offset between 1-3 years in days
+            self.time_offset_days = random.randint(365, 1095)
+
+            # Random sign (+/-)
+            if random.random() < 0.5:
+                self.time_offset_days = -self.time_offset_days
         else:
             self.time_offset_days = time_offset_days
 
@@ -75,14 +80,6 @@ class AgenticTextProcessor(FileProcessor):
             max_delay=60.0,
             exponential_base=2.0,
             jitter=True,
-        )
-
-        # Initialize LLM with tools for phase 1 (time shifting - only needed if LLM finds additional dates)
-        self.llm_with_tools = create_chat_llm(
-            config=config,
-            timeout=600,
-            max_tokens=16000,
-            tools=[shift_datetime],
         )
 
         # Initialize LLM with tools for phase 2 (PII anonymization)
@@ -130,7 +127,7 @@ class AgenticTextProcessor(FileProcessor):
         input_path = Path(input_path) if isinstance(input_path, str) else input_path
         output_path = Path(output_path) if isinstance(output_path, str) else output_path
 
-        print(f"Processing (Agentic): {input_path.name}")
+        print(f"Processing: {input_path.name}")
         print(f"Time offset: {self.time_offset_days} days")
 
         # Step 1: Read text file
@@ -150,7 +147,7 @@ class AgenticTextProcessor(FileProcessor):
         shifted_content, dates_shifted = self._phase1_shift_times(content)
         print(f"Shifted {len(dates_shifted)} date/time values")
 
-        # Step 3: Phase 2 - Anonymize other PII (agentic with redact_text tool)
+        # Step 3: Phase 2 - Anonymize other PII (with redact_text tool)
         print("\n=== Phase 2: PII Anonymization ===")
         anonymized_content, pii_redactions = self._phase2_anonymize_pii(shifted_content)
         print(f"Applied {pii_redactions} PII redactions")
@@ -317,7 +314,7 @@ class AgenticTextProcessor(FileProcessor):
         modified_content = content
         total_redactions = 0
 
-        # For very long texts, process in chunks
+        # For long texts, process in chunks
         max_chunk_size = 8000
 
         if len(content) <= max_chunk_size:
@@ -473,7 +470,7 @@ class AgenticTextProcessor(FileProcessor):
         modified_content = anonymized_content
         total_fixes = 0
 
-        # For very long texts, process in chunks
+        # For long texts, process in chunks
         max_chunk_size = 4000
 
         if len(original_content) <= max_chunk_size:
@@ -614,7 +611,7 @@ class AgenticTextProcessor(FileProcessor):
                 "input_file": str(input_path.name),
                 "output_file": str(output_path.name),
                 "timestamp": datetime.now().isoformat(),
-                "processing_method": "agentic_text_anonymization",
+                "processing_method": "text_anonymization",
                 "time_offset_days": self.time_offset_days,
                 "total_dates_shifted": len(dates_shifted),
                 "total_pii_redactions": pii_redactions_count

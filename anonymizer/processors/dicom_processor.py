@@ -1,6 +1,6 @@
 """
 DICOM image processor for anonymization using Vision LLM + OCR.
-Converts DICOM to PNG, processes with PNGVisionOCRProcessor, then converts back to DICOM.
+Converts DICOM to PNG, processes with ImageProcessor, then converts back to DICOM.
 
 This approach combines:
 - Vision LLM to identify PII (understands context and image content)
@@ -30,12 +30,12 @@ from ..tools.time_shift_tool import shift_datetime_value
 from ..tools.redact_tool import redact_text
 from ..retry_utils import retry_with_backoff, RetryConfig, create_retry_callback
 from ..llm_response_utils import extract_content_from_response, get_reasoning_content_from_response
-from .image_processor import PNGVisionOCRProcessor
+from .image_processor import ImageProcessor
 from ..tools.face_detection_tool import detect_faces_in_image, redact_faces_in_pil_image
 from .dicom_face_redaction_processor import get_face_redaction_masks_for_frames
 
 
-# ── DICOM metadata tag categories for anonymization ──
+# DICOM metadata tag categories for anonymization
 
 # Category 1: Tags to DELETE/BLANK (direct patient/provider identifiers)
 TAGS_TO_BLANK = [
@@ -51,17 +51,11 @@ TAGS_TO_BLANK = [
     "OperatorsName",
 ]
 
-# Category 2: Date/time tags to SHIFT
+# Category 2: Date tags to SHIFT
 DATE_TAGS_TO_SHIFT = [
     "StudyDate", "SeriesDate", "AcquisitionDate", "ContentDate",
     "InstanceCreationDate", "PerformedProcedureStepStartDate",
     "PerformedProcedureStepEndDate",
-]
-
-TIME_TAGS_TO_SHIFT = [
-    "StudyTime", "SeriesTime", "AcquisitionTime", "ContentTime",
-    "InstanceCreationTime", "PerformedProcedureStepStartTime",
-    "PerformedProcedureStepEndTime",
 ]
 
 # Category 3: Free-text tags to anonymize via LLM
@@ -96,12 +90,6 @@ def is_dicom_video(file_path: Path) -> tuple[bool, int]:
 
     Raises:
         ValueError: If the file cannot be read as a DICOM or has no pixel data
-
-    Example:
-        >>> is_video, num_frames = is_dicom_video(Path("scan.dcm"))
-        >>> if is_video:
-        ...     print(f"DICOM video detected with {num_frames} frames")
-        ...     # Offer user choice for frame-by-frame processing
     """
     ds = pydicom.dcmread(file_path, force=True)
 
@@ -164,11 +152,6 @@ def get_dicom_info(file_path: Path) -> dict:
         - is_color: True if RGB/color image
         - modality: DICOM modality (CT, MR, US, etc.) if available
         - bits_stored: Bits per pixel
-
-    Example:
-        >>> info = get_dicom_info(Path("scan.dcm"))
-        >>> if info['is_video']:
-        ...     print(f"Video with {info['frame_count']} frames")
     """
     ds = pydicom.dcmread(file_path, force=True)
 
@@ -228,7 +211,7 @@ def get_dicom_info(file_path: Path) -> dict:
     }
 
 
-class DICOMVisionOCRProcessor(FileProcessor):
+class DICOMProcessor(FileProcessor):
     """Processor for DICOM images using Vision LLM + OCR approach."""
 
     def __init__(
@@ -240,10 +223,11 @@ class DICOMVisionOCRProcessor(FileProcessor):
         check_over_redaction: bool = False,
         max_verification_rounds: int = 2,
         prompt_config: PromptConfig = None,
-        process_all_frames: bool = False
+        process_all_frames: bool = False,
+        time_offset_days: int = None
     ):
         """
-        Initialize DICOM Vision+OCR processor.
+        Initialize DICOM processor.
 
         Args:
             config: Anonymizer configuration
@@ -265,7 +249,7 @@ class DICOMVisionOCRProcessor(FileProcessor):
         self.max_verification_rounds = max_verification_rounds
         self.prompt_config = prompt_config or DEFAULT_PROMPT_CONFIG
         self.process_all_frames = process_all_frames
-        self.png_processor = PNGVisionOCRProcessor(
+        self.png_processor = ImageProcessor(
             config,
             similarity_threshold=similarity_threshold,
             enable_verification=enable_verification,
@@ -274,8 +258,16 @@ class DICOMVisionOCRProcessor(FileProcessor):
             prompt_config=self.prompt_config
         )
 
-        # Metadata anonymization settings
-        self.time_offset_days = random.randint(-365, 365)
+        # Generate random offset if not provided
+        if time_offset_days is None:
+            # Random offset between 1-3 years in days
+            self.time_offset_days = random.randint(365, 1095)
+
+            # Random sign (+/-)
+            if random.random() < 0.5:
+                self.time_offset_days = -self.time_offset_days
+        else:
+            self.time_offset_days = time_offset_days
         self.retry_config = RetryConfig(
             max_retries=3,
             initial_delay=2.0,
@@ -377,8 +369,6 @@ class DICOMVisionOCRProcessor(FileProcessor):
         except (IOError, OSError):
             pass
 
-        # Don't try pydicom.dcmread with force=True for unknown files
-        # as it will accept almost any file and fail later on pixel decoding
         return False
 
     def extract_content(self, file_path: Path) -> str:
@@ -386,7 +376,7 @@ class DICOMVisionOCRProcessor(FileProcessor):
         ds = pydicom.dcmread(file_path, force=True)
         return str(ds)
 
-    # ── DICOM metadata anonymization ──
+    # DICOM metadata anonymization
 
     @staticmethod
     def _shift_dicom_date(dicom_date: str, offset_days: int) -> str:
@@ -415,16 +405,6 @@ class DICOMVisionOCRProcessor(FileProcessor):
                 if "[SHIFT_FAILED]" not in result:
                     return result.replace("-", "")
             return dicom_date
-
-    @staticmethod
-    def _shift_dicom_time(dicom_time: str, offset_days: int) -> str:
-        """
-        Shift a DICOM time (HHMMSS.FFFFFF) by offset_days.
-
-        Time-of-day shifting is generally not needed for de-identification,
-        so this returns the original value. Override if time shifting is required.
-        """
-        return dicom_time
 
     def _anonymize_free_text_tags(self, ds: pydicom.Dataset) -> dict:
         """
@@ -517,7 +497,7 @@ class DICOMVisionOCRProcessor(FileProcessor):
 
         Phases:
         1. Blank known PHI tags (names, IDs, addresses, etc.)
-        2. Shift date/time tags
+        2. Shift date tags
         3. Regenerate UIDs
         4. LLM-based anonymization of free-text tags
 
@@ -544,7 +524,7 @@ class DICOMVisionOCRProcessor(FileProcessor):
                     metadata_changes["blanked_tags"][tag_name] = original
                     print(f"    Blanked: {tag_name}")
 
-        # Phase 2: Shift date/time tags
+        # Phase 2: Shift date tags
         print(f"  Phase 2: Shifting dates by {self.time_offset_days} days...")
         for tag_name in DATE_TAGS_TO_SHIFT:
             if hasattr(ds, tag_name):
@@ -558,18 +538,6 @@ class DICOMVisionOCRProcessor(FileProcessor):
                             "shifted": shifted,
                         }
                         print(f"    Shifted: {tag_name} {original} -> {shifted}")
-
-        for tag_name in TIME_TAGS_TO_SHIFT:
-            if hasattr(ds, tag_name):
-                original = str(getattr(ds, tag_name)).strip()
-                if original:
-                    shifted = self._shift_dicom_time(original, self.time_offset_days)
-                    if shifted != original:
-                        setattr(ds, tag_name, shifted)
-                        metadata_changes["shifted_dates"][tag_name] = {
-                            "original": original,
-                            "shifted": shifted,
-                        }
 
         # Phase 3: Regenerate UIDs
         print("  Phase 3: Regenerating UIDs...")
@@ -598,7 +566,7 @@ class DICOMVisionOCRProcessor(FileProcessor):
 
         return metadata_changes
 
-    # ── DICOM pixel data conversion ──
+    # DICOM pixel data conversion
 
     def _dicom_to_images(self, dicom_path: Path) -> tuple[list[Image.Image], pydicom.Dataset, bool, np.ndarray]:
         """
@@ -623,7 +591,7 @@ class DICOMVisionOCRProcessor(FileProcessor):
             # Try to infer transfer syntax from the data
             # Common transfer syntaxes to try in order
             transfer_syntaxes = [
-                pydicom.uid.ImplicitVRLittleEndian,  # Most common for files without header
+                pydicom.uid.ImplicitVRLittleEndian,
                 pydicom.uid.ExplicitVRLittleEndian,
                 pydicom.uid.ExplicitVRBigEndian,
             ]
@@ -791,8 +759,6 @@ class DICOMVisionOCRProcessor(FileProcessor):
         new_ds = original_ds.copy()
         new_ds.PixelData = pixel_array.tobytes()
 
-        # If the original had a compressed transfer syntax, change to uncompressed
-        # since we've modified the raw pixel data
         if hasattr(new_ds, 'file_meta') and hasattr(new_ds.file_meta, 'TransferSyntaxUID'):
             ts = new_ds.file_meta.TransferSyntaxUID
             # Check if it's a compressed transfer syntax
@@ -803,7 +769,7 @@ class DICOMVisionOCRProcessor(FileProcessor):
                 new_ds.file_meta.TransferSyntaxUID = pydicom.uid.ExplicitVRLittleEndian
                 print(f"  Changed compressed transfer syntax {ts.name} to ExplicitVRLittleEndian")
 
-        # Anonymize DICOM metadata (blank PHI tags, shift dates, regenerate UIDs, LLM free-text)
+        # Anonymize DICOM metadata
         print("Anonymizing DICOM metadata...")
         metadata_changes = self._anonymize_metadata(new_ds)
 
@@ -854,9 +820,9 @@ class DICOMVisionOCRProcessor(FileProcessor):
         """
         Anonymize DICOM image using Vision LLM + OCR approach.
 
-        The pipeline uses display-quality images for PII detection (LLM + OCR),
-        but applies redaction bounding boxes directly on the original raw pixel
-        data to preserve the full fidelity of the DICOM.
+        The pipeline uses display-quality images for PII detection, but applies 
+        redaction bounding boxes directly on the original raw pixeldata to 
+        preserve the full fidelity of the DICOM.
 
         If the DICOM is detected as a CT/MRI head scan (via LLM), a trained
         ResNet U-Net model is used to redact facial features. Otherwise the
@@ -869,12 +835,12 @@ class DICOMVisionOCRProcessor(FileProcessor):
             input_path: Path to input DICOM file
             output_path: Path to save anonymized DICOM file
         """
-        print(f"Processing DICOM (Vision+OCR): {input_path.name}")
+        print(f"Processing DICOM: {input_path.name}")
 
         print("Converting DICOM to display images...")
         display_images, dicom_dataset, is_multiframe, raw_pixel_array = self._dicom_to_images(input_path)
 
-        # ── Head scan detection: ask LLM if this is a CT/MRI head scan ──
+        # Head scan detection: ask LLM if this is a CT/MRI head scan
         print("Checking if DICOM is a CT/MRI head scan...")
         is_head_scan = self._is_head_scan(display_images[0])
 
@@ -944,7 +910,7 @@ class DICOMVisionOCRProcessor(FileProcessor):
                     json.dump(output_data, f, indent=2, ensure_ascii=False)
                 print(f"Saved detection results to: {json_dest}")
 
-            return  # Exit early for head scan processing
+            return
 
         else:
             # NOT A HEAD SCAN: Apply RetinaNet face detection for photos/videos
@@ -997,7 +963,7 @@ class DICOMVisionOCRProcessor(FileProcessor):
                     y2 = min(redacted_pixel_array.shape[0], face.y + face.height + padding)
                     redacted_pixel_array[y1:y2, x1:x2] = 0
 
-            # Step 2: Also run text detection on face-redacted images
+            # Step 2: Run text detection on face-redacted images
             # Create display images from the face-redacted pixel array for text detection
             print("Step 2: Running Vision+OCR text detection on face-redacted images...")
             face_redacted_display_images = []
@@ -1034,7 +1000,7 @@ class DICOMVisionOCRProcessor(FileProcessor):
                     redacted_pixel_array, pii_elements, dicom_dataset
                 )
 
-            # Save intermediate fully redacted images for debugging
+            # Save intermediate fully redacted images for debugging if enabled
             if self.save_intermediate:
                 intermediate_dir = output_path.parent / "intermediate"
                 intermediate_dir.mkdir(parents=True, exist_ok=True)
@@ -1168,10 +1134,6 @@ class DICOMVisionOCRProcessor(FileProcessor):
         new_ds.PixelRepresentation = 0  # unsigned
         new_ds.file_meta.TransferSyntaxUID = pydicom.uid.ExplicitVRLittleEndian
 
-        # The display transform (VOI LUT, windowing, rescale) has already been
-        # baked into the 8-bit pixel values by _make_display_image.  Remove the
-        # interpretation tags so DICOM viewers don't re-apply them on the
-        # already-windowed data.
         for tag in ('RescaleIntercept', 'RescaleSlope',
                     'WindowCenter', 'WindowWidth',
                     'VOILUTFunction', 'VOILUTSequence'):
@@ -1197,7 +1159,7 @@ class DICOMVisionOCRProcessor(FileProcessor):
         """
         Detect PII bounding boxes in a single frame using Vision LLM + OCR.
 
-        Does NOT apply redactions — only returns the list of detected PIIElements.
+        Does NOT apply redactions — only returns the list of detected PII Elements.
         Redaction is applied later directly on the raw pixel array.
 
         Args:
@@ -1221,7 +1183,7 @@ class DICOMVisionOCRProcessor(FileProcessor):
         pii_elements = self.png_processor.detect_pii_bboxes(image)
         print(f"Found {len(pii_elements)} PHI elements")
 
-        # Verification phase (uses display images only for visual checks)
+        # Verification phase
         verification_result = None
         additional_elements = []
         if self.enable_verification and self.png_processor._verification_agent is not None:
@@ -1317,7 +1279,7 @@ class DICOMVisionOCRProcessor(FileProcessor):
             output_path: Output path
 
         Returns:
-            List of PIIElement objects with bounding boxes
+            List of PII Element objects with bounding boxes
         """
         num_frames = len(images)
         original_first_frame = images[0].copy()  # Keep for verification

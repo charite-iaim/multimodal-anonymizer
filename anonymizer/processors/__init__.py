@@ -2,14 +2,14 @@
 File format specific processors (agentic/vision-based).
 """
 
-from .image_processor import PNGVisionOCRProcessor
-from .dicom_processor import DICOMVisionOCRProcessor
-from .pdf_processor import PDFVisionOCRProcessor
+from .image_processor import ImageProcessor
+from .dicom_processor import DICOMProcessor
+from .pdf_processor import PDFProcessor
 from .video_processor import VideoVisionOCRProcessor
-from .text_processor import AgenticTextProcessor
-from .csv_processor import AgenticCSVProcessor
-from .excel_processor import AgenticExcelProcessor
-from .audio_processor import AgenticAudioProcessor
+from .text_processor import TextProcessor
+from .csv_processor import CSVProcessor
+from .excel_processor import ExcelProcessor
+from .audio_processor import AudioProcessor
 from .image_verification_agent import ImageVerificationAgent, VerificationResult, create_verification_step
 from .dicom_face_redaction_processor import (
     redact_faces_in_dicom_frames,
@@ -17,14 +17,14 @@ from .dicom_face_redaction_processor import (
 )
 
 __all__ = [
-    "PNGVisionOCRProcessor",
-    "DICOMVisionOCRProcessor",
-    "PDFVisionOCRProcessor",
+    "ImageProcessor",
+    "DICOMProcessor",
+    "PDFProcessor",
     "VideoVisionOCRProcessor",
-    "AgenticTextProcessor",
-    "AgenticCSVProcessor",
-    "AgenticExcelProcessor",
-    "AgenticAudioProcessor",
+    "TextProcessor",
+    "CSVProcessor",
+    "ExcelProcessor",
+    "AudioProcessor",
     "ImageVerificationAgent",
     "VerificationResult",
     "create_verification_step",

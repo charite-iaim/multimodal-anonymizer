@@ -1,13 +1,10 @@
 """
-Agentic audio file processor for voice data anonymization.
+Audio file processor for voice data anonymization.
 
-This processor handles .wav and .mp3 audio files through a three-step pipeline:
+This processor handles audio files through a three-step pipeline:
 1. Transcription: Use local Whisper model to convert speech to text
-2. Anonymization: Use LLM to remove PII (names, dates, etc.) from transcript
+2. Anonymization: Use LLM to remove PII and shift dates from transcript
 3. Synthesis: Use Kokoro TTS to convert anonymized text back to speech
-
-The output is saved in the same format as the original file.
-All processing runs locally (except for LLM anonymization which uses configured provider).
 """
 
 import json
@@ -46,7 +43,7 @@ try:
 except ImportError:
     KOKORO_AVAILABLE = False
 
-# Kokoro model files from GitHub releases
+# Kokoro model files from GitHub
 KOKORO_MODEL_URL = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx"
 KOKORO_VOICES_URL = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin"
 
@@ -58,9 +55,9 @@ except ImportError:
     PYDUB_AVAILABLE = False
 
 
-class AgenticAudioProcessor(FileProcessor):
+class AudioProcessor(FileProcessor):
     """
-    Agentic processor for audio files (.wav, .mp3) using local Whisper + LLM + Kokoro TTS.
+    Audio processor for audio files using local Whisper + LLM + Kokoro TTS.
 
     Pipeline:
     1. Local Whisper model transcribes audio to text
@@ -138,9 +135,14 @@ class AgenticAudioProcessor(FileProcessor):
         # Prompt configuration
         self.prompt_config = prompt_config or DEFAULT_PROMPT_CONFIG
 
-        # Generate random offset if not provided (between -365 and +365 days)
+        # Generate random offset if not provided
         if time_offset_days is None:
-            self.time_offset_days = random.randint(-365, 365)
+            # Random offset between 1-3 years in days
+            self.time_offset_days = random.randint(365, 1095)
+
+            # Random sign (+/-)
+            if random.random() < 0.5:
+                self.time_offset_days = -self.time_offset_days
         else:
             self.time_offset_days = time_offset_days
 
@@ -252,7 +254,7 @@ class AgenticAudioProcessor(FileProcessor):
         output_path = Path(output_path) if isinstance(output_path, str) else output_path
 
         original_format = input_path.suffix.lower()
-        print(f"Processing audio (Agentic): {input_path.name}")
+        print(f"Processing audio: {input_path.name}")
         print(f"Time offset: {self.time_offset_days} days")
         print(f"Original format: {original_format}")
 

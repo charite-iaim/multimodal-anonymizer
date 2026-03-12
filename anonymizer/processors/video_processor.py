@@ -27,7 +27,7 @@ from ..prompt_config import PromptConfig, DEFAULT_PROMPT_CONFIG
 from ..llm_factory import create_chat_llm
 from ..retry_utils import retry_with_backoff, RetryConfig, create_retry_callback
 from ..llm_response_utils import extract_content_from_response, get_reasoning_content_from_response
-from .image_processor import PNGVisionOCRProcessor
+from .image_processor import ImageProcessor
 from ..tools.face_detection_tool import detect_faces_in_image, redact_faces_in_pil_image
 from .dicom_face_redaction_processor import redact_faces_in_dicom_frames as unet_deface_frames
 
@@ -68,7 +68,7 @@ class VideoVisionOCRProcessor(FileProcessor):
         self.max_verification_rounds = max_verification_rounds
         self.prompt_config = prompt_config or DEFAULT_PROMPT_CONFIG
         self.process_all_frames = process_all_frames
-        self.png_processor = PNGVisionOCRProcessor(
+        self.png_processor = ImageProcessor(
             config,
             similarity_threshold=similarity_threshold,
             enable_verification=enable_verification,
@@ -144,7 +144,7 @@ class VideoVisionOCRProcessor(FileProcessor):
             if yes_no_matches:
                 final_answer = yes_no_matches[-1]
             else:
-                # No clear YES/NO found — default to NO (safe: triggers face detection)
+                # No clear YES/NO found
                 final_answer = "NO"
                 print(f"  Head scan detection: WARNING - could not parse YES/NO from response")
             is_head = final_answer == "YES"
@@ -278,7 +278,7 @@ class VideoVisionOCRProcessor(FileProcessor):
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # Use H.264 codec for better compatibility
+        # Use H.264 codec
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
         video_writer = cv2.VideoWriter(str(output_path), fourcc, fps, (width, height))
 
@@ -301,7 +301,7 @@ class VideoVisionOCRProcessor(FileProcessor):
 
         The processing mode depends on self.process_all_frames:
         - False (default): PHI detection on first frame only, bboxes applied to all frames
-        - True: PHI detection on every frame individually (resource-intensive)
+        - True: PHI detection on every frame individually
 
         Face redaction is applied when the video is NOT a head/face CT/MRI scan.
 
@@ -320,13 +320,13 @@ class VideoVisionOCRProcessor(FileProcessor):
         if num_frames == 0:
             raise ValueError("No frames extracted from video")
 
-        # ── Head scan detection: ask LLM if this is a CT/MRI head scan ──
+        # Head scan detection: ask LLM if this is a CT/MRI head scan
         print("Checking if video is a CT/MRI head scan...")
         is_head_scan = self._is_head_scan(frames[0])
 
         # Apply appropriate face/defacing based on scan type:
-        # - Head scan (CT/MRI): Use U-Net defacing model (trained for medical imaging)
-        # - Not head scan: Use RetinaNet face detection (for photos/videos with faces)
+        # - Head scan (CT/MRI): Use U-Net defacing model
+        # - Not head scan: Use RetinaNet face detection
         face_redaction_applied = True
 
         if is_head_scan:
@@ -377,7 +377,7 @@ class VideoVisionOCRProcessor(FileProcessor):
         bounding boxes are applied to all frames.
 
         Args:
-            frames: List of all frame images (possibly already face-redacted)
+            frames: List of all frame images (already face-redacted)
             input_path: Original input path
             output_path: Output path
             is_head_scan: Whether the video was detected as a head scan
@@ -447,8 +447,7 @@ class VideoVisionOCRProcessor(FileProcessor):
         """
         Anonymize video using frame-by-frame detection.
 
-        PHI detection is performed on every frame individually. This is
-        resource-intensive but can catch PHI that only appears in certain frames.
+        PHI detection is performed on every frame individually.
 
         Args:
             frames: List of all frame images (possibly already face-redacted)

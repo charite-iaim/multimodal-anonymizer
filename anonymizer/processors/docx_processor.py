@@ -3,7 +3,7 @@ Agentic DOCX file processor using LLM with tool-calling for anonymization.
 
 This processor handles Microsoft Word (.docx) files by:
 1. Extracting text content from the DOCX file
-2. Using the same three-phase agentic approach as the text processor
+2. Using the same agentic approach as the text processor
 3. Writing the anonymized content back to a new DOCX file while preserving formatting
 """
 
@@ -35,11 +35,11 @@ class DateTimeShift(BaseModel):
     context: str = Field(description="Brief context where this date was found")
 
 
-class AgenticDocxProcessor(FileProcessor):
+class DocxProcessor(FileProcessor):
     """
-    Agentic processor for DOCX files using LLM with tool-calling.
+    Processor for DOCX files using LLM with tool-calling.
 
-    This processor implements a three-phase approach (matching text processor):
+    This processor implements a three-phase approach:
     1. Time-Shift Phase: Regex extraction + shift_datetime tool for all dates
     2. Anonymization Phase: LLM uses redact_text tool for PII
     3. Verification Phase: LLM verifies and fixes any issues
@@ -64,9 +64,14 @@ class AgenticDocxProcessor(FileProcessor):
         # Prompt configuration
         self.prompt_config = prompt_config or DEFAULT_PROMPT_CONFIG
 
-        # Generate random offset if not provided (between -365 and +365 days)
+        # Generate random offset if not provided
         if time_offset_days is None:
-            self.time_offset_days = random.randint(-365, 365)
+            # Random offset between 1-3 years in days
+            self.time_offset_days = random.randint(365, 1095)
+
+            # Random sign (+/-)
+            if random.random() < 0.5:
+                self.time_offset_days = -self.time_offset_days
         else:
             self.time_offset_days = time_offset_days
 
@@ -79,7 +84,7 @@ class AgenticDocxProcessor(FileProcessor):
             jitter=True,
         )
 
-        # Initialize LLM with tools for phase 1 (time shifting)
+        # Initialize LLM with tools for phase 1 (date shifting)
         self.llm_with_tools = create_chat_llm(
             config=config,
             timeout=600,
@@ -135,9 +140,9 @@ class AgenticDocxProcessor(FileProcessor):
 
         Steps:
         1. Read DOCX file and extract text
-        2. Phase 1: Extract and shift all dates/times using regex (collect replacements)
-        3. Phase 2: Use LLM with redact_text tool to anonymize PII (collect replacements)
-        4. Phase 3: Verification agent checks and fixes any issues (collect replacements)
+        2. Phase 1: Extract and shift all dates/times using regex
+        3. Phase 2: Use LLM with redact_text tool to anonymize PII
+        4. Phase 3: Verification agent checks and fixes any issues
         5. Apply all collected replacements directly to DOCX and save
 
         Args:
@@ -149,7 +154,7 @@ class AgenticDocxProcessor(FileProcessor):
         input_path = Path(input_path) if isinstance(input_path, str) else input_path
         output_path = Path(output_path) if isinstance(output_path, str) else output_path
 
-        print(f"Processing DOCX (Agentic): {input_path.name}")
+        print(f"Processing DOCX: {input_path.name}")
         print(f"Time offset: {self.time_offset_days} days")
 
         # Step 1: Read DOCX file
@@ -209,7 +214,7 @@ class AgenticDocxProcessor(FileProcessor):
         print(f"Saved anonymized DOCX to: {output_path}")
         print(f"Total replacements applied: {len(all_replacements)}")
 
-        # Step 6: Save JSON with details (if debug mode)
+        # Save JSON with details (if debug mode)
         if self.config.save_debug_files:
             json_output_path = output_path.with_suffix('.json')
             self._save_json_output(
@@ -268,7 +273,6 @@ class AgenticDocxProcessor(FileProcessor):
         Replace the text in a paragraph while trying to preserve formatting.
 
         This is a simplified approach that clears all runs and adds new text.
-        For more complex formatting preservation, additional logic would be needed.
         """
         # If there's only one run or no runs, simple replacement
         if len(paragraph.runs) <= 1:
@@ -486,7 +490,7 @@ class AgenticDocxProcessor(FileProcessor):
         """Phase 3: Verification agent checks the anonymized output and fixes any issues.
 
         Returns:
-            Tuple of (modified content, number of fixes, dict of replacements)
+            Tuple (modified content, number of fixes, dict of replacements)
         """
         modified_content = anonymized_content
         total_fixes = 0
@@ -619,7 +623,7 @@ class AgenticDocxProcessor(FileProcessor):
                 "input_file": str(input_path.name),
                 "output_file": str(output_path.name),
                 "timestamp": datetime.now().isoformat(),
-                "processing_method": "agentic_docx_anonymization",
+                "processing_method": "docx_anonymization",
                 "time_offset_days": self.time_offset_days,
                 "total_dates_shifted": len(dates_shifted),
                 "total_pii_redactions": pii_redactions_count

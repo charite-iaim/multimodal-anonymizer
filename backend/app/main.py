@@ -36,15 +36,15 @@ load_dotenv()
 # Add parent directory to path to import anonymizer package
 sys.path.append(str(Path(__file__).parent.parent.parent))
 
-from anonymizer.processors.image_processor import PNGVisionOCRProcessor
-from anonymizer.processors.dicom_processor import DICOMVisionOCRProcessor, get_dicom_info
-from anonymizer.processors.pdf_processor import PDFVisionOCRProcessor
+from anonymizer.processors.image_processor import ImageProcessor
+from anonymizer.processors.dicom_processor import DICOMProcessor, get_dicom_info
+from anonymizer.processors.pdf_processor import PDFProcessor
 from anonymizer.processors.video_processor import VideoVisionOCRProcessor
-from anonymizer.processors.csv_processor import AgenticCSVProcessor
-from anonymizer.processors.excel_processor import AgenticExcelProcessor
-from anonymizer.processors.text_processor import AgenticTextProcessor
-from anonymizer.processors.docx_processor import AgenticDocxProcessor
-from anonymizer.processors.audio_processor import AgenticAudioProcessor
+from anonymizer.processors.csv_processor import CSVProcessor
+from anonymizer.processors.excel_processor import ExcelProcessor
+from anonymizer.processors.text_processor import TextProcessor
+from anonymizer.processors.docx_processor import DocxProcessor
+from anonymizer.processors.audio_processor import AudioProcessor
 from anonymizer.config import AnonymizerConfig
 from anonymizer.filename_anonymizer import FilenameAnonymizer
 from anonymizer.prompt_config import PromptConfig, DEFAULT_PROMPT_CONFIG, get_prompt_descriptions, get_template_variables, validate_all_prompts
@@ -618,26 +618,26 @@ async def process_file(
         file_extension = input_path.suffix.lower()
 
         if file_extension in ['.dcm', '.dicom']:
-            processor = DICOMVisionOCRProcessor(config, save_intermediate=True, prompt_config=prompt_config, process_all_frames=video_process_all_frames)
+            processor = DICOMProcessor(config, save_intermediate=True, prompt_config=prompt_config, process_all_frames=video_process_all_frames)
         elif file_extension in ['.mp4', '.avi', '.mov', '.mkv']:
             processor = VideoVisionOCRProcessor(config, save_intermediate=True, prompt_config=prompt_config, process_all_frames=video_process_all_frames)
         elif file_extension == '.pdf':
-            processor = PDFVisionOCRProcessor(config, prompt_config=prompt_config)
+            processor = PDFProcessor(config, prompt_config=prompt_config)
         elif file_extension in ['.png', '.jpg', '.jpeg']:
-            processor = PNGVisionOCRProcessor(config, prompt_config=prompt_config)
+            processor = ImageProcessor(config, prompt_config=prompt_config)
         elif file_extension in ['.txt', '.hea']:
-            processor = AgenticTextProcessor(config, prompt_config=prompt_config)
+            processor = TextProcessor(config, prompt_config=prompt_config)
         elif file_extension == '.csv':
-            processor = AgenticCSVProcessor(config, prompt_config=prompt_config)
+            processor = CSVProcessor(config, prompt_config=prompt_config)
         elif file_extension in ['.xlsx', '.xls']:
-            processor = AgenticExcelProcessor(config, prompt_config=prompt_config)
+            processor = ExcelProcessor(config, prompt_config=prompt_config)
         elif file_extension == '.docx':
-            processor = AgenticDocxProcessor(config, prompt_config=prompt_config)
+            processor = DocxProcessor(config, prompt_config=prompt_config)
         elif file_extension in ['.wav', '.mp3']:
-            processor = AgenticAudioProcessor(config, prompt_config=prompt_config)
+            processor = AudioProcessor(config, prompt_config=prompt_config)
         else:
             # Fallback: try DICOM processor for files without extension (common in MIMIC)
-            test_processor = DICOMVisionOCRProcessor(config, save_intermediate=True, prompt_config=prompt_config, process_all_frames=video_process_all_frames)
+            test_processor = DICOMProcessor(config, save_intermediate=True, prompt_config=prompt_config, process_all_frames=video_process_all_frames)
             if test_processor.can_process(input_path):
                 processor = test_processor
 
@@ -846,26 +846,26 @@ async def process_folder(
                 file_extension = input_path.suffix.lower()
 
                 if file_extension in ['.dcm', '.dicom']:
-                    processor = DICOMVisionOCRProcessor(config, save_intermediate=False, prompt_config=prompt_config, process_all_frames=video_process_all_frames)
+                    processor = DICOMProcessor(config, save_intermediate=False, prompt_config=prompt_config, process_all_frames=video_process_all_frames)
                 elif file_extension in ['.mp4', '.avi', '.mov', '.mkv']:
                     processor = VideoVisionOCRProcessor(config, save_intermediate=False, prompt_config=prompt_config, process_all_frames=video_process_all_frames)
                 elif file_extension == '.pdf':
-                    processor = PDFVisionOCRProcessor(config, prompt_config=prompt_config)
+                    processor = PDFProcessor(config, prompt_config=prompt_config)
                 elif file_extension in ['.png', '.jpg', '.jpeg']:
-                    processor = PNGVisionOCRProcessor(config, prompt_config=prompt_config)
+                    processor = ImageProcessor(config, prompt_config=prompt_config)
                 elif file_extension in ['.txt', '.hea']:
-                    processor = AgenticTextProcessor(config, prompt_config=prompt_config)
+                    processor = TextProcessor(config, prompt_config=prompt_config)
                 elif file_extension == '.csv':
-                    processor = AgenticCSVProcessor(config, prompt_config=prompt_config)
+                    processor = CSVProcessor(config, prompt_config=prompt_config)
                 elif file_extension in ['.xlsx', '.xls']:
-                    processor = AgenticExcelProcessor(config, prompt_config=prompt_config)
+                    processor = ExcelProcessor(config, prompt_config=prompt_config)
                 elif file_extension == '.docx':
-                    processor = AgenticDocxProcessor(config, prompt_config=prompt_config)
+                    processor = DocxProcessor(config, prompt_config=prompt_config)
                 elif file_extension in ['.wav', '.mp3']:
-                    processor = AgenticAudioProcessor(config, prompt_config=prompt_config)
+                    processor = AudioProcessor(config, prompt_config=prompt_config)
                 else:
                     # Fallback: try DICOM processor for files without extension (common in MIMIC)
-                    test_processor = DICOMVisionOCRProcessor(config, save_intermediate=False, prompt_config=prompt_config, process_all_frames=video_process_all_frames)
+                    test_processor = DICOMProcessor(config, save_intermediate=False, prompt_config=prompt_config, process_all_frames=video_process_all_frames)
                     if test_processor.can_process(input_path):
                         processor = test_processor
 

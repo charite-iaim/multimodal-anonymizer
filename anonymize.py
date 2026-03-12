@@ -23,14 +23,14 @@ from anonymizer import (
     FileTypeDetector,
     DataType,
 )
-from anonymizer.processors.csv_processor import AgenticCSVProcessor
-from anonymizer.processors.excel_processor import AgenticExcelProcessor
-from anonymizer.processors.text_processor import AgenticTextProcessor
-from anonymizer.processors.docx_processor import AgenticDocxProcessor
-from anonymizer.processors.audio_processor import AgenticAudioProcessor
-from anonymizer.processors.dicom_processor import DICOMVisionOCRProcessor
-from anonymizer.processors.pdf_processor import PDFVisionOCRProcessor
-from anonymizer.processors.image_processor import PNGVisionOCRProcessor
+from anonymizer.processors.csv_processor import CSVProcessor
+from anonymizer.processors.excel_processor import ExcelProcessor
+from anonymizer.processors.text_processor import TextProcessor
+from anonymizer.processors.docx_processor import DocxProcessor
+from anonymizer.processors.audio_processor import AudioProcessor
+from anonymizer.processors.dicom_processor import DICOMProcessor
+from anonymizer.processors.pdf_processor import PDFProcessor
+from anonymizer.processors.image_processor import ImageProcessor
 from anonymizer.processors.video_processor import VideoVisionOCRProcessor
 from anonymizer.filename_anonymizer import FilenameAnonymizer
 from anonymizer.processing_tracker import ProcessingTracker
@@ -112,30 +112,30 @@ def get_processor(
         if detection_result.data_type == DataType.TEXT:
             # Text data -> use suggested processor
             if detection_result.suggested_processor == "text":
-                processor = AgenticTextProcessor(config, time_offset_days=time_offset_days, prompt_config=prompt_config)
+                processor = TextProcessor(config, time_offset_days=time_offset_days, prompt_config=prompt_config)
                 if processor.can_process(file_path):
                     print(f"Using Text processor based on LLM detection")
                     return processor
             elif detection_result.suggested_processor == "csv":
-                processor = AgenticCSVProcessor(config, time_offset_days=time_offset_days, prompt_config=prompt_config)
+                processor = CSVProcessor(config, time_offset_days=time_offset_days, prompt_config=prompt_config)
                 if processor.can_process(file_path):
                     print(f"Using CSV processor based on LLM detection")
                     return processor
 
             # Fallback: try both processors
-            text_processor = AgenticTextProcessor(config, time_offset_days=time_offset_days, prompt_config=prompt_config)
+            text_processor = TextProcessor(config, time_offset_days=time_offset_days, prompt_config=prompt_config)
             if text_processor.can_process(file_path):
                 print(f"Using Text processor (fallback)")
                 return text_processor
 
-            csv_processor = AgenticCSVProcessor(config, time_offset_days=time_offset_days, prompt_config=prompt_config)
+            csv_processor = CSVProcessor(config, time_offset_days=time_offset_days, prompt_config=prompt_config)
             if csv_processor.can_process(file_path):
                 print(f"Using CSV processor (fallback)")
                 return csv_processor
 
         elif detection_result.data_type == DataType.IMAGE:
             # Image data -> use Vision OCR processor
-            processor = PNGVisionOCRProcessor(config)
+            processor = ImageProcessor(config)
             if processor.can_process(file_path):
                 print(f"Using Vision+OCR processor based on LLM detection")
                 return processor
@@ -145,15 +145,15 @@ def get_processor(
 
     # Original extension-based processor selection with agentic processors
     processors = [
-        DICOMVisionOCRProcessor(config),
+        DICOMProcessor(config, time_offset_days=time_offset_days),
         VideoVisionOCRProcessor(config),
-        PNGVisionOCRProcessor(config),
-        PDFVisionOCRProcessor(config),
-        AgenticTextProcessor(config, time_offset_days=time_offset_days, prompt_config=prompt_config),
-        AgenticCSVProcessor(config, time_offset_days=time_offset_days, prompt_config=prompt_config),
-        AgenticExcelProcessor(config, time_offset_days=time_offset_days, prompt_config=prompt_config),
-        AgenticDocxProcessor(config, time_offset_days=time_offset_days, prompt_config=prompt_config),
-        AgenticAudioProcessor(config, time_offset_days=time_offset_days, prompt_config=prompt_config),
+        ImageProcessor(config),
+        PDFProcessor(config),
+        TextProcessor(config, time_offset_days=time_offset_days, prompt_config=prompt_config),
+        CSVProcessor(config, time_offset_days=time_offset_days, prompt_config=prompt_config),
+        ExcelProcessor(config, time_offset_days=time_offset_days, prompt_config=prompt_config),
+        DocxProcessor(config, time_offset_days=time_offset_days, prompt_config=prompt_config),
+        AudioProcessor(config, time_offset_days=time_offset_days, prompt_config=prompt_config),
     ]
 
     for processor in processors:
@@ -1224,7 +1224,7 @@ def main():
     print("  - AgenticDocxProcessor (tool-calling approach)")
     print("  - DICOMVisionOCRProcessor (Vision LLM + OCR)")
     print("  - PDFVisionOCRProcessor (Vision LLM + OCR)")
-    print("  - PNGVisionOCRProcessor (Vision LLM + OCR)")
+    print("  - ImageProcessor (Vision LLM + OCR)")
     print()
 
     if use_llm_detection:

@@ -27,8 +27,6 @@ from ..models import PIIElement, BoundingBox
 from ..prompt_config import PromptConfig, DEFAULT_PROMPT_CONFIG
 from ..tools.face_detection_tool import (
     detect_faces,
-    detect_faces_from_pil,
-    redact_faces_in_pil_image,
     get_face_bounding_boxes,
 )
 
@@ -37,7 +35,6 @@ try:
     from ..tools.trocr_ocr import (
         is_trocr_available,
         get_trocr_recognizer,
-        TrOCRHandwritingRecognizer
     )
     TROCR_AVAILABLE = is_trocr_available()
 except ImportError:
@@ -203,7 +200,7 @@ class ImageVerificationAgent:
             new_size = (int(width * scale), int(height * scale))
             image = image.resize(new_size, Image.Resampling.LANCZOS)
 
-        # Convert to RGB if necessary (JPEG doesn't support alpha)
+        # Convert to RGB if necessary
         if image.mode in ('L', 'LA', 'P', 'RGBA'):
             image = image.convert('RGB')
 
@@ -371,7 +368,6 @@ IMPORTANT:
                     print(f"    EasyOCR: No match for \"{pii.text}\" - will try TrOCR")
 
         # Fallback: Use TrOCR for items that EasyOCR couldn't match
-        # TrOCR (fine-tuned) is effective for handwritten text detection
         if unmatched_pii and self._trocr_recognizer is not None:
             fallback_elements = self._match_remaining_pii_with_trocr(image, unmatched_pii)
             additional_elements.extend(fallback_elements)
@@ -408,8 +404,7 @@ IMPORTANT:
         """
         Extract text from image using TrOCR (fine-tuned handwriting model).
 
-        TrOCR is a transformer-based OCR model that excels at handwritten text
-        recognition. This method uses a sliding window approach since TrOCR
+        This method uses a sliding window approach since TrOCR
         works best on cropped text regions.
 
         Args:
@@ -535,9 +530,6 @@ IMPORTANT:
         """
         Use TrOCR to find bounding boxes for PII text that the primary OCR missed.
 
-        TrOCR is a fine-tuned transformer model specifically designed for
-        handwritten text recognition, making it effective for this use case.
-
         Args:
             image: The current image to scan
             unmatched_pii: PII items that couldn't be matched via primary OCR
@@ -589,7 +581,7 @@ IMPORTANT:
                             best_idx = idx
                         continue
 
-                # Fuzzy match — TrOCR is more accurate, so use higher threshold
+                # Fuzzy match
                 ratio = SequenceMatcher(None, pii_text, ocr_lower).ratio()
                 handwriting_threshold = max(0.45, self.similarity_threshold - 0.1)
                 if ratio > best_score and ratio >= handwriting_threshold:
@@ -746,8 +738,7 @@ IMPORTANT:
                     if tool_name == "detect_faces":
                         print("  Verification Agent: LLM called detect_faces tool")
 
-                        # The LLM called the face detection tool
-                        # We run face detection directly on the image
+                        # LLM called the face detection tool
                         current_image, detected_faces = self.detect_and_redact_faces(current_image)
                         face_bboxes.extend(detected_faces)
 
@@ -873,7 +864,6 @@ def create_verification_step(
             )
             final_result = result
 
-            # If clean, we're done
             if result.is_clean:
                 print(f"  Verification passed after {round_num + 1} round(s)")
                 break
@@ -886,7 +876,6 @@ def create_verification_step(
             )
             all_additional_elements.extend(additional)
 
-            # If we couldn't redact anything new, stop
             if not additional:
                 print("  Warning: Could not locate remaining PII for redaction")
                 break

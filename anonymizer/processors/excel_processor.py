@@ -39,9 +39,9 @@ class DateTimeShift(BaseModel):
     shifted_value: str = Field(description="Shifted date/time value")
 
 
-class AgenticExcelProcessor(FileProcessor):
+class ExcelProcessor(FileProcessor):
     """
-    Agentic processor for Excel files using LLM with tool-calling.
+    Processor for Excel files using LLM with tool-calling.
 
     This processor implements a two-phase approach:
     1. Time-Shift Phase: LLM uses the shift_datetime tool to find and shift all dates
@@ -83,9 +83,15 @@ class AgenticExcelProcessor(FileProcessor):
         # Thread-safe lock for print statements
         self._print_lock = threading.Lock()
 
-        # Generate random offset if not provided (between -365 and +365 days)
+
+        # Generate random offset if not provided
         if time_offset_days is None:
-            self.time_offset_days = random.randint(-365, 365)
+            # Random offset between 1-3 years in days
+            self.time_offset_days = random.randint(365, 1095)
+
+            # Random sign (+/-)
+            if random.random() < 0.5:
+                self.time_offset_days = -self.time_offset_days
         else:
             self.time_offset_days = time_offset_days
 
@@ -183,7 +189,7 @@ class AgenticExcelProcessor(FileProcessor):
         input_path = Path(input_path) if isinstance(input_path, str) else input_path
         output_path = Path(output_path) if isinstance(output_path, str) else output_path
 
-        print(f"Processing (Agentic Excel): {input_path.name}")
+        print(f"Processing Excel: {input_path.name}")
         print(f"Time offset: {self.time_offset_days} days")
 
         # Step 1: Read Excel file (all sheets)
@@ -221,14 +227,14 @@ class AgenticExcelProcessor(FileProcessor):
             all_dates_shifted.extend(dates_shifted)
             print(f"Shifted {len(dates_shifted)} date/time values")
 
-            # Step 2b: Phase 1b - Identify and redact entire PII columns
-            print(f"\n=== Phase 1b: Column-Level PII Detection ({sheet_name}) ===")
-            column_redacted_rows, columns_redacted = self._phase1b_identify_pii_columns(shifted_rows, headers)
+            # Step 3a: Phase 2a - Identify and redact entire PII columns
+            print(f"\n=== Phase 2a: Column-Level PII Detection ({sheet_name}) ===")
+            column_redacted_rows, columns_redacted = self._phase2a_identify_pii_columns(shifted_rows, headers)
             print(f"Redacted {len(columns_redacted)} entire column(s): {', '.join(columns_redacted) if columns_redacted else 'none'}")
 
-            # Step 3: Phase 2 - Anonymize other PII (agentic with redact_text tool)
-            print(f"\n=== Phase 2: PII Anonymization ({sheet_name}) ===")
-            anonymized_rows, pii_redactions = self._phase2_anonymize_pii(column_redacted_rows, headers, columns_redacted)
+            # Step 3b: Phase 2b - Anonymize other PII (agentic with redact_text tool)
+            print(f"\n=== Phase 2b: PII Anonymization ({sheet_name}) ===")
+            anonymized_rows, pii_redactions = self._phase2b_anonymize_pii(column_redacted_rows, headers, columns_redacted)
             total_pii_redactions += pii_redactions
             print(f"Applied {pii_redactions} PII redactions")
 
@@ -441,12 +447,12 @@ class AgenticExcelProcessor(FileProcessor):
 
         return modified_rows, all_shifts
 
-    def _phase1b_identify_pii_columns(
+    def _phase2a_identify_pii_columns(
         self,
         rows: List[Dict[str, str]],
         headers: List[str]
     ) -> Tuple[List[Dict[str, str]], List[str]]:
-        """Phase 1b: Use LLM to identify columns that contain PII."""
+        """Phase 2a: Use LLM to identify columns that contain PII."""
         if not rows:
             return rows, []
 
@@ -649,13 +655,13 @@ class AgenticExcelProcessor(FileProcessor):
 
         return modified_batch, batch_redactions, redactions_applied
 
-    def _phase2_anonymize_pii(
+    def _phase2b_anonymize_pii(
         self,
         rows: List[Dict[str, str]],
         headers: List[str],
         already_redacted_columns: Optional[List[str]] = None
     ) -> Tuple[List[Dict[str, str]], int]:
-        """Phase 2: Anonymize all PII using agentic tool-calling."""
+        """Phase 2b: Anonymize all PII using agentic tool-calling."""
         if already_redacted_columns is None:
             already_redacted_columns = []
 

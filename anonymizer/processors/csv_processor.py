@@ -67,9 +67,9 @@ class CSVAnonymizationResult(BaseModel):
     )
 
 
-class AgenticCSVProcessor(FileProcessor):
+class CSVProcessor(FileProcessor):
     """
-    Agentic processor for CSV files using LLM with tool-calling.
+    CSV processor for CSV files.
 
     This processor implements a two-phase approach:
     1. Time-Shift Phase: LLM uses the shift_datetime tool to find and shift all dates
@@ -81,8 +81,8 @@ class AgenticCSVProcessor(FileProcessor):
         config: AnonymizerConfig,
         time_offset_days: Optional[int] = None,
         max_workers: int = 4,
-        batch_size_phase2: int = 15,  # Reduced from 30 to improve attention on each row
-        batch_size_phase3: int = 15,  # Reduced from 25 to improve verification quality
+        batch_size_phase2: int = 15,
+        batch_size_phase3: int = 15,
         prompt_config: Optional[PromptConfig] = None
     ):
         """
@@ -109,9 +109,14 @@ class AgenticCSVProcessor(FileProcessor):
         # Thread-safe lock for print statements
         self._print_lock = threading.Lock()
 
-        # Generate random offset if not provided (between -365 and +365 days)
+        # Generate random offset if not provided
         if time_offset_days is None:
-            self.time_offset_days = random.randint(-365, 365)
+            # Random offset between 1-3 years in days
+            self.time_offset_days = random.randint(365, 1095)
+
+            # Random sign (+/-)
+            if random.random() < 0.5:
+                self.time_offset_days = -self.time_offset_days
         else:
             self.time_offset_days = time_offset_days
 
@@ -185,11 +190,11 @@ class AgenticCSVProcessor(FileProcessor):
 
     def anonymize(self, input_path: Path, output_path: Path, verify: bool = True) -> None:
         """
-        Anonymize CSV file using agentic LLM approach.
+        Anonymize CSV file using agentic approach.
 
         Steps:
         1. Read CSV file
-        2. Phase 1: Extract and shift all dates/times using regex
+        2. Phase 1: Extract and shift all dates using regex
         3. Phase 2: Use LLM to anonymize all other PII
         4. Phase 3: Verification agent checks and fixes any issues
         5. Save anonymized CSV
@@ -203,7 +208,7 @@ class AgenticCSVProcessor(FileProcessor):
         input_path = Path(input_path) if isinstance(input_path, str) else input_path
         output_path = Path(output_path) if isinstance(output_path, str) else output_path
 
-        print(f"Processing (Agentic): {input_path.name}")
+        print(f"Processing: {input_path.name}")
         print(f"Time offset: {self.time_offset_days} days")
 
         # Step 1: Read CSV file
@@ -224,14 +229,14 @@ class AgenticCSVProcessor(FileProcessor):
         shifted_rows, dates_shifted = self._phase1_shift_times(rows, headers)
         print(f"Shifted {len(dates_shifted)} date/time values")
 
-        # Step 2b: Phase 1b - Identify and redact entire PII columns
-        print("\n=== Phase 1b: Column-Level PII Detection ===")
-        column_redacted_rows, columns_redacted = self._phase1b_identify_pii_columns(shifted_rows, headers)
+        # Step 2b: Phase 2a - Identify and redact entire PII columns
+        print("\n=== Phase 2a: Column-Level PII Detection ===")
+        column_redacted_rows, columns_redacted = self._phase2a_identify_pii_columns(shifted_rows, headers)
         print(f"Redacted {len(columns_redacted)} entire column(s): {', '.join(columns_redacted) if columns_redacted else 'none'}")
 
-        # Step 3: Phase 2 - Anonymize other PII (agentic with redact_text tool)
-        print("\n=== Phase 2: PII Anonymization ===")
-        anonymized_rows, pii_redactions = self._phase2_anonymize_pii(column_redacted_rows, headers, columns_redacted)
+        # Step 3: Phase 2b - Anonymize other PII (agentic with redact_text tool)
+        print("\n=== Phase 2b: PII Anonymization ===")
+        anonymized_rows, pii_redactions = self._phase2b_anonymize_pii(column_redacted_rows, headers, columns_redacted)
         print(f"Applied {pii_redactions} PII redactions")
 
         # Step 5: Phase 3 - Verification (optional but recommended)
@@ -456,13 +461,13 @@ class AgenticCSVProcessor(FileProcessor):
 
         return modified_rows, all_shifts
 
-    def _phase1b_identify_pii_columns(
+    def _phase2a_identify_pii_columns(
         self,
         rows: List[Dict[str, str]],
         headers: List[str]
     ) -> Tuple[List[Dict[str, str]], List[str]]:
         """
-        Phase 1b: Use LLM to identify columns that contain PII and should be fully redacted.
+        Phase 2a: Use LLM to identify columns that contain PII and should be fully redacted.
 
         The LLM analyzes column names and sample values to determine which columns
         contain identifiers or other PII that should be redacted across all rows.
@@ -581,7 +586,7 @@ class AgenticCSVProcessor(FileProcessor):
             start_idx: Absolute start index of this batch in the full CSV
             batch_num: Batch number (for logging)
             total_batches: Total number of batches (for logging)
-            already_redacted_columns: Columns already redacted in Phase 1b (to skip)
+            already_redacted_columns: Columns already redacted in Phase 2a (to skip)
 
         Returns:
             Tuple of (modified batch rows, redaction count, list of redactions applied)
@@ -597,7 +602,7 @@ class AgenticCSVProcessor(FileProcessor):
         end_idx = start_idx + len(batch_rows)
         redactions_applied: List[Tuple[int, str, str, str]] = []
 
-        self._safe_print(f"  Phase 2 - Batch {batch_num + 1}/{total_batches} (rows {start_idx}-{end_idx-1})")
+        self._safe_print(f"  Phase 2b - Batch {batch_num + 1}/{total_batches} (rows {start_idx}-{end_idx-1})")
 
         # Filter out already redacted columns from the preview
         active_headers = [h for h in headers if h not in already_redacted_columns]
@@ -709,14 +714,14 @@ class AgenticCSVProcessor(FileProcessor):
 
         return modified_batch, batch_redactions, redactions_applied
 
-    def _phase2_anonymize_pii(
+    def _phase2b_anonymize_pii(
         self,
         rows: List[Dict[str, str]],
         headers: List[str],
         already_redacted_columns: Optional[List[str]] = None
     ) -> Tuple[List[Dict[str, str]], int]:
         """
-        Phase 2: Anonymize all PII using agentic tool-calling with redact_text.
+        Phase 2b: Anonymize all PII using agentic tool-calling with redact_text.
 
         The LLM identifies PII and calls the redact_text tool for each item found.
         Batches are processed in parallel for better performance on large files.
@@ -724,7 +729,7 @@ class AgenticCSVProcessor(FileProcessor):
         Args:
             rows: CSV rows (with dates already shifted)
             headers: Column headers
-            already_redacted_columns: List of column names already redacted in Phase 1b
+            already_redacted_columns: List of column names already redacted in Phase 2a
 
         Returns:
             Tuple of (anonymized rows, number of redactions applied)
@@ -933,7 +938,6 @@ class AgenticCSVProcessor(FileProcessor):
         The agent compares original and anonymized data to identify:
         1. Unshifted dates (dates that appear in both original and anonymized)
         2. Unredacted PII (names, IDs, etc. that weren't anonymized)
-        3. Over-redaction (non-PII that was incorrectly redacted)
 
         Batches are processed in parallel for better performance.
 
@@ -980,7 +984,6 @@ class AgenticCSVProcessor(FileProcessor):
                     total_fixes += fix_count
                 except Exception as e:
                     self._safe_print(f"    Verification batch at {start_idx} failed: {e}")
-                    # Keep the anonymized rows (without verification fixes) for failed batch
                     batch_num = start_idx // batch_size
                     end_idx = min(start_idx + batch_size, len(anonymized_rows))
                     results[start_idx] = ([anonymized_rows[i].copy() for i in range(start_idx, end_idx)], 0)
@@ -1017,8 +1020,6 @@ class AgenticCSVProcessor(FileProcessor):
 
                 # Only show if there's content and it changed
                 if orig_val or anon_val:
-                    # Show full content for verification - no truncation!
-                    # Truncation was hiding PIIs in long text fields
                     if orig_val != anon_val:
                         lines.append(f"\n[{header}] (CHANGED)")
                         lines.append(f"  ORIGINAL: {orig_val}")
@@ -1044,7 +1045,7 @@ class AgenticCSVProcessor(FileProcessor):
                 "input_file": str(input_path.name),
                 "output_file": str(output_path.name),
                 "timestamp": datetime.now().isoformat(),
-                "processing_method": "agentic_csv_anonymization",
+                "processing_method": "csv_anonymization",
                 "time_offset_days": self.time_offset_days,
                 "total_dates_shifted": len(dates_shifted),
                 "total_pii_redactions": pii_redactions_count
