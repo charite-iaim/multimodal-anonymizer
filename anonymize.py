@@ -1108,8 +1108,8 @@ def main():
         help="Maximum number of global retry rounds for failed files at the end (default: 3)"
     )
     parser.add_argument(
-        "--provider", type=str, choices=["azure", "fireworks", "local"], default=None,
-        help="LLM provider to use (azure, fireworks, or local). Overrides LLM_PROVIDER environment variable."
+        "--provider", type=str, choices=["openrouter", "local"], default=None,
+        help="LLM provider to use (openrouter or local). Overrides LLM_PROVIDER environment variable."
     )
     parser.add_argument(
         "--local-base-url", type=str, default=None,
@@ -1203,17 +1203,15 @@ def main():
         return
 
     print(f"LLM Provider: {config.llm_provider}")
-    if config.llm_provider == "azure":
-        print(f"  Model: {config.azure_deployment_name}")
+    if config.llm_provider == "openrouter":
+        print(f"  Model: {config.openrouter_model}")
+        print(f"  Vision Model: {config.openrouter_vision_model}")
     elif config.llm_provider == "local":
         print(f"  Model: {config.local_model}")
         if config.local_vision_model:
             print(f"  Vision Model: {config.local_vision_model}")
         print(f"  Base URL: {config.local_base_url}")
         print(f"  Thinking: {config.local_thinking}")
-    else:
-        print(f"  Model: {config.fireworks_model}")
-        print(f"  Vision Model: {config.fireworks_vision_model}")
     print()
     print(f"Prompt Configuration: {args.prompt_config}")
     print()
