@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from 'react'
 import './FileUpload.css'
-import { BsUpload, BsFolder, BsCameraVideo, BsExclamationTriangle, BsFileEarmark, BsX, BsChevronUp, BsChevronDown } from 'react-icons/bs'
+import { BsUpload, BsFolder, BsCameraVideo, BsExclamationTriangle, BsFileEarmark, BsX, BsChevronUp, BsChevronDown, BsArrowLeft } from 'react-icons/bs'
 import PromptSettings from './PromptSettings'
 
 const FUN_MESSAGES = [
@@ -39,7 +39,7 @@ const isDicomExtension = (file) => {
   return DICOM_EXTENSIONS.includes(ext)
 }
 
-function FileUpload({ backendUrl }) {
+function FileUpload({ backendUrl, onBackToConfig }) {
   const [files, setFiles] = useState([])
   const [dragActive, setDragActive] = useState(false)
   const [processing, setProcessing] = useState(false)
@@ -65,7 +65,7 @@ function FileUpload({ backendUrl }) {
     return false
   })()
 
-  // Rotate fun messages while processing
+  // Rotate messages while processing
   useEffect(() => {
     if (!processing) {
       setFunMessage('')
@@ -447,6 +447,14 @@ function FileUpload({ backendUrl }) {
 
   return (
     <div className="file-upload">
+
+      <button
+        className="back-to-config-button"
+        onClick={onBackToConfig}
+        type="button"
+      >
+        <BsArrowLeft /> LLM Configuration
+      </button>
 
       {/* Prompt customization */}
       <PromptSettings

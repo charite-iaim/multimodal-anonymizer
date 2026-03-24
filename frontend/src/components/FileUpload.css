@@ -2,7 +2,24 @@
   margin: 0 auto;
 }
 
-/* Video Settings Styles */
+.back-to-config-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  background: none;
+  border: none;
+  color: var(--color-text-secondary);
+  font-size: 0.9rem;
+  cursor: pointer;
+  padding: 0.25rem 0;
+  margin-bottom: 1rem;
+  transition: color 0.2s;
+}
+
+.back-to-config-button:hover {
+  color: var(--color-text-primary);
+}
+
 .video-settings {
   margin-bottom: 1.5rem;
   padding: 1rem 1.25rem;
@@ -681,7 +698,6 @@
   color: var(--color-warning);
 }
 
-/* Verification warning styles */
 .success-message.has-warnings {
   background: color-mix(in srgb, var(--color-warning-icon) 12%, transparent);
   border-color: var(--color-warning-icon);
@@ -838,7 +854,6 @@
   margin-top: 1rem !important;
 }
 
-/* Feature Warning Styles */
 .feature-warning {
   margin-bottom: 1.5rem;
   padding: 1rem 1.25rem;

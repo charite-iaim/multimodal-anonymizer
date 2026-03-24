@@ -208,7 +208,6 @@ function PromptSettings({ backendUrl, isOpen, onToggle }) {
         <div className="prompt-settings-error">{error}</div>
       ) : prompts ? (
         <div className="prompt-settings-content">
-          {/* Additional Instructions - collapsible, shown at top */}
           <div className={`prompt-field ${isModified('additional_instructions') ? 'prompt-field-modified' : ''}`}>
             <div
               className="prompt-field-header prompt-field-collapsible"

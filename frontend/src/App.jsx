@@ -18,6 +18,10 @@ function App() {
     setIsConfigured(true)
   }
 
+  const handleBackToConfig = () => {
+    setIsConfigured(false)
+  }
+
   return (
     <div className="app">
       <div className="container">
@@ -46,7 +50,7 @@ function App() {
           </div>
         ) : (
           <div className="upload-section">
-            <FileUpload backendUrl={backendUrl} />
+            <FileUpload backendUrl={backendUrl} onBackToConfig={handleBackToConfig} />
           </div>
         )}
 
@@ -59,9 +63,9 @@ function App() {
         </p>
         <div className="footer-contact">
           <span>Developed by</span>
-          <a href="mailto:jane.doe@example.com">Jane Doe</a>
+          <a href="mailto:anja.hirsch@charite.de">Anja Hirsch</a>
           <span>&</span>
-          <a href="mailto:john.smith@example.com">John Smith</a>
+          <a href="mailto:julian-gabriel.madrid@dhzc-charite.de">Julian Madrid</a>
         </div>
       </footer>
     </div>
