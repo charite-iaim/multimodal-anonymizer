@@ -32,8 +32,8 @@ from ..tools.face_detection_tool import detect_faces_in_image, redact_faces_in_p
 from .dicom_face_redaction_processor import redact_faces_in_dicom_frames as unet_deface_frames
 
 
-class VideoVisionOCRProcessor(FileProcessor):
-    """Processor for video files (MP4) using Vision LLM + OCR approach."""
+class VideoProcessor(FileProcessor):
+    """Processor for video files using Vision LLM + OCR."""
 
     def __init__(
         self,

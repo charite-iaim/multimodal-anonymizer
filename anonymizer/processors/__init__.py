@@ -5,7 +5,7 @@ File format specific processors (agentic/vision-based).
 from .image_processor import ImageProcessor
 from .dicom_processor import DICOMProcessor
 from .pdf_processor import PDFProcessor
-from .video_processor import VideoVisionOCRProcessor
+from .video_processor import VideoProcessor
 from .text_processor import TextProcessor
 from .csv_processor import CSVProcessor
 from .excel_processor import ExcelProcessor
@@ -20,7 +20,7 @@ __all__ = [
     "ImageProcessor",
     "DICOMProcessor",
     "PDFProcessor",
-    "VideoVisionOCRProcessor",
+    "VideoProcessor",
     "TextProcessor",
     "CSVProcessor",
     "ExcelProcessor",

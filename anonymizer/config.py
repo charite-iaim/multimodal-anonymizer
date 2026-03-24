@@ -47,7 +47,7 @@ class AnonymizerConfig:
     local_model: str = "llama3.2"  # Model name as known by the local server
     local_vision_model: Optional[str] = None  # Optional separate vision model
     local_api_key: Optional[str] = None  # Most local servers don't need this
-    local_thinking: bool = False  # Enable/disable thinking mode for reasoning models (e.g., kimi-k2.5)
+    local_thinking: bool = False  # Enable/disable thinking mode for reasoning models
 
     def __post_init__(self):
         """Load configuration from environment if not provided."""

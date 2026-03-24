@@ -316,7 +316,7 @@ class ParallelFileProcessor:
             folder_path: Folder path for uniqueness
             time_offset_days: Patient-specific time offset in days for date shifting
             max_retries: Maximum retries for this job (uses processor default if not set)
-            prompt_config_name: Name of prompt config to use (e.g., "default", "mimic")
+            prompt_config_name: Name of prompt config to use
 
         Returns:
             Job dictionary

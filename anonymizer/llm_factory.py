@@ -124,15 +124,15 @@ def _create_local_llm(
     else:
         model = config.local_model
 
-    # Use a dummy key if none provided (most local servers don't need authentication)
+    # Use a dummy key if none provided
     api_key = config.local_api_key or "not-needed"
 
-    # Disable SSL verification for localhost tunnels (e.g., SSH tunnel to remote LLM)
+    # Disable SSL verification for localhost tunnels
     http_client = None
     if config.local_base_url and "localhost" in config.local_base_url:
         http_client = httpx.Client(verify=False)
 
-    # Pass thinking mode via extra_body for reasoning models (e.g., kimi-k2.5)
+    # Pass thinking mode via extra_body for reasoning models
     model_kwargs = {}
     if not config.local_thinking:
         model_kwargs["extra_body"] = {

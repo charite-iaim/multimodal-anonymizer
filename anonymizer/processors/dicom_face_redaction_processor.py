@@ -5,7 +5,7 @@ Uses a trained ResNet U-Net model to redact faces in DICOM images.
 The model takes a DICOM image (converted to RGB) and outputs the redacted version
 with faces blacked out.
 
-This processor is invoked by DICOMVisionOCRProcessor when the LLM determines
+This processor is invoked by DICOMProcessor when the LLM determines
 that a DICOM image is a CT/MRI head scan.
 """
 

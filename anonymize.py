@@ -31,7 +31,7 @@ from anonymizer.processors.audio_processor import AudioProcessor
 from anonymizer.processors.dicom_processor import DICOMProcessor
 from anonymizer.processors.pdf_processor import PDFProcessor
 from anonymizer.processors.image_processor import ImageProcessor
-from anonymizer.processors.video_processor import VideoVisionOCRProcessor
+from anonymizer.processors.video_processor import VideoProcessor
 from anonymizer.filename_anonymizer import FilenameAnonymizer
 from anonymizer.processing_tracker import ProcessingTracker
 from anonymizer.parallel_processor import (
@@ -48,19 +48,18 @@ def load_prompt_config(config_name: str = "default"):
 
     Args:
         config_name: Name of the prompt config to load.
-                    Options: "default", "mimic"
+                    Options: "default", "custom"
 
     Returns:
         PromptConfig instance
     """
     if config_name == "default":
         return DEFAULT_PROMPT_CONFIG
-    elif config_name == "mimic":
-        from anonymizer.mimic_prompts import MIMIC_PROMPT_CONFIG
-        return MIMIC_PROMPT_CONFIG
+    elif config_name == "custom":
+        from anonymizer.custom_prompts import CUSTOM_PROMPT_CONFIG
+        return CUSTOM_PROMPT_CONFIG
     else:
-        raise ValueError(f"Unknown prompt config: {config_name}. Available: default, mimic")
-
+        raise ValueError(f"Unknown prompt config: {config_name}. Available: default, custom")
 
 def generate_patient_time_offset() -> int:
     """
@@ -146,7 +145,7 @@ def get_processor(
     # Original extension-based processor selection with agentic processors
     processors = [
         DICOMProcessor(config, time_offset_days=time_offset_days),
-        VideoVisionOCRProcessor(config),
+        VideoProcessor(config),
         ImageProcessor(config),
         PDFProcessor(config),
         TextProcessor(config, time_offset_days=time_offset_days, prompt_config=prompt_config),
@@ -564,9 +563,9 @@ def _process_directory_parallel(
     prompt_config_name = "default"
     if prompt_config:
         # Determine which config is being used
-        from anonymizer.mimic_prompts import MIMIC_PROMPT_CONFIG
-        if prompt_config is MIMIC_PROMPT_CONFIG:
-            prompt_config_name = "mimic"
+        from anonymizer.custom_prompts import CUSTOM_PROMPT_CONFIG
+        if prompt_config is CUSTOM_PROMPT_CONFIG:
+            prompt_config_name = "custom"
 
     # Create parallel processor
     parallel_processor = ParallelFileProcessor(
@@ -1038,7 +1037,7 @@ def process_directory_recursive(
 def main():
     """Main entry point."""
     parser = argparse.ArgumentParser(
-        description="Anonymize files using agentic/vision-based LLM processors"
+        description="Anonymize files using agentic, vision-based LLM processors"
     )
     parser.add_argument(
         "--input", type=str, help="Input file or directory path"
@@ -1081,7 +1080,7 @@ def main():
     )
     parser.add_argument(
         "--no-hash", action="store_true",
-        help="Disable file hash computation in tracking (faster but won't detect file modifications)"
+        help="Disable file hash computation in tracking"
     )
     parser.add_argument(
         "--clear-tracking", action="store_true",
@@ -1089,11 +1088,11 @@ def main():
     )
     parser.add_argument(
         "--no-parallel", action="store_true",
-        help="Disable parallel processing (process files sequentially). By default, parallel processing is enabled."
+        help="Disable parallel processing. By default, parallel processing is enabled."
     )
     parser.add_argument(
-        "--workers", "-w", type=int, default=None,
-        help="Number of parallel workers (default: CPU count - 1)"
+        "--workers", "-w", type=int, default=1,
+        help="Number of parallel workers"
     )
     parser.add_argument(
         "--retry-failed", action="store_true",
@@ -1101,11 +1100,11 @@ def main():
     )
     parser.add_argument(
         "--max-retries", type=int, default=3,
-        help="Maximum number of retries per file for transient errors (default: 3)"
+        help="Maximum number of retries per file for transient errors"
     )
     parser.add_argument(
         "--retry-rounds", type=int, default=3,
-        help="Maximum number of global retry rounds for failed files at the end (default: 3)"
+        help="Maximum number of global retry rounds for failed files at the end"
     )
     parser.add_argument(
         "--provider", type=str, choices=["openrouter", "local"], default=None,
@@ -1113,19 +1112,19 @@ def main():
     )
     parser.add_argument(
         "--local-base-url", type=str, default=None,
-        help="Base URL for local LLM server (e.g., http://localhost:11434/v1 for Ollama). Overrides LOCAL_BASE_URL env var."
+        help="Base URL for local LLM server. Overrides LOCAL_BASE_URL env var."
     )
     parser.add_argument(
         "--local-model", type=str, default=None,
-        help="Model name for local LLM (e.g., llama3.2, qwen3-vl:32b). Overrides LOCAL_MODEL env var."
+        help="Model name for local LLM . Overrides LOCAL_MODEL env var."
     )
     parser.add_argument(
         "--local-vision-model", type=str, default=None,
         help="Vision model name for local LLM (if different from --local-model). Overrides LOCAL_VISION_MODEL env var."
     )
     parser.add_argument(
-        "--prompt-config", type=str, choices=["default", "mimic"], default="mimic",
-        help="Prompt configuration to use. 'default' uses generic prompts, 'mimic' uses MIMIC-IV specific prompts. (default: default)"
+        "--prompt-config", type=str, choices=["default", "custom"], default="default",
+        help="Prompt configuration to use. 'default' uses generic prompts, 'custom' uses the prompts defined in anonymizer/custom_prompts.py."
     )
 
     args = parser.parse_args()
@@ -1215,14 +1214,14 @@ def main():
     print()
     print(f"Prompt Configuration: {args.prompt_config}")
     print()
-    print("Using AGENTIC/VISION-BASED processors:")
-    print("  - AgenticCSVProcessor (tool-calling approach)")
-    print("  - AgenticExcelProcessor (tool-calling approach)")
-    print("  - AgenticTextProcessor (tool-calling approach)")
-    print("  - AgenticDocxProcessor (tool-calling approach)")
-    print("  - DICOMVisionOCRProcessor (Vision LLM + OCR)")
-    print("  - PDFVisionOCRProcessor (Vision LLM + OCR)")
-    print("  - ImageProcessor (Vision LLM + OCR)")
+    print("Using AGENTIC processors:")
+    print("  - AgenticCSVProcessor")
+    print("  - AgenticExcelProcessor")
+    print("  - AgenticTextProcessor")
+    print("  - AgenticDocxProcessor")
+    print("  - DICOMProcessor")
+    print("  - PDFProcessor")
+    print("  - ImageProcessor")
     print()
 
     if use_llm_detection:

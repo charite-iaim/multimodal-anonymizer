@@ -61,7 +61,7 @@ class PDFProcessor(FileProcessor):
 
         if not PDF2IMAGE_AVAILABLE:
             raise ImportError(
-                "pdf2image is required for PDFVisionOCRProcessor. "
+                "pdf2image is required for PDFProcessor. "
                 "Install it with: pip install pdf2image\n"
                 "Also requires poppler: brew install poppler (macOS), apt-get install poppler-utils (Linux) or download from https://poppler.freedesktop.org/ (Windows)"
             )

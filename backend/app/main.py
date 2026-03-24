@@ -40,7 +40,7 @@ sys.path.append(str(Path(__file__).parent.parent.parent))
 from anonymizer.processors.image_processor import ImageProcessor
 from anonymizer.processors.dicom_processor import DICOMProcessor, get_dicom_info
 from anonymizer.processors.pdf_processor import PDFProcessor
-from anonymizer.processors.video_processor import VideoVisionOCRProcessor
+from anonymizer.processors.video_processor import VideoProcessor
 from anonymizer.processors.csv_processor import CSVProcessor
 from anonymizer.processors.excel_processor import ExcelProcessor
 from anonymizer.processors.text_processor import TextProcessor
@@ -630,7 +630,7 @@ async def process_file(
         if file_extension in ['.dcm', '.dicom']:
             processor = DICOMProcessor(config, save_intermediate=True, prompt_config=prompt_config, process_all_frames=video_process_all_frames)
         elif file_extension in ['.mp4', '.avi', '.mov', '.mkv']:
-            processor = VideoVisionOCRProcessor(config, save_intermediate=True, prompt_config=prompt_config, process_all_frames=video_process_all_frames)
+            processor = VideoProcessor(config, save_intermediate=True, prompt_config=prompt_config, process_all_frames=video_process_all_frames)
         elif file_extension == '.pdf':
             processor = PDFProcessor(config, prompt_config=prompt_config)
         elif file_extension in ['.png', '.jpg', '.jpeg']:
@@ -646,7 +646,7 @@ async def process_file(
         elif file_extension in ['.wav', '.mp3']:
             processor = AudioProcessor(config, prompt_config=prompt_config)
         else:
-            # Fallback: try DICOM processor for files without extension (common in MIMIC)
+            # Fallback: try DICOM processor for files without extension
             test_processor = DICOMProcessor(config, save_intermediate=True, prompt_config=prompt_config, process_all_frames=video_process_all_frames)
             if test_processor.can_process(input_path):
                 processor = test_processor
@@ -880,7 +880,7 @@ async def process_folder(
                 if file_extension in ['.dcm', '.dicom']:
                     processor = DICOMProcessor(config, save_intermediate=False, prompt_config=prompt_config, process_all_frames=video_process_all_frames, time_offset_days=time_offset)
                 elif file_extension in ['.mp4', '.avi', '.mov', '.mkv']:
-                    processor = VideoVisionOCRProcessor(config, save_intermediate=False, prompt_config=prompt_config, process_all_frames=video_process_all_frames)
+                    processor = VideoProcessor(config, save_intermediate=False, prompt_config=prompt_config, process_all_frames=video_process_all_frames)
                 elif file_extension == '.pdf':
                     processor = PDFProcessor(config, prompt_config=prompt_config)
                 elif file_extension in ['.png', '.jpg', '.jpeg']:
@@ -896,7 +896,7 @@ async def process_folder(
                 elif file_extension in ['.wav', '.mp3']:
                     processor = AudioProcessor(config, prompt_config=prompt_config, time_offset_days=time_offset)
                 else:
-                    # Fallback: try DICOM processor for files without extension (common in MIMIC)
+                    # Fallback: try DICOM processor for files without extension
                     test_processor = DICOMProcessor(config, save_intermediate=False, prompt_config=prompt_config, process_all_frames=video_process_all_frames, time_offset_days=time_offset)
                     if test_processor.can_process(input_path):
                         processor = test_processor
