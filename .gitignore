@@ -6,3 +6,5 @@ frontend/node_modules/
 node_modules/
 data/
 __pycache__
+frontend/package-lock.json
+package-lock.json
