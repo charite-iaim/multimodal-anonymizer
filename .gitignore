@@ -1,17 +1,8 @@
 .venv
-.env
-.venv311
 anonymizer/__pycache__/
 anonymizer/processors/__pycache__/
-data/output
-data/output_ocr
-data/primary
 .DS_Store
 frontend/node_modules/
-data/test_input
-data/test_output
 node_modules/
 data/
 __pycache__
-results
-anonymizer/models/face-redaction_epoch17.pth
