@@ -253,6 +253,7 @@ LLM_PROVIDER=openrouter
 OPENROUTER_API_KEY=your-api-key-here
 OPENROUTER_MODEL=anthropic/claude-sonnet-4
 OPENROUTER_VISION_MODEL=anthropic/claude-sonnet-4
+OPENROUTER_BASE_URL=base-url-here
 ```
 
 ## Running the Application
