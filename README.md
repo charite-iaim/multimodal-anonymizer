@@ -284,7 +284,7 @@ Open a **second terminal**:
 
 ```bash
 cd frontend
-npm run
+npm start
 ```
 
 The frontend will be available at `http://localhost:5173`.

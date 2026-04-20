@@ -54,4 +54,4 @@ matplotlib>=3.7.0
 python-multipart>=0.0.6
 
 pydub>=0.25.0
-audioop-lts
+audioop-lts; python_version >= "3.13"

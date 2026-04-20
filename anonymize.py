@@ -238,17 +238,22 @@ def process_file(
     if preserve_structure and relative_path:
         # Preserve exact directory structure
         file_output_dir = output_dir / relative_path.parent
-        file_output_dir.mkdir(parents=True, exist_ok=True)
-        output_path = file_output_dir / anonymized_filename
+    else:
+        # Create separate output folder for this file
+        file_stem = input_path.stem  # filename without extension
+        file_output_dir = output_dir / file_stem
 
-        # Record file mapping for CSV export
-        if anonymize_paths and filename_anonymizer and anonymization_result:
-            filename_anonymizer.add_file_mapping(
-                folder_path=folder_path,
-                original_filename=input_path.name,
-                anonymized_filename=anonymized_filename,
-                phi_detections=anonymization_result.phi_detections
-            )
+    file_output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = file_output_dir / anonymized_filename
+
+    # Record file mapping for CSV export
+    if anonymize_paths and filename_anonymizer and anonymization_result:
+        filename_anonymizer.add_file_mapping(
+            folder_path=folder_path,
+            original_filename=input_path.name,
+            anonymized_filename=anonymized_filename,
+            phi_detections=anonymization_result.phi_detections
+        )
 
     # Skip if output already exists (optional)
     if skip_existing_output and output_path.exists():
@@ -256,21 +261,6 @@ def process_file(
         if tracker:
             tracker.mark_file_processed(input_path, output_path, success=True)
         return None
-    else:
-        # Create separate output folder for this file (original behavior)
-        file_stem = input_path.stem  # filename without extension
-        file_output_dir = output_dir / file_stem
-        file_output_dir.mkdir(parents=True, exist_ok=True)
-        output_path = file_output_dir / anonymized_filename
-
-        # Record file mapping for CSV export
-        if anonymize_paths and filename_anonymizer and anonymization_result:
-            filename_anonymizer.add_file_mapping(
-                folder_path=folder_path,
-                original_filename=input_path.name,
-                anonymized_filename=anonymized_filename,
-                phi_detections=anonymization_result.phi_detections
-            )
 
     try:
         processor.anonymize(input_path, output_path)
