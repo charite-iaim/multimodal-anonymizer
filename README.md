@@ -417,6 +417,4 @@ npm run -- --port 5174
 ```
 
 ## Citation
-
-If you use our tool in your work, please cite us with the following BibTeX entry TODO BibTex Citation
-This repository is part of the paper TODO: paperlink
+TBD
